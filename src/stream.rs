@@ -1,5 +1,6 @@
 use crate::common::*;
 
+/// Collect multiple streams into single stream.
 pub fn par_gather<S>(
     streams: impl IntoIterator<Item = S>,
     buf_size: impl Into<Option<usize>>,
@@ -28,6 +29,11 @@ where
 
 /// An extension trait for [Stream](Stream) that provides parallel combinator functions.
 pub trait ParStreamExt {
+    /// Computes new items from the stream asynchronously in parallel with respect to the input order.
+    ///
+    /// The `limit` is the number of parallel workers.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    /// The method guarantees the order of output items obeys that of input items.
     fn par_then<T, F, Fut>(mut self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
@@ -97,6 +103,11 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Computes new items from the stream asynchronously in parallel without respecting the input order.
+    ///
+    /// The `limit` is the number of parallel workers.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    /// The order of output items is not guaranteed to respect the order of input items.
     fn par_then_unordered<T, F, Fut>(
         mut self,
         limit: impl Into<Option<usize>>,
@@ -146,6 +157,11 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Computes new items in a function in parallel with respect to the input order.
+    ///
+    /// The `limit` is the number of parallel workers.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    /// The method guarantees the order of output items obeys that of input items.
     fn par_map<T, F, Func>(self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
@@ -159,6 +175,11 @@ pub trait ParStreamExt {
         })
     }
 
+    /// Computes new items in a function in parallel without respecting the input order.
+    ///
+    /// The `limit` is the number of parallel workers.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    /// The method guarantees the order of output items obeys that of input items.
     fn par_map_unordered<T, F, Func>(
         self,
         limit: impl Into<Option<usize>>,
@@ -176,6 +197,15 @@ pub trait ParStreamExt {
         })
     }
 
+    /// Reduces the input items into single value in parallel.
+    ///
+    /// The `limit` is the number of parallel workers.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    ///
+    /// The `buf_size` is the size of buffer that stores the temporary reduced values.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    ///
+    /// Unlike [StreamExt::fold], the method may not combine the values sequentially.
     fn par_reduce<F, Fut>(
         mut self,
         limit: impl Into<Option<usize>>,
@@ -280,6 +310,16 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Distributes input items to specific workers and compute new items with respect to the input order.
+    ///
+    ///
+    /// The `buf_size` is the size of input buffer before each mapping function.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    ///
+    /// `routing_fn` assigns input items to specific indexes of mapping functions.
+    /// `routing_fn` is executed on the calling thread.
+    ///
+    /// `map_fns` is a vector of mapping functions, each of which produces an asynchronous closure.
     fn par_routing<F1, F2, Fut, T>(
         mut self,
         buf_size: impl Into<Option<usize>>,
@@ -368,6 +408,16 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Distributes input items to specific workers and compute new items without respecting the input order.
+    ///
+    ///
+    /// The `buf_size` is the size of input buffer before each mapping function.
+    /// If it is `0` or `None`, it defaults the number of cores on system.
+    ///
+    /// `routing_fn` assigns input items to specific indexes of mapping functions.
+    /// `routing_fn` is executed on the calling thread.
+    ///
+    /// `map_fns` is a vector of mapping functions, each of which produces an asynchronous closure.
     fn par_routing_unordered<F1, F2, Fut, T>(
         mut self,
         buf_size: impl Into<Option<usize>>,
@@ -428,6 +478,7 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Gives the current iteration count that may overflow to zero as well as the next value.
     fn overflowing_enumerate<T>(self) -> OverflowingEnumerate<T, Self>
     where
         Self: Stream<Item = T> + Sized + Unpin,
@@ -438,6 +489,11 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Reorder the input items paired with a iteration count.
+    ///
+    /// The type of input item must be a tuple `(usize, T)`.
+    /// It reorders the items according to the first elemnt of tupple.
+    /// It is usually combined with [ParStreamExt::overflowing_enumerate].
     fn reorder_enumerated<T>(self) -> ReorderEnumerated<T, Self>
     where
         Self: Stream<Item = (usize, T)> + Unpin + Sized,
@@ -449,6 +505,7 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Splits the stream into a clonable receiver and a future that scatters input items into the receiver and its clones.
     fn par_scatter(
         mut self,
         buf_size: impl Into<Option<usize>>,
