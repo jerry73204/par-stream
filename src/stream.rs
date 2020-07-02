@@ -428,6 +428,27 @@ pub trait ParStreamExt {
         }
     }
 
+    fn overflowing_enumerate<T>(self) -> OverflowingEnumerate<T, Self>
+    where
+        Self: Stream<Item = T> + Sized + Unpin,
+    {
+        OverflowingEnumerate {
+            stream: self,
+            counter: 0,
+        }
+    }
+
+    fn reorder_enumerated<T>(self) -> ReorderEnumerated<T, Self>
+    where
+        Self: Stream<Item = (usize, T)> + Unpin + Sized,
+    {
+        ReorderEnumerated {
+            stream: self,
+            counter: 0,
+            buffer: HashMap::new(),
+        }
+    }
+
     fn par_scatter(
         mut self,
         buf_size: impl Into<Option<usize>>,
@@ -581,6 +602,101 @@ impl<T> Stream for ParGather<T> {
     }
 }
 
+// overflowing_enumerate
+
+pub struct OverflowingEnumerate<T, S>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    stream: S,
+    counter: usize,
+}
+
+impl<T, S> Stream for OverflowingEnumerate<T, S>
+where
+    S: Stream<Item = T> + Unpin,
+{
+    type Item = (usize, T);
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        match Pin::new(&mut self.stream).poll_next(cx) {
+            Poll::Ready(Some(item)) => {
+                let index = self.counter;
+                self.counter = self.counter.overflowing_add(1).0;
+                Poll::Ready(Some((index, item)))
+            }
+            Poll::Ready(None) => Poll::Ready(None),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+// reorder_enumerated
+
+pub struct ReorderEnumerated<T, S>
+where
+    S: Stream<Item = (usize, T)> + Unpin,
+{
+    stream: S,
+    counter: usize,
+    buffer: HashMap<usize, T>,
+}
+
+impl<T, S> Stream for ReorderEnumerated<T, S>
+where
+    S: Stream<Item = (usize, T)> + Unpin,
+    T: Unpin,
+{
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let Self {
+            stream,
+            counter,
+            buffer,
+        } = &mut *self;
+
+        let buffered_item_opt = buffer.remove(counter);
+        if let Some(_) = buffered_item_opt {
+            *counter = counter.overflowing_add(1).0;
+        }
+
+        match (Pin::new(stream).poll_next(cx), buffered_item_opt) {
+            (Poll::Ready(Some((index, item))), Some(buffered_item)) => {
+                assert!(
+                    *counter <= index,
+                    "the enumerated index {} appears more than once",
+                    index
+                );
+                buffer.insert(index, item);
+                Poll::Ready(Some(buffered_item))
+            }
+            (Poll::Ready(Some((index, item))), None) => match (*counter).cmp(&index) {
+                Ordering::Less => {
+                    buffer.insert(index, item);
+                    Poll::Pending
+                }
+                Ordering::Equal => {
+                    *counter = counter.overflowing_add(1).0;
+                    Poll::Ready(Some(item))
+                }
+                Ordering::Greater => {
+                    panic!("the enumerated index {} appears more than once", index)
+                }
+            },
+            (_, Some(buffered_item)) => Poll::Ready(Some(buffered_item)),
+            (Poll::Ready(None), None) => {
+                if buffer.is_empty() {
+                    Poll::Ready(None)
+                } else {
+                    Poll::Pending
+                }
+            }
+            (Poll::Pending, None) => Poll::Pending,
+        }
+    }
+}
+
 // tests
 
 mod tests {
@@ -632,4 +748,29 @@ mod tests {
             .await;
         assert_eq!(sum, (1 + max) * max / 2);
     }
+
+    #[async_std::test]
+    async fn enumerate_reorder_test() {
+        let max = 1000u64;
+        let iterator = (0..max).rev().step_by(2);
+
+        let lhs = futures::stream::iter(iterator.clone())
+            .overflowing_enumerate()
+            .par_then_unordered(None, |(index, value)| {
+                async move {
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 100)).await;
+                    (index, value)
+                }
+            })
+            .reorder_enumerated();
+        let rhs = futures::stream::iter(iterator.clone());
+
+        let is_equal =
+            async_std::stream::StreamExt::all(&mut lhs.zip(rhs), |(lhs_value, rhs_value)| {
+                lhs_value == rhs_value
+            })
+            .await;
+        assert!(is_equal);
+    }
+
 }
