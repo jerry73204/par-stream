@@ -1,5 +1,32 @@
 use crate::common::*;
 
+pub fn par_gather<S>(
+    streams: impl IntoIterator<Item = S>,
+    buf_size: impl Into<Option<usize>>,
+) -> ParGather<S::Item>
+where
+    S: 'static + StreamExt + Unpin,
+{
+    let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+    let (output_tx, output_rx) = async_std::sync::channel(buf_size);
+
+    let futs = streams.into_iter().map(|mut stream| {
+        let output_tx = output_tx.clone();
+        async move {
+            while let Some(item) = stream.next().await {
+                output_tx.send(item).await;
+            }
+        }
+    });
+    let gather_fut = futures::future::join_all(futs);
+
+    ParGather {
+        fut: Some(Box::pin(gather_fut)),
+        output_rx,
+    }
+}
+
+/// An extension trait for [Stream](Stream) that provides parallel combinator functions.
 pub trait ParStreamExt {
     fn par_then<T, F, Fut>(mut self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
     where
@@ -400,6 +427,28 @@ pub trait ParStreamExt {
             output_rx,
         }
     }
+
+    fn par_scatter(
+        mut self,
+        buf_size: impl Into<Option<usize>>,
+    ) -> (
+        Box<dyn Future<Output = ()>>,
+        async_std::sync::Receiver<Self::Item>,
+    )
+    where
+        Self: 'static + StreamExt + Sized + Unpin,
+    {
+        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+        let (tx, rx) = async_std::sync::channel(buf_size);
+
+        let scatter_fut = Box::new(async move {
+            while let Some(item) = self.next().await {
+                tx.send(item).await;
+            }
+        });
+
+        (scatter_fut, rx)
+    }
 }
 
 impl<S> ParStreamExt for S where S: Stream {}
@@ -498,6 +547,27 @@ pub struct ParRoutingUnordered<T> {
 }
 
 impl<T> Stream for ParRoutingUnordered<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        if let Some(fut) = self.fut.as_mut() {
+            match Pin::new(fut).poll(cx) {
+                Poll::Pending => (),
+                Poll::Ready(_) => self.fut = None,
+            }
+        }
+        Pin::new(&mut self.output_rx).poll_next(cx)
+    }
+}
+
+// par_gather
+
+pub struct ParGather<T> {
+    fut: Option<Pin<Box<dyn Future<Output = Vec<()>>>>>,
+    output_rx: async_std::sync::Receiver<T>,
+}
+
+impl<T> Stream for ParGather<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
