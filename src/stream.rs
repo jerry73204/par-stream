@@ -510,7 +510,7 @@ pub trait ParStreamExt {
         mut self,
         buf_size: impl Into<Option<usize>>,
     ) -> (
-        Box<dyn Future<Output = ()>>,
+        Pin<Box<dyn Future<Output = ()>>>,
         async_std::sync::Receiver<Self::Item>,
     )
     where
@@ -519,7 +519,7 @@ pub trait ParStreamExt {
         let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
         let (tx, rx) = async_std::sync::channel(buf_size);
 
-        let scatter_fut = Box::new(async move {
+        let scatter_fut = Box::pin(async move {
             while let Some(item) = self.next().await {
                 tx.send(item).await;
             }
