@@ -542,13 +542,25 @@ impl<T> Stream for ParMap<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+        should_wake |= !self.output_rx.is_empty();
+
+        if should_wake {
+            cx.waker().wake_by_ref();
         }
-        Pin::new(&mut self.output_rx).poll_next(cx)
+
+        poll
     }
 }
 
@@ -563,13 +575,25 @@ impl<T> Stream for ParMapUnordered<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+        should_wake |= !self.output_rx.is_empty();
+
+        if should_wake {
+            cx.waker().wake_by_ref();
         }
-        Pin::new(&mut self.output_rx).poll_next(cx)
+
+        poll
     }
 }
 
@@ -584,15 +608,30 @@ impl<T> Future for ParReduce<T> {
     type Output = T;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
-        }
-        Pin::new(&mut self.output_rx)
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx)
             .poll(cx)
-            .map(|result| result.unwrap())
+            .map(|result| result.unwrap());
+
+        if let Poll::Pending = poll {
+            should_wake |= true;
+        }
+
+        if should_wake {
+            cx.waker().wake_by_ref();
+        }
+
+        poll
     }
 }
 
@@ -607,13 +646,25 @@ impl<T> Stream for ParRouting<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+        should_wake |= !self.output_rx.is_empty();
+
+        if should_wake {
+            cx.waker().wake_by_ref();
         }
-        Pin::new(&mut self.output_rx).poll_next(cx)
+
+        poll
     }
 }
 
@@ -628,13 +679,25 @@ impl<T> Stream for ParRoutingUnordered<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+        should_wake |= !self.output_rx.is_empty();
+
+        if should_wake {
+            cx.waker().wake_by_ref();
         }
-        Pin::new(&mut self.output_rx).poll_next(cx)
+
+        poll
     }
 }
 
@@ -649,13 +712,25 @@ impl<T> Stream for ParGather<T> {
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        if let Some(fut) = self.fut.as_mut() {
-            match Pin::new(fut).poll(cx) {
-                Poll::Pending => (),
-                Poll::Ready(_) => self.fut = None,
-            }
+        let mut should_wake = match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => true,
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    false
+                }
+            },
+            None => false,
+        };
+
+        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+        should_wake |= !self.output_rx.is_empty();
+
+        if should_wake {
+            cx.waker().wake_by_ref();
         }
-        Pin::new(&mut self.output_rx).poll_next(cx)
+
+        poll
     }
 }
 
