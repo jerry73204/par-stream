@@ -32,7 +32,8 @@ pub fn par_gather<S>(
     buf_size: impl Into<Option<usize>>,
 ) -> ParGather<S::Item>
 where
-    S: 'static + StreamExt + Unpin,
+    S: 'static + StreamExt + Unpin + Send,
+    S::Item: Send,
 {
     let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
     let (output_tx, output_rx) = async_std::sync::channel(buf_size);
@@ -383,9 +384,9 @@ pub trait ParStreamExt {
         mut f: F,
     ) -> ParReduce<Self::Item>
     where
-        F: 'static + FnMut(Self::Item, Self::Item) -> Fut,
+        F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = Self::Item> + Send,
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
     {
         let limit = match limit.into() {
@@ -498,7 +499,9 @@ pub trait ParStreamExt {
     ///
     /// #[async_std::main]
     /// async fn main() {
-    ///     let map_fns: Vec<Box<dyn FnMut(usize) -> Pin<Box<dyn Future<Output = usize> + Send>>>> = vec![
+    ///     let map_fns: Vec<
+    ///         Box<dyn FnMut(usize) -> Pin<Box<dyn Future<Output = usize> + Send>> + Send>,
+    ///     > = vec![
     ///         // even number processor
     ///         Box::new(|even_value| Box::pin(async move { even_value / 2 })),
     ///         // odd number processor
@@ -541,9 +544,10 @@ pub trait ParStreamExt {
         mut map_fns: Vec<F2>,
     ) -> ParRouting<T>
     where
-        Self: 'static + StreamExt + Sized + Unpin,
-        F1: 'static + FnMut(&Self::Item) -> usize,
-        F2: 'static + FnMut(Self::Item) -> Fut,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
+        F1: 'static + FnMut(&Self::Item) -> usize + Send,
+        F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         T: 'static + Send,
     {
@@ -639,11 +643,12 @@ pub trait ParStreamExt {
         mut map_fns: Vec<F2>,
     ) -> ParRoutingUnordered<T>
     where
-        Self: 'static + StreamExt + Sized + Unpin,
-        F1: 'static + FnMut(&Self::Item) -> usize,
-        F2: 'static + FnMut(Self::Item) -> Fut,
+        F1: 'static + FnMut(&Self::Item) -> usize + Send,
+        F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         T: 'static + Send,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         let buf_size = match buf_size.into() {
             None | Some(0) => num_cpus::get(),
@@ -889,7 +894,7 @@ impl<T> Stream for ParMapUnordered<T> {
 // par_reduce
 
 pub struct ParReduce<T> {
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
     output_rx: futures::channel::oneshot::Receiver<T>,
 }
 
@@ -927,7 +932,7 @@ impl<T> Future for ParReduce<T> {
 // par_routing
 
 pub struct ParRouting<T> {
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -960,7 +965,7 @@ impl<T> Stream for ParRouting<T> {
 // par_routing_unordered
 
 pub struct ParRoutingUnordered<T> {
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -992,12 +997,18 @@ impl<T> Stream for ParRoutingUnordered<T> {
 
 // par_gather
 
-pub struct ParGather<T> {
-    fut: Option<Pin<Box<dyn Future<Output = Vec<()>>>>>,
+pub struct ParGather<T>
+where
+    T: Send,
+{
+    fut: Option<Pin<Box<dyn Future<Output = Vec<()>> + Send>>>,
     output_rx: async_std::sync::Receiver<T>,
 }
 
-impl<T> Stream for ParGather<T> {
+impl<T> Stream for ParGather<T>
+where
+    T: Send,
+{
     type Item = T;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -1129,7 +1140,7 @@ mod tests {
         futures::stream::iter((0..max).into_iter())
             .par_then(None, |value| {
                 async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 50)).await;
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
                     value
                 }
             })
@@ -1148,7 +1159,7 @@ mod tests {
         let mut values = futures::stream::iter((0..max).into_iter())
             .par_then_unordered(None, |value| {
                 async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 100)).await;
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
                     value
                 }
             })
@@ -1179,7 +1190,7 @@ mod tests {
             .overflowing_enumerate()
             .par_then_unordered(None, |(index, value)| {
                 async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 100)).await;
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
                     (index, value)
                 }
             })
