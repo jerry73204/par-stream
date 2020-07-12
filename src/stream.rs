@@ -92,9 +92,10 @@ pub trait ParStreamExt {
     fn par_then<T, F, Fut>(mut self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         let limit = match limit.into() {
             None | Some(0) => num_cpus::get(),
@@ -200,9 +201,10 @@ pub trait ParStreamExt {
     ) -> ParMapUnordered<T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         let limit = match limit.into() {
             None | Some(0) => num_cpus::get(),
@@ -280,9 +282,10 @@ pub trait ParStreamExt {
     fn par_map<T, F, Func>(self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Func,
+        F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         self.par_then(limit, move |item| {
             let func = f(item);
@@ -333,9 +336,10 @@ pub trait ParStreamExt {
     ) -> ParMapUnordered<T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Func,
+        F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         self.par_then_unordered(limit, move |item| {
             let func = f(item);
@@ -819,7 +823,7 @@ impl<S> ParStreamExt for S where S: Stream {}
 // par_map
 
 pub struct ParMap<T> {
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -852,7 +856,7 @@ impl<T> Stream for ParMap<T> {
 // par_map_unordered
 
 pub struct ParMapUnordered<T> {
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)>>>>,
+    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
     output_rx: async_std::sync::Receiver<T>,
 }
 
