@@ -1,5 +1,5 @@
 pub use async_std::task::JoinHandle;
-pub use futures::stream::{Stream, StreamExt, TryStream, TryStreamExt};
+pub use futures::stream::{FusedStream, Stream, StreamExt, TryStream, TryStreamExt};
 pub use std::{
     cmp::Ordering,
     collections::HashMap,

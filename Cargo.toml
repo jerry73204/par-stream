@@ -9,3 +9,6 @@ futures = "0.3"
 num_cpus = "1.13"
 async-std = { version = "1.6", features = ["unstable", "attributes"] }
 tokio = { version = "0.2", features = ["sync", "macros"] }
+
+[dev-dependencies]
+rand = "0.7"
