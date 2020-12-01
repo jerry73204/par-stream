@@ -39,7 +39,7 @@ pub trait TryParStreamExt {
                             reorder_tx.send((counter, Err(err))).await;
                         }
                     }
-                    counter = counter.overflowing_add(1).0;
+                    counter = counter.wrapping_add(1);
                 }
             }
         };
@@ -55,11 +55,11 @@ pub trait TryParStreamExt {
                 }
 
                 output_tx.send(output).await;
-                counter = counter.overflowing_add(1).0;
+                counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
                     output_tx.send(output).await;
-                    counter = counter.overflowing_add(1).0;
+                    counter = counter.wrapping_add(1);
                 }
             }
         };
@@ -151,11 +151,11 @@ pub trait TryParStreamExt {
         }
     }
 
-    fn try_overflowing_enumerate<T, E>(self) -> TryOverflowingEnumerate<T, E, Self>
+    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<T, E, Self>
     where
         Self: Stream<Item = Result<T, E>> + Sized + Unpin + Send,
     {
-        TryOverflowingEnumerate {
+        TryWrappingEnumerate {
             stream: self,
             counter: 0,
             fused: false,
@@ -243,9 +243,9 @@ impl<T, E> Stream for TryParMapUnordered<T, E> {
     }
 }
 
-// try_overflowing_enumerate
+// try_wrapping_enumerate
 
-pub struct TryOverflowingEnumerate<T, E, S>
+pub struct TryWrappingEnumerate<T, E, S>
 where
     S: Stream<Item = Result<T, E>> + Send,
 {
@@ -254,7 +254,7 @@ where
     fused: bool,
 }
 
-impl<T, E, S> Stream for TryOverflowingEnumerate<T, E, S>
+impl<T, E, S> Stream for TryWrappingEnumerate<T, E, S>
 where
     S: Stream<Item = Result<T, E>> + Unpin + Send,
 {
@@ -268,7 +268,7 @@ where
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(Ok(item))) => {
                 let index = self.counter;
-                self.counter = self.counter.overflowing_add(1).0;
+                self.counter = self.counter.wrapping_add(1);
                 Poll::Ready(Some(Ok((index, item))))
             }
             Poll::Ready(Some(Err(err))) => {
@@ -281,7 +281,7 @@ where
     }
 }
 
-impl<T, E, S> FusedStream for TryOverflowingEnumerate<T, E, S>
+impl<T, E, S> FusedStream for TryWrappingEnumerate<T, E, S>
 where
     S: Stream<Item = Result<T, E>> + Unpin + Send,
 {
@@ -292,10 +292,12 @@ where
 
 // reorder_enumerated
 
+#[pin_project(project = TryReorderEnumeratedProj)]
 pub struct TryReorderEnumerated<T, E, S>
 where
     S: Stream<Item = Result<(usize, T), E>> + Send,
 {
+    #[pin]
     stream: S,
     counter: usize,
     fused: bool,
@@ -305,17 +307,16 @@ where
 impl<T, E, S> Stream for TryReorderEnumerated<T, E, S>
 where
     S: Stream<Item = Result<(usize, T), E>> + Unpin + Send,
-    T: Unpin,
 {
     type Item = Result<T, E>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let Self {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let TryReorderEnumeratedProj {
             stream,
             counter,
             fused,
             buffer,
-        } = &mut *self;
+        } = self.project();
 
         if *fused {
             return Poll::Ready(None);
@@ -325,10 +326,10 @@ where
         let buffered_item_opt = buffer.remove(counter);
 
         if let Some(_) = buffered_item_opt {
-            *counter = counter.overflowing_add(1).0;
+            *counter = counter.wrapping_add(1);
         }
 
-        match (Pin::new(stream).poll_next(cx), buffered_item_opt) {
+        match (stream.poll_next(cx), buffered_item_opt) {
             (Poll::Ready(Some(Ok((index, item)))), Some(buffered_item)) => {
                 assert!(
                     *counter <= index,
@@ -345,7 +346,7 @@ where
                     Poll::Pending
                 }
                 Ordering::Equal => {
-                    *counter = counter.overflowing_add(1).0;
+                    *counter = counter.wrapping_add(1);
                     Poll::Ready(Some(Ok(item)))
                 }
                 Ordering::Greater => {
@@ -417,7 +418,7 @@ mod tests {
                         Ok(value)
                     }
                 })
-                .try_overflowing_enumerate()
+                .try_wrapping_enumerate()
                 .try_par_then_unordered(None, |(index, value)| async move {
                     async_std::task::sleep(std::time::Duration::from_millis(value as u64 % 20))
                         .await;
