@@ -20,8 +20,8 @@ use crate::common::*;
 ///     async move {
 ///         println!("a parallel task");
 ///     }
-///         .spawned()
-///         .await;
+///     .spawned()
+///     .await;
 /// }
 /// ```
 pub trait ParFuture {

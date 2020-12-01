@@ -418,12 +418,10 @@ mod tests {
                     }
                 })
                 .try_overflowing_enumerate()
-                .try_par_then_unordered(None, |(index, value)| {
-                    async move {
-                        async_std::task::sleep(std::time::Duration::from_millis(value as u64 % 20))
-                            .await;
-                        Ok((index, value))
-                    }
+                .try_par_then_unordered(None, |(index, value)| async move {
+                    async_std::task::sleep(std::time::Duration::from_millis(value as u64 % 20))
+                        .await;
+                    Ok((index, value))
                 })
                 .try_reorder_enumerated()
                 .collect::<Vec<_>>()
@@ -453,5 +451,4 @@ mod tests {
             assert!(is_fused_at_error);
         }
     }
-
 }

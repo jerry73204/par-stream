@@ -1164,17 +1164,13 @@ mod tests {
     async fn par_then_output_is_ordered_test() {
         let max = 1000u64;
         futures::stream::iter((0..max).into_iter())
-            .par_then(None, |value| {
-                async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
-                    value
-                }
+            .par_then(None, |value| async move {
+                async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
+                value
             })
-            .fold(0u64, |expect, found| {
-                async move {
-                    assert_eq!(expect, found);
-                    expect + 1
-                }
+            .fold(0u64, |expect, found| async move {
+                assert_eq!(expect, found);
+                expect + 1
             })
             .await;
     }
@@ -1183,11 +1179,9 @@ mod tests {
     async fn par_then_unordered_test() {
         let max = 1000u64;
         let mut values = futures::stream::iter((0..max).into_iter())
-            .par_then_unordered(None, |value| {
-                async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
-                    value
-                }
+            .par_then_unordered(None, |value| async move {
+                async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
+                value
             })
             .collect::<Vec<_>>()
             .await;
@@ -1214,11 +1208,9 @@ mod tests {
 
         let lhs = futures::stream::iter(iterator.clone())
             .overflowing_enumerate()
-            .par_then_unordered(None, |(index, value)| {
-                async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
-                    (index, value)
-                }
+            .par_then_unordered(None, |(index, value)| async move {
+                async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
+                (index, value)
             })
             .reorder_enumerated();
         let rhs = futures::stream::iter(iterator.clone());
@@ -1230,5 +1222,4 @@ mod tests {
             .await;
         assert!(is_equal);
     }
-
 }
