@@ -827,8 +827,12 @@ impl<S> ParStreamExt for S where S: Stream {}
 
 // par_map
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParMap<T> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -860,8 +864,12 @@ impl<T> Stream for ParMap<T> {
 
 // par_map_unordered
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParMapUnordered<T> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -893,8 +901,12 @@ impl<T> Stream for ParMapUnordered<T> {
 
 // par_reduce
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParReduce<T> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: futures::channel::oneshot::Receiver<T>,
 }
 
@@ -931,8 +943,12 @@ impl<T> Future for ParReduce<T> {
 
 // par_routing
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParRouting<T> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -964,8 +980,12 @@ impl<T> Stream for ParRouting<T> {
 
 // par_routing_unordered
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParRoutingUnordered<T> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -997,11 +1017,15 @@ impl<T> Stream for ParRoutingUnordered<T> {
 
 // par_gather
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ParGather<T>
 where
     T: Send,
 {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = Vec<()>> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
 }
 
@@ -1036,6 +1060,7 @@ where
 
 // overflowing_enumerate
 
+#[derive(Debug)]
 pub struct OverflowingEnumerate<T, S>
 where
     S: Stream<Item = T> + Unpin,
@@ -1065,6 +1090,7 @@ where
 
 // reorder_enumerated
 
+#[derive(Debug)]
 pub struct ReorderEnumerated<T, S>
 where
     S: Stream<Item = (usize, T)> + Unpin,
