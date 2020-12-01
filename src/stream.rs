@@ -590,7 +590,7 @@ pub trait ParStreamExt {
                 let fut = map_fn(item);
                 map_tx.send((counter, fut)).await;
 
-                counter = counter.overflowing_add(1).0;
+                counter = counter.wrapping_add(1);
             }
         };
 
@@ -605,11 +605,11 @@ pub trait ParStreamExt {
                 }
 
                 output_tx.send(output).await;
-                counter = counter.overflowing_add(1).0;
+                counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
                     output_tx.send(output).await;
-                    counter = counter.overflowing_add(1).0;
+                    counter = counter.wrapping_add(1);
                 }
             }
         };
@@ -698,11 +698,11 @@ pub trait ParStreamExt {
     }
 
     /// Gives the current iteration count that may overflow to zero as well as the next value.
-    fn overflowing_enumerate<T>(self) -> OverflowingEnumerate<T, Self>
+    fn wrapping_enumerate<T>(self) -> WrappingEnumerate<T, Self>
     where
         Self: Stream<Item = T> + Sized + Unpin,
     {
-        OverflowingEnumerate {
+        WrappingEnumerate {
             stream: self,
             counter: 0,
         }
@@ -713,7 +713,7 @@ pub trait ParStreamExt {
     /// The combinator asserts the input item has tuple type `(usize, T)`.
     /// It reorders the items according to the first value of input tuple.
     ///
-    /// It is usually combined with [ParStreamExt::overflowing_enumerate], then
+    /// It is usually combined with [ParStreamExt::wrapping_enumerate], then
     /// applies a series of unordered parallel mapping, and finally reorders the values
     /// back by this method. It avoids reordering the values after each parallel mapping step.
     ///
@@ -725,7 +725,7 @@ pub trait ParStreamExt {
     /// async fn main() {
     ///     let doubled = futures::stream::iter(0..1000)
     ///         // add enumerated index that does not panic on overflow
-    ///         .overflowing_enumerate()
+    ///         .wrapping_enumerate()
     ///         // double the values in parallel
     ///         .par_then_unordered(None, move |(index, value)| {
     ///             // the closure is sent to parallel worker
@@ -1058,10 +1058,10 @@ where
     }
 }
 
-// overflowing_enumerate
+// wrapping_enumerate
 
 #[derive(Debug)]
-pub struct OverflowingEnumerate<T, S>
+pub struct WrappingEnumerate<T, S>
 where
     S: Stream<Item = T> + Unpin,
 {
@@ -1069,7 +1069,7 @@ where
     counter: usize,
 }
 
-impl<T, S> Stream for OverflowingEnumerate<T, S>
+impl<T, S> Stream for WrappingEnumerate<T, S>
 where
     S: Stream<Item = T> + Unpin,
 {
@@ -1079,7 +1079,7 @@ where
         match Pin::new(&mut self.stream).poll_next(cx) {
             Poll::Ready(Some(item)) => {
                 let index = self.counter;
-                self.counter = self.counter.overflowing_add(1).0;
+                self.counter = self.counter.wrapping_add(1);
                 Poll::Ready(Some((index, item)))
             }
             Poll::Ready(None) => Poll::Ready(None),
@@ -1116,7 +1116,7 @@ where
 
         let buffered_item_opt = buffer.remove(counter);
         if let Some(_) = buffered_item_opt {
-            *counter = counter.overflowing_add(1).0;
+            *counter = counter.wrapping_add(1);
         }
 
         match (Pin::new(stream).poll_next(cx), buffered_item_opt) {
@@ -1135,7 +1135,7 @@ where
                     Poll::Pending
                 }
                 Ordering::Equal => {
-                    *counter = counter.overflowing_add(1).0;
+                    *counter = counter.wrapping_add(1);
                     Poll::Ready(Some(item))
                 }
                 Ordering::Greater => {
@@ -1207,7 +1207,7 @@ mod tests {
         let iterator = (0..max).rev().step_by(2);
 
         let lhs = futures::stream::iter(iterator.clone())
-            .overflowing_enumerate()
+            .wrapping_enumerate()
             .par_then_unordered(None, |(index, value)| async move {
                 async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
                 (index, value)
