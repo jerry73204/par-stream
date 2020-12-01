@@ -111,7 +111,7 @@ pub trait ParStreamExt {
             while let Some(item) = self.next().await {
                 let fut = f(item);
                 map_tx.send((counter, fut)).await;
-                counter = counter.overflowing_add(1).0;
+                counter = counter.wrapping_add(1);
             }
         };
 
@@ -126,11 +126,11 @@ pub trait ParStreamExt {
                 }
 
                 output_tx.send(output).await;
-                counter = counter.overflowing_add(1).0;
+                counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
                     output_tx.send(output).await;
-                    counter = counter.overflowing_add(1).0;
+                    counter = counter.wrapping_add(1);
                 }
             }
         };
@@ -1060,11 +1060,13 @@ where
 
 // wrapping_enumerate
 
+#[pin_project(project = WrappingEnumerateProj)]
 #[derive(Debug)]
 pub struct WrappingEnumerate<T, S>
 where
     S: Stream<Item = T> + Unpin,
 {
+    #[pin]
     stream: S,
     counter: usize,
 }
@@ -1075,11 +1077,13 @@ where
 {
     type Item = (usize, T);
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        match Pin::new(&mut self.stream).poll_next(cx) {
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let WrappingEnumerateProj { stream, counter } = self.project();
+
+        match stream.poll_next(cx) {
             Poll::Ready(Some(item)) => {
-                let index = self.counter;
-                self.counter = self.counter.wrapping_add(1);
+                let index = *counter;
+                *counter = counter.wrapping_add(1);
                 Poll::Ready(Some((index, item)))
             }
             Poll::Ready(None) => Poll::Ready(None),
@@ -1090,11 +1094,14 @@ where
 
 // reorder_enumerated
 
-#[derive(Debug)]
+#[pin_project]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct ReorderEnumerated<T, S>
 where
     S: Stream<Item = (usize, T)> + Unpin,
 {
+    #[pin]
     stream: S,
     counter: usize,
     buffer: HashMap<usize, T>,
@@ -1107,19 +1114,18 @@ where
 {
     type Item = T;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let Self {
-            stream,
-            counter,
-            buffer,
-        } = &mut *self;
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+        let stream = this.stream;
+        let counter = this.counter;
+        let buffer = this.buffer;
 
         let buffered_item_opt = buffer.remove(counter);
         if let Some(_) = buffered_item_opt {
             *counter = counter.wrapping_add(1);
         }
 
-        match (Pin::new(stream).poll_next(cx), buffered_item_opt) {
+        match (stream.poll_next(cx), buffered_item_opt) {
             (Poll::Ready(Some((index, item))), Some(buffered_item)) => {
                 assert!(
                     *counter <= index,
