@@ -1,6 +1,9 @@
 //! futures-compatible parallel stream extension.
 
-use crate::common::*;
+use crate::{
+    common::*,
+    config::{IntoParStreamConfig, ParStreamParams},
+};
 
 /// Collect multiple streams into single stream.
 ///
@@ -90,7 +93,7 @@ pub trait ParStreamExt {
     ///     assert_eq!(doubled, expect);
     /// }
     /// ```
-    fn par_then<T, F, Fut>(mut self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
+    fn par_then<T, F, Fut>(self, config: impl IntoParStreamConfig, f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -98,66 +101,7 @@ pub trait ParStreamExt {
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
     {
-        let limit = match limit.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(num) => num,
-        };
-        let (map_tx, map_rx) = async_std::sync::channel(limit);
-        let (reorder_tx, reorder_rx) = async_std::sync::channel(limit);
-        let (output_tx, output_rx) = async_std::sync::channel(limit);
-
-        let map_fut = async move {
-            let mut counter = 0u64;
-            while let Some(item) = self.next().await {
-                let fut = f(item);
-                map_tx.send((counter, fut)).await;
-                counter = counter.wrapping_add(1);
-            }
-        };
-
-        let reorder_fut = async move {
-            let mut counter = 0u64;
-            let mut pool = HashMap::new();
-
-            while let Ok((index, output)) = reorder_rx.recv().await {
-                if index != counter {
-                    pool.insert(index, output);
-                    continue;
-                }
-
-                output_tx.send(output).await;
-                counter = counter.wrapping_add(1);
-
-                while let Some(output) = pool.remove(&counter) {
-                    output_tx.send(output).await;
-                    counter = counter.wrapping_add(1);
-                }
-            }
-        };
-
-        let worker_futs = (0..limit)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let reorder_tx = reorder_tx.clone();
-
-                let worker_fut = async move {
-                    while let Ok((index, fut)) = map_rx.recv().await {
-                        let output = fut.await;
-                        reorder_tx.send((index, output)).await;
-                    }
-                };
-                let worker_fut = async_std::task::spawn(worker_fut);
-                worker_fut
-            })
-            .collect::<Vec<_>>();
-
-        let par_then_fut =
-            futures::future::join3(map_fut, reorder_fut, futures::future::join_all(worker_futs));
-
-        ParMap {
-            fut: Some(Box::pin(par_then_fut)),
-            output_rx,
-        }
+        ParMap::new(self, config, f)
     }
 
     /// Computes new items from the stream asynchronously in parallel without respecting the input order.
@@ -196,9 +140,9 @@ pub trait ParStreamExt {
     /// }
     /// ```
     fn par_then_unordered<T, F, Fut>(
-        mut self,
-        limit: impl Into<Option<usize>>,
-        mut f: F,
+        self,
+        config: impl IntoParStreamConfig,
+        f: F,
     ) -> ParMapUnordered<T>
     where
         T: 'static + Send,
@@ -207,42 +151,7 @@ pub trait ParStreamExt {
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
     {
-        let limit = match limit.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(num) => num,
-        };
-        let (map_tx, map_rx) = async_std::sync::channel(limit);
-        let (output_tx, output_rx) = async_std::sync::channel(limit);
-
-        let map_fut = async move {
-            while let Some(item) = self.next().await {
-                let fut = f(item);
-                map_tx.send(fut).await;
-            }
-        };
-
-        let worker_futs = (0..limit)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let output_tx = output_tx.clone();
-
-                let worker_fut = async move {
-                    while let Ok(fut) = map_rx.recv().await {
-                        let output = fut.await;
-                        output_tx.send(output).await;
-                    }
-                };
-                let worker_fut = async_std::task::spawn(worker_fut);
-                worker_fut
-            })
-            .collect::<Vec<_>>();
-
-        let par_then_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
-
-        ParMapUnordered {
-            fut: Some(Box::pin(par_then_fut)),
-            output_rx,
-        }
+        ParMapUnordered::new(self, config, f)
     }
 
     /// Computes new items in a function in parallel with respect to the input order.
@@ -280,7 +189,7 @@ pub trait ParStreamExt {
     ///     assert_eq!(doubled, expect);
     /// }
     /// ```
-    fn par_map<T, F, Func>(self, limit: impl Into<Option<usize>>, mut f: F) -> ParMap<T>
+    fn par_map<T, F, Func>(self, limit: impl IntoParStreamConfig, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -332,7 +241,7 @@ pub trait ParStreamExt {
     /// ```
     fn par_map_unordered<T, F, Func>(
         self,
-        limit: impl Into<Option<usize>>,
+        config: impl IntoParStreamConfig,
         mut f: F,
     ) -> ParMapUnordered<T>
     where
@@ -342,7 +251,7 @@ pub trait ParStreamExt {
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
     {
-        self.par_then_unordered(limit, move |item| {
+        self.par_then_unordered(config, move |item| {
             let func = f(item);
             async_std::task::spawn_blocking(func)
         })
@@ -836,6 +745,81 @@ pub struct ParMap<T> {
     output_rx: async_std::sync::Receiver<T>,
 }
 
+impl<T> ParMap<T> {
+    fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamConfig, mut f: F) -> Self
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(S::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = T> + Send,
+        S: 'static + StreamExt + Sized + Unpin + Send,
+        S::Item: Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+        let (reorder_tx, reorder_rx) = async_std::sync::channel(buf_size);
+        let (output_tx, output_rx) = async_std::sync::channel(buf_size);
+
+        let counter_fut = async move {
+            let mut counter = 0u64;
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                map_tx.send((counter, fut)).await;
+                counter = counter.wrapping_add(1);
+            }
+        };
+
+        let reorder_fut = async move {
+            let mut counter = 0u64;
+            let mut pool = HashMap::new();
+
+            while let Ok((index, output)) = reorder_rx.recv().await {
+                if index != counter {
+                    pool.insert(index, output);
+                    continue;
+                }
+
+                output_tx.send(output).await;
+                counter = counter.wrapping_add(1);
+
+                while let Some(output) = pool.remove(&counter) {
+                    output_tx.send(output).await;
+                    counter = counter.wrapping_add(1);
+                }
+            }
+        };
+
+        let worker_futs = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+                let reorder_tx = reorder_tx.clone();
+
+                let worker_fut = async move {
+                    while let Ok((index, fut)) = map_rx.recv().await {
+                        let output = fut.await;
+                        reorder_tx.send((index, output)).await;
+                    }
+                };
+                let worker_fut = async_std::task::spawn(worker_fut);
+                worker_fut
+            })
+            .collect::<Vec<_>>();
+
+        let par_then_fut = futures::future::join3(
+            counter_fut,
+            reorder_fut,
+            futures::future::join_all(worker_futs),
+        );
+
+        Self {
+            fut: Some(Box::pin(par_then_fut)),
+            output_rx,
+        }
+    }
+}
+
 impl<T> Stream for ParMap<T> {
     type Item = T;
 
@@ -871,6 +855,54 @@ pub struct ParMapUnordered<T> {
     fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<T>,
+}
+
+impl<T> ParMapUnordered<T> {
+    fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamConfig, mut f: F) -> Self
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(S::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = T> + Send,
+        S: 'static + StreamExt + Sized + Unpin + Send,
+        S::Item: Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+        let (output_tx, output_rx) = async_std::sync::channel(buf_size);
+
+        let map_fut = async move {
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                map_tx.send(fut).await;
+            }
+        };
+
+        let worker_futs = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+                let output_tx = output_tx.clone();
+
+                let worker_fut = async move {
+                    while let Ok(fut) = map_rx.recv().await {
+                        let output = fut.await;
+                        output_tx.send(output).await;
+                    }
+                };
+                let worker_fut = async_std::task::spawn(worker_fut);
+                worker_fut
+            })
+            .collect::<Vec<_>>();
+
+        let par_then_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
+
+        Self {
+            fut: Some(Box::pin(par_then_fut)),
+            output_rx,
+        }
+    }
 }
 
 impl<T> Stream for ParMapUnordered<T> {
@@ -1163,6 +1195,7 @@ where
 
 // tests
 
+#[cfg(test)]
 mod tests {
     use super::*;
 
