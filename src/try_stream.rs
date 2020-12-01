@@ -1,10 +1,13 @@
-use crate::common::*;
+use crate::{
+    common::*,
+    config::{IntoParStreamConfig, ParStreamParams},
+};
 
 /// An extension trait for [TryStream](TryStream) that provides parallel combinator functions.
 pub trait TryParStreamExt {
     fn try_par_then<T, F, Fut>(
         mut self,
-        limit: impl Into<Option<usize>>,
+        config: impl IntoParStreamConfig,
         mut f: F,
     ) -> TryParMap<T, Self::Error>
     where
@@ -15,13 +18,13 @@ pub trait TryParStreamExt {
         Self::Ok: Send,
         Self::Error: Send,
     {
-        let limit = match limit.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(num) => num,
-        };
-        let (map_tx, map_rx) = async_std::sync::channel(limit);
-        let (reorder_tx, reorder_rx) = async_std::sync::channel(limit);
-        let (output_tx, output_rx) = async_std::sync::channel(limit);
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+        let (reorder_tx, reorder_rx) = async_std::sync::channel(buf_size);
+        let (output_tx, output_rx) = async_std::sync::channel(buf_size);
 
         let map_fut = {
             let reorder_tx = reorder_tx.clone();
@@ -64,7 +67,7 @@ pub trait TryParStreamExt {
             }
         };
 
-        let worker_futs = (0..limit)
+        let worker_futs = (0..num_workers)
             .map(|_| {
                 let map_rx = map_rx.clone();
                 let reorder_tx = reorder_tx.clone();
@@ -91,7 +94,7 @@ pub trait TryParStreamExt {
 
     fn try_par_then_unordered<T, F, Fut>(
         mut self,
-        limit: impl Into<Option<usize>>,
+        config: impl IntoParStreamConfig,
         mut f: F,
     ) -> TryParMapUnordered<T, Self::Error>
     where
@@ -102,12 +105,12 @@ pub trait TryParStreamExt {
         Self::Ok: Send,
         Self::Error: Send,
     {
-        let limit = match limit.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(num) => num,
-        };
-        let (map_tx, map_rx) = async_std::sync::channel(limit);
-        let (output_tx, output_rx) = async_std::sync::channel(limit);
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+        let (output_tx, output_rx) = async_std::sync::channel(buf_size);
 
         let map_fut = {
             let output_tx = output_tx.clone();
@@ -127,7 +130,7 @@ pub trait TryParStreamExt {
             }
         };
 
-        let worker_futs = (0..limit)
+        let worker_futs = (0..num_workers)
             .map(|_| {
                 let map_rx = map_rx.clone();
                 let output_tx = output_tx.clone();
