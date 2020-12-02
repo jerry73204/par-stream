@@ -116,6 +116,36 @@ pub trait ParStreamExt {
         }
     }
 
+    fn par_then_init<T, B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut f: MapF,
+    ) -> ParMap<T>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = T> + Send,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
+    {
+        let init = init_f();
+
+        let stream = self
+            .wrapping_enumerate()
+            .par_then_unordered(config, move |(index, item)| {
+                let fut = f(init.clone(), item);
+                fut.map(move |output| (index, output))
+            })
+            .reorder_enumerated();
+
+        ParMap {
+            stream: Box::pin(stream),
+        }
+    }
+
     /// Computes new items from the stream asynchronously in parallel without respecting the input order.
     ///
     /// The `limit` is the number of parallel workers.
@@ -164,6 +194,25 @@ pub trait ParStreamExt {
         Self::Item: Send,
     {
         ParMapUnordered::new(self, config, f)
+    }
+
+    fn par_then_init_unordered<T, B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> ParMapUnordered<T>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = T> + Send,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
+    {
+        let init = init_f();
+        ParMapUnordered::new(self, config, move |item| map_f(init.clone(), item))
     }
 
     /// Computes new items in a function in parallel with respect to the input order.
