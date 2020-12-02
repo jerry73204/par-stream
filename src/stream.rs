@@ -264,6 +264,29 @@ pub trait ParStreamExt {
         })
     }
 
+    fn par_map_init<T, B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut f: MapF,
+    ) -> ParMap<T>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
+        Func: 'static + FnOnce() -> T + Send,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
+    {
+        let init = init_f();
+
+        self.par_then(config, move |item| {
+            let func = f(init.clone(), item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
     /// Computes new items in a function in parallel without respecting the input order.
     ///
     /// The `limit` is the number of parallel workers.
@@ -314,6 +337,29 @@ pub trait ParStreamExt {
     {
         self.par_then_unordered(config, move |item| {
             let func = f(item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    fn par_map_init_unordered<T, B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut f: MapF,
+    ) -> ParMapUnordered<T>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
+        Func: 'static + FnOnce() -> T + Send,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
+    {
+        let init = init_f();
+
+        self.par_then_unordered(config, move |item| {
+            let func = f(init.clone(), item);
             async_std::task::spawn_blocking(func)
         })
     }
