@@ -92,6 +92,26 @@ pub trait TryParStreamExt {
         }
     }
 
+    fn try_par_then_init<T, B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> TryParMap<T, Self::Error>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        let init = init_f();
+        self.try_par_then(config, move |item| map_f(init.clone(), item))
+    }
+
     fn try_par_then_unordered<T, F, Fut>(
         mut self,
         config: impl IntoParStreamConfig,
@@ -152,6 +172,110 @@ pub trait TryParStreamExt {
             fut: Some(Box::pin(par_then_fut)),
             output_rx,
         }
+    }
+
+    fn try_par_then_init_unordered<T, B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> TryParMapUnordered<T, Self::Error>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        let init = init_f();
+        self.try_par_then_unordered(config, move |item| map_f(init.clone(), item))
+    }
+
+    fn try_par_map<T, F, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut f: F,
+    ) -> TryParMap<T, Self::Error>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        self.try_par_then(config, move |item| {
+            let func = f(item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    fn try_par_map_init<T, B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> TryParMap<T, Self::Error>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        let init = init_f();
+        self.try_par_then(config, move |item| {
+            let func = map_f(init.clone(), item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    fn try_par_map_unordered<T, F, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut f: F,
+    ) -> TryParMapUnordered<T, Self::Error>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        self.try_par_then_unordered(config, move |item| {
+            let func = f(item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    fn try_par_map_init_unordered<T, B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> TryParMapUnordered<T, Self::Error>
+    where
+        T: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        let init = init_f();
+        self.try_par_then_unordered(config, move |item| {
+            let func = map_f(init.clone(), item);
+            async_std::task::spawn_blocking(func)
+        })
     }
 
     fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<T, E, Self>
