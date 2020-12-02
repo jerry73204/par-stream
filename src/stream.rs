@@ -430,7 +430,7 @@ pub trait ParStreamExt {
                     let permit = counter.clone().acquire_owned().await;
                     buf_tx.send((item, permit)).await;
                 }
-                fused.notify();
+                fused.notify_one();
             }
         };
 

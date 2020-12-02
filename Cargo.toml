@@ -7,8 +7,8 @@ edition = "2018"
 [dependencies]
 futures = "0.3"
 num_cpus = "1.13"
-async-std = { version = "1.6", features = ["unstable", "attributes"] }
-tokio = { version = "0.2", features = ["sync", "macros"] }
+async-std = { version = "1.7", features = ["unstable", "attributes"] }
+tokio = { version = "0.3", features = ["sync", "macros"] }
 pin-project = "1.0"
 derivative = "2.1"
 
