@@ -182,8 +182,12 @@ impl<S> TryParStreamExt for S where S: TryStream {}
 
 // try_par_then
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct TryParMap<T, E> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<Result<T, E>>,
 }
 
@@ -215,8 +219,12 @@ impl<T, E> Stream for TryParMap<T, E> {
 
 // try_par_then_unordered
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct TryParMapUnordered<T, E> {
+    #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    #[derivative(Debug = "ignore")]
     output_rx: async_std::sync::Receiver<Result<T, E>>,
 }
 
@@ -248,6 +256,7 @@ impl<T, E> Stream for TryParMapUnordered<T, E> {
 
 // try_wrapping_enumerate
 
+#[derive(Debug)]
 pub struct TryWrappingEnumerate<T, E, S>
 where
     S: Stream<Item = Result<T, E>> + Send,
@@ -296,6 +305,7 @@ where
 // reorder_enumerated
 
 #[pin_project(project = TryReorderEnumeratedProj)]
+#[derive(Debug)]
 pub struct TryReorderEnumerated<T, E, S>
 where
     S: Stream<Item = Result<(usize, T), E>> + Send,
