@@ -1,5 +1,6 @@
 // use crate::common::*;
 
+/// A helper trait that converts types to parallel stream configuration.
 pub trait IntoParStreamConfig: Sized {
     fn into_par_stream_config(self) -> ParStreamConfig;
     fn into_par_stream_params(self) -> ParStreamParams {
@@ -60,6 +61,7 @@ impl IntoParStreamConfig for (usize, usize) {
     }
 }
 
+/// Parallel stream configuration.
 #[derive(Debug, Clone)]
 pub enum ParStreamConfig {
     Auto,
@@ -68,6 +70,7 @@ pub enum ParStreamConfig {
     Custom { num_workers: usize, buf_size: usize },
 }
 
+/// Parallel stream parameters.
 #[derive(Debug, Clone)]
 pub struct ParStreamParams {
     pub(crate) num_workers: usize,

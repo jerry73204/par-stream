@@ -5,6 +5,7 @@ use crate::{
 
 /// An extension trait for [TryStream](TryStream) that provides parallel combinator functions.
 pub trait TryParStreamExt {
+    /// Fallible parallel stream.
     fn try_par_then<T, F, Fut>(
         mut self,
         config: impl IntoParStreamConfig,
@@ -92,6 +93,7 @@ pub trait TryParStreamExt {
         }
     }
 
+    /// Fallible parallel stream with in-local thread initializer.
     fn try_par_then_init<T, B, InitF, MapF, Fut>(
         self,
         config: impl IntoParStreamConfig,
@@ -112,6 +114,7 @@ pub trait TryParStreamExt {
         self.try_par_then(config, move |item| map_f(init.clone(), item))
     }
 
+    /// Fallible parallel stream that does not respect the ordering of input items.
     fn try_par_then_unordered<T, F, Fut>(
         mut self,
         config: impl IntoParStreamConfig,
@@ -174,6 +177,8 @@ pub trait TryParStreamExt {
         }
     }
 
+    /// An parallel stream analogous to [try_par_then_unordered](TryParStreamExt::try_par_then_unordered) with
+    /// in-local thread initializer
     fn try_par_then_init_unordered<T, B, InitF, MapF, Fut>(
         self,
         config: impl IntoParStreamConfig,
@@ -194,6 +199,7 @@ pub trait TryParStreamExt {
         self.try_par_then_unordered(config, move |item| map_f(init.clone(), item))
     }
 
+    /// Fallible parallel stream that runs blocking workers.
     fn try_par_map<T, F, Func>(
         self,
         config: impl IntoParStreamConfig,
@@ -213,6 +219,7 @@ pub trait TryParStreamExt {
         })
     }
 
+    /// Fallible parallel stream that runs blocking workers with in-local thread initializer.
     fn try_par_map_init<T, B, InitF, MapF, Func>(
         self,
         config: impl IntoParStreamConfig,
@@ -236,6 +243,8 @@ pub trait TryParStreamExt {
         })
     }
 
+    /// A parallel stream that analogous to [try_par_map](TryParStreamExt::try_par_map) without respecting
+    /// the order of input items.
     fn try_par_map_unordered<T, F, Func>(
         self,
         config: impl IntoParStreamConfig,
@@ -255,6 +264,8 @@ pub trait TryParStreamExt {
         })
     }
 
+    /// A parallel stream that analogous to [try_par_map_unordered](TryParStreamExt::try_par_map_unordered) with
+    /// in-local thread initializer.
     fn try_par_map_init_unordered<T, B, InitF, MapF, Func>(
         self,
         config: impl IntoParStreamConfig,
@@ -278,6 +289,9 @@ pub trait TryParStreamExt {
         })
     }
 
+    /// Create a fallible stream that gives the current iteration count.
+    ///
+    /// The count wraps to zero if the count overflows.
     fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<T, E, Self>
     where
         Self: Stream<Item = Result<T, E>> + Sized + Unpin + Send,
@@ -289,6 +303,9 @@ pub trait TryParStreamExt {
         }
     }
 
+    /// Creates a fallible stream that reorders the items according to the iteration count.
+    ///
+    /// It is usually combined with [try_wrapping_enumerate](TryParStreamExt::try_wrapping_enumerate).
     fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<T, E, Self>
     where
         Self: Stream<Item = Result<(usize, T), E>> + Sized + Unpin + Send,

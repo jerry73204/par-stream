@@ -116,6 +116,7 @@ pub trait ParStreamExt {
         }
     }
 
+    /// Creates a parallel stream with in-local thread initializer.
     fn par_then_init<T, B, InitF, MapF, Fut>(
         self,
         config: impl IntoParStreamConfig,
@@ -196,6 +197,8 @@ pub trait ParStreamExt {
         ParMapUnordered::new(self, config, f)
     }
 
+    /// Creates a stream analogous to [par_then_unordered](ParStreamExt::par_then_unordered) with
+    /// in-local thread initializer.
     fn par_then_init_unordered<T, B, InitF, MapF, Fut>(
         self,
         config: impl IntoParStreamConfig,
@@ -264,6 +267,8 @@ pub trait ParStreamExt {
         })
     }
 
+    /// Creates a parallel stream analogous to [par_map](ParStreamExt::par_map) with
+    /// in-local thread initializer.
     fn par_map_init<T, B, InitF, MapF, Func>(
         self,
         config: impl IntoParStreamConfig,
@@ -341,6 +346,8 @@ pub trait ParStreamExt {
         })
     }
 
+    /// Creates a parallel stream analogous to [par_map_unordered](ParStreamExt::par_map_unordered) with
+    /// in-local thread initializer.
     fn par_map_init_unordered<T, B, InitF, MapF, Func>(
         self,
         config: impl IntoParStreamConfig,
