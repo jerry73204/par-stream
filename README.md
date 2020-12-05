@@ -12,7 +12,7 @@ The crate is not published to crates.io yet. Add the Git repository to your `Car
 
 ```toml
 [dependencies]
-par-stream = { git = "https://github.com/jerry73204/par-stream.git" }
+par-stream = "0.2"
 ```
 
 ## Features
