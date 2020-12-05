@@ -1219,6 +1219,39 @@ where
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn tokio_compatibility_test() {
+        {
+            let max = 1000u64;
+            futures::stream::iter((0..max).into_iter())
+                .par_then(None, |value| async move {
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
+                    value
+                })
+                .fold(0u64, |expect, found| async move {
+                    assert_eq!(expect, found);
+                    expect + 1
+                })
+                .await;
+        }
+
+        {
+            let max = 1000u64;
+            let mut values = futures::stream::iter((0..max).into_iter())
+                .par_then_unordered(None, |value| async move {
+                    async_std::task::sleep(std::time::Duration::from_millis(value % 20)).await;
+                    value
+                })
+                .collect::<Vec<_>>()
+                .await;
+            values.sort();
+            values.into_iter().fold(0, |expect, found| {
+                assert_eq!(expect, found);
+                expect + 1
+            });
+        }
+    }
+
     #[async_std::test]
     async fn par_then_output_is_ordered_test() {
         let max = 1000u64;
