@@ -1,8 +1,15 @@
 [package]
 name = "par-stream"
+description = "Asynchronous parallel streams analogous to rayon"
 version = "0.2.0"
 authors = ["jerry73204 <jerry73204@gmail.com>"]
 edition = "2018"
+categories = ["asynchronous"]
+documentation = "https://docs.rs/par-stream/"
+repository = "https://github.com/jerry73204/par-stream.git"
+homepage = "https://github.com/jerry73204/par-stream"
+readme = "README.md"
+license = "MIT"
 
 [dependencies]
 futures = "0.3"
