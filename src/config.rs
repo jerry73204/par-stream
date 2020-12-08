@@ -36,8 +36,8 @@ impl IntoParStreamConfig for usize {
 impl IntoParStreamConfig for f64 {
     fn into_par_stream_config(self) -> ParStreamConfig {
         assert!(
-            self.is_finite() && self >= 1.0,
-            "the scale number must be a number greater or equal to 1"
+            self.is_finite() && self >= 0.0,
+            "the scaling number must be positive"
         );
         ParStreamConfig::Scale(self)
     }
