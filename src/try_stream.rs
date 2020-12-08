@@ -317,6 +317,162 @@ pub trait TryParStreamExt {
             buffer: HashMap::new(),
         }
     }
+
+    /// Runs this stream to completion, executing asynchronous closure for each element on the stream
+    /// in parallel.
+    fn try_par_for_each<F, Fut>(
+        mut self,
+        config: impl IntoParStreamConfig,
+        mut f: F,
+    ) -> TryParForEach<Self::Error>
+    where
+        F: 'static + FnMut(Self::Ok) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+        let (terminate_tx, _terminate_rx22) = tokio::sync::broadcast::channel(1);
+
+        let map_fut = {
+            let terminate_tx = terminate_tx.clone();
+
+            async move {
+                loop {
+                    match self.try_next().await {
+                        Ok(Some(item)) => {
+                            let fut = f(item);
+                            map_tx.send(fut).await;
+                        }
+                        Ok(None) => break Ok(()),
+                        Err(err) => {
+                            // shutdown workers
+                            let _ = terminate_tx.send(());
+
+                            // output error
+                            break Err(err);
+                        }
+                    }
+                }
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+                let terminate_tx = terminate_tx.clone();
+                let mut terminate_rx = terminate_tx.subscribe();
+
+                let worker_fut = async move {
+                    loop {
+                        tokio::select! {
+                            result = map_rx.recv() => {
+                                match result {
+                                    Ok(fut) => {
+                                        if let Err(err) = fut.await {
+                                            // shutdown workers
+                                            let _ = terminate_tx.send(());
+
+                                            // output error
+                                            break Err(err);
+                                        }
+                                    }
+                                    Err(_) => break Ok(()),
+                                }
+                            }
+                            _ = terminate_rx.recv() => break Ok(()),
+                        }
+                    }
+                };
+                let worker_fut = async_std::task::spawn(worker_fut);
+                worker_fut
+            })
+            .collect();
+
+        let output_fut = async move {
+            let (map_result, worker_results) =
+                futures::join!(map_fut, futures::future::join_all(worker_futs));
+
+            worker_results
+                .into_iter()
+                .fold(map_result, |folded, result| {
+                    // the order takes the latest error
+                    result.and(folded)
+                })
+        };
+
+        TryParForEach {
+            fut: Some(Box::pin(output_fut)),
+        }
+    }
+
+    /// Runs an fallible blocking task on each element of an stream in parallel.
+    fn try_par_for_each_init<B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> TryParForEach<Self::Error>
+    where
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
+    {
+        let init = init_f();
+        self.try_par_for_each(config, move |item| map_f(init.clone(), item))
+    }
+
+    fn try_par_for_each_blocking<F, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut f: F,
+    ) -> TryParForEach<Self::Error>
+    where
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+        F: 'static + FnMut(Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), Self::Error> + Send,
+    {
+        self.try_par_for_each(config, move |item| {
+            let func = f(item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](TryParStreamExt::try_par_for_each_blocking)
+    /// with a in-local thread initializer.
+    fn try_par_for_each_blocking_init<B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut f: MapF,
+    ) -> TryParForEach<Self::Error>
+    where
+        Self: 'static + TryStreamExt + Sized + Unpin + Send,
+        Self::Ok: Send,
+        Self::Error: Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), Self::Error> + Send,
+    {
+        let init = init_f();
+
+        self.try_par_for_each(config, move |item| {
+            let func = f(init.clone(), item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
 }
 
 impl<S> TryParStreamExt for S where S: TryStream {}
@@ -392,6 +548,35 @@ impl<T, E> Stream for TryParMapUnordered<T, E> {
         }
 
         poll
+    }
+}
+
+// try_par_for_each
+
+#[derive(Derivative)]
+#[derivative(Debug)]
+pub struct TryParForEach<E> {
+    #[derivative(Debug = "ignore")]
+    fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>>,
+}
+
+impl<E> Future for TryParForEach<E> {
+    type Output = Result<(), E>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+        match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Poll::Ready(result) => {
+                    self.fut = None;
+                    Poll::Ready(result)
+                }
+            },
+            None => unreachable!(),
+        }
     }
 }
 
@@ -540,6 +725,26 @@ where
 mod tests {
     use super::*;
     use rand::prelude::*;
+
+    #[async_std::test]
+    async fn try_par_for_each_test() {
+        {
+            let result = futures::stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)].into_iter())
+                .try_par_for_each(None, |_| async move { Result::<_, ()>::Ok(()) })
+                .await;
+
+            assert_eq!(result, Ok(()));
+        }
+
+        {
+            let result =
+                futures::stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                    .try_par_for_each(None, |_| async move { Ok(()) })
+                    .await;
+
+            assert_eq!(result, Err(-3));
+        }
+    }
 
     #[async_std::test]
     async fn try_par_then_test() {
