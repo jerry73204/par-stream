@@ -875,6 +875,48 @@ pub trait ParStreamExt {
         let init = init_f();
         ParForEach::new(self, config, move |item| map_f(init.clone(), item))
     }
+
+    /// Runs an blocking task on each element of an stream in parallel.
+    fn par_for_each_blocking<F, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut f: F,
+    ) -> ParForEach
+    where
+        Self: 'static + Stream + Unpin + Sized + Send,
+        Self::Item: Send,
+        F: 'static + FnMut(Self::Item) -> Func + Send,
+        Func: 'static + FnOnce() -> () + Send,
+    {
+        self.par_for_each(config, move |item| {
+            let func = f(item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
+
+    /// Creates a parallel stream analogous to [par_for_each_blocking](ParStreamExt::par_for_each_blocking) with a
+    /// in-local thread initializer.
+    fn par_for_each_blocking_init<B, InitF, MapF, Func>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut f: MapF,
+    ) -> ParForEach
+    where
+        Self: 'static + Stream + Unpin + Sized + Send,
+        Self::Item: Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
+        Func: 'static + FnOnce() -> () + Send,
+    {
+        let init = init_f();
+
+        self.par_for_each(config, move |item| {
+            let func = f(init.clone(), item);
+            async_std::task::spawn_blocking(func)
+        })
+    }
 }
 
 impl<S> ParStreamExt for S where S: Stream {}
