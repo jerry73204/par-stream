@@ -844,6 +844,37 @@ pub trait ParStreamExt {
 
         (scatter_fut, rx)
     }
+
+    /// Runs an asynchronous task on each element of an stream in parallel.
+    fn par_for_each<F, Fut>(self, config: impl IntoParStreamConfig, f: F) -> ParForEach
+    where
+        Self: 'static + Stream + Unpin + Sized + Send,
+        Self::Item: Send,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = ()> + Send,
+    {
+        ParForEach::new(self, config, f)
+    }
+
+    /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
+    /// in-local thread initializer.
+    fn par_for_each_init<B, InitF, MapF, Fut>(
+        self,
+        config: impl IntoParStreamConfig,
+        mut init_f: InitF,
+        mut map_f: MapF,
+    ) -> ParForEach
+    where
+        Self: 'static + Stream + Unpin + Sized + Send,
+        Self::Item: Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = ()> + Send,
+    {
+        let init = init_f();
+        ParForEach::new(self, config, move |item| map_f(init.clone(), item))
+    }
 }
 
 impl<S> ParStreamExt for S where S: Stream {}
@@ -901,7 +932,7 @@ impl<T> ParMapUnordered<T> {
             }
         };
 
-        let worker_futs = (0..num_workers)
+        let worker_futs: Vec<_> = (0..num_workers)
             .map(|_| {
                 let map_rx = map_rx.clone();
                 let output_tx = output_tx.clone();
@@ -915,7 +946,7 @@ impl<T> ParMapUnordered<T> {
                 let worker_fut = async_std::task::spawn(worker_fut);
                 worker_fut
             })
-            .collect::<Vec<_>>();
+            .collect();
 
         let par_then_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
 
@@ -1213,6 +1244,78 @@ where
     }
 }
 
+// for each
+
+#[derive(Derivative)]
+#[derivative(Debug)]
+pub struct ParForEach {
+    #[derivative(Debug = "ignore")]
+    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+}
+
+impl ParForEach {
+    pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamConfig, mut f: F) -> Self
+    where
+        St: 'static + Stream + Unpin + Sized + Send,
+        St::Item: Send,
+        F: 'static + FnMut(St::Item) -> Fut + Send,
+        Fut: 'static + Future<Output = ()> + Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = async_std::sync::channel(buf_size);
+
+        let map_fut = async move {
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                map_tx.send(fut).await;
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+
+                let worker_fut = async move {
+                    while let Ok(fut) = map_rx.recv().await {
+                        fut.await;
+                    }
+                };
+                let worker_fut = async_std::task::spawn(worker_fut);
+                worker_fut
+            })
+            .collect();
+
+        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
+
+        Self {
+            fut: Some(Box::pin(join_fut)),
+        }
+    }
+}
+
+impl Future for ParForEach {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        match self.fut.as_mut() {
+            Some(fut) => match Pin::new(fut).poll(cx) {
+                Poll::Pending => {
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Poll::Ready(_) => {
+                    self.fut = None;
+                    Poll::Ready(())
+                }
+            },
+            None => Poll::Ready(()),
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -1313,5 +1416,43 @@ mod tests {
             })
             .await;
         assert!(is_equal);
+    }
+
+    #[async_std::test]
+    async fn for_each_test() {
+        use std::sync::atomic::{self, AtomicUsize};
+
+        {
+            let sum = Arc::new(AtomicUsize::new(0));
+            {
+                let sum = sum.clone();
+                futures::stream::iter(1..=1000)
+                    .par_for_each(None, move |value| {
+                        let sum = sum.clone();
+                        async move {
+                            sum.fetch_add(value, atomic::Ordering::SeqCst);
+                        }
+                    })
+                    .await;
+            }
+            assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+        }
+
+        {
+            let sum = Arc::new(AtomicUsize::new(0));
+            futures::stream::iter(1..=1000)
+                .par_for_each_init(
+                    None,
+                    || sum.clone(),
+                    move |sum, value| {
+                        let sum = sum.clone();
+                        async move {
+                            sum.fetch_add(value, atomic::Ordering::SeqCst);
+                        }
+                    },
+                )
+                .await;
+            assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+        }
     }
 }
