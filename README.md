@@ -1,5 +1,7 @@
 # par-stream: Asynchronous Parallel Stream for Rust
 
+\[ [crates.io](https://crates.io/crates/par-stream) | [API Docs](https://docs.rs/par-stream/) \]
+
 An Rust implementation of asynchronous parallel streams analogous to [rayon](https://github.com/rayon-rs/rayon).
 
 It is a re-design of [async-rs/parallel-stream](https://github.com/async-rs/parallel-stream).
