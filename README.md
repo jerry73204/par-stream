@@ -65,7 +65,7 @@ let gathered_stream = par_stream::par_gather(vec![stream1, stream2], buf_size);
 
 ### Control the ordering of stream items
 
-The combination of `stream.overflowing_enumerate()` and `stream.reorder_enumerated()`
+The combination of `stream.wrapping_enumerate()` and `stream.reorder_enumerated()`
 enable you to control the ordering of the stream items.
 
 It gives the way to mark items with index numbers, apply to multiple unordered parallel tasks,
@@ -74,7 +74,7 @@ and reorder them back. It effectively avoids reordering after each parallel task
 ```rust
 stream
     // mark items with index numbers
-    .overflowing_enumerate()
+    .wrapping_enumerate()
     // a series of unordered maps
     .par_then_unordered(limit, map_fut1)
     .par_then_unordered(limit, map_fut2)
