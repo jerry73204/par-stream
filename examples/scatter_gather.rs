@@ -1,28 +1,25 @@
 use futures::stream::StreamExt;
-use par_stream::{ParFuture, ParStreamExt};
+use par_stream::ParStreamExt;
 
-#[async_std::main]
-async fn main() {
+async fn main_async() {
     let (scatter_fut, scatter_rx1) = futures::stream::iter(1isize..=1000).par_scatter(None);
     let scatter_rx2 = scatter_rx1.clone();
 
     // first parallel worker
-    let (worker1_tx, worker1_rx) = async_std::sync::channel(4);
-    let worker1 = async move {
+    let (worker1_tx, worker1_rx) = async_std::channel::bounded(4);
+    let worker1 = async_std::task::spawn(async move {
         while let Ok(value) = scatter_rx1.recv().await {
-            worker1_tx.send(value).await;
+            worker1_tx.send(value).await.unwrap();
         }
-    }
-        .spawned();
+    });
 
     // second parallel worker
-    let (worker2_tx, worker2_rx) = async_std::sync::channel(4);
-    let worker2 = async move {
+    let (worker2_tx, worker2_rx) = async_std::channel::bounded(4);
+    let worker2 = async_std::task::spawn(async move {
         while let Ok(value) = scatter_rx2.recv().await {
-            worker2_tx.send(-value).await;
+            worker2_tx.send(-value).await.unwrap();
         }
-    }
-        .spawned();
+    });
 
     // gather from workers
     let gather_fut = par_stream::par_gather(vec![worker1_rx, worker2_rx], None).collect::<Vec<_>>();
@@ -44,4 +41,16 @@ async fn main() {
 
     println!("worker1 process {} numbers", n_pos);
     println!("worker2 process {} numbers", n_neg);
+}
+
+#[cfg(feature = "runtime_async-std")]
+#[async_std::main]
+async fn main() {
+    main_async().await
+}
+
+#[cfg(feature = "runtime_tokio")]
+#[tokio::main]
+async fn main() {
+    main_async().await
 }

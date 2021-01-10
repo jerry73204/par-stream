@@ -14,11 +14,15 @@ license = "MIT"
 [dependencies]
 futures = "0.3"
 num_cpus = "1.13"
-async-std = { version = "1.7", features = ["unstable", "attributes"] }
-tokio = { version = "0.3", features = ["sync", "macros"] }
+async-std = { version = "1.8", optional = true }
+tokio = { version = "1.0", features = ["rt-multi-thread"], optional = true }
 pin-project = "1.0"
 derivative = "2.1"
 
 [dev-dependencies]
 rand = "0.7"
-tokio = { version = "0.3", features = ["sync", "macros", "rt-multi-thread"] }
+async-std = { version = "1.8", features = ["unstable", "attributes"] } # for doc tests
+
+[features]
+runtime_async-std = ["async-std", "async-std/unstable", "async-std/attributes", "tokio", "tokio/sync", "tokio/macros"]
+runtime_tokio = ["tokio", "tokio/sync", "tokio/macros", "async-std", "async-std/unstable"]

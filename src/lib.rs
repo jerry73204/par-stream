@@ -17,13 +17,13 @@
 //! - `2.3` or non-zero floating points: Scale the number of workers to 2.3 times the number of system CPUs, and double size of input buffer.
 //! - `(10, 15)`: Scales to absolute 10 workers, and sets the input buffer size to 15.
 
+mod base;
 mod common;
 mod config;
-mod future;
+mod impls;
 mod stream;
 mod try_stream;
 
 pub use config::*;
-pub use future::*;
 pub use stream::*;
 pub use try_stream::*;

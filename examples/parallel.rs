@@ -1,8 +1,7 @@
 use futures::stream::StreamExt;
 use par_stream::ParStreamExt;
 
-#[async_std::main]
-async fn main() {
+async fn main_async() {
     // the variable will be captured by parallel workers
     let scale = Box::new(2usize);
     let addition = Box::new(1usize);
@@ -31,4 +30,16 @@ async fn main() {
     // the output will be ordered
     let expect = (0..1000).map(|value| value * 2 + 1).collect::<Vec<_>>();
     assert_eq!(doubled, expect);
+}
+
+#[cfg(feature = "runtime_async-std")]
+#[async_std::main]
+async fn main() {
+    main_async().await
+}
+
+#[cfg(feature = "runtime_tokio")]
+#[tokio::main]
+async fn main() {
+    main_async().await
 }
