@@ -26,3 +26,8 @@ async-std = { version = "1.8", features = ["unstable", "attributes"] } # for doc
 [features]
 runtime_async-std = ["async-std", "async-std/unstable", "async-std/attributes", "tokio", "tokio/sync", "tokio/macros"]
 runtime_tokio = ["tokio", "tokio/sync", "tokio/macros", "async-std", "async-std/unstable"]
+doc-only = ["runtime_async-std"]
+
+[package.metadata.docs.rs]
+features = ["doc-only"]
+no-default-features = true
