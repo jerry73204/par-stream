@@ -1,73 +1,119 @@
-// use crate::common::*;
+pub trait IntoParStreamParams {
+    fn into_par_stream_params(self) -> ParStreamParams;
+}
 
-/// A helper trait that converts types to parallel stream configuration.
-pub trait IntoParStreamConfig: Sized {
-    fn into_par_stream_config(self) -> ParStreamConfig;
+impl<T> IntoParStreamParams for T
+where
+    ParStreamConfig: From<T>,
+{
     fn into_par_stream_params(self) -> ParStreamParams {
-        self.into_par_stream_config().into()
-    }
-}
-
-impl IntoParStreamConfig for Option<usize> {
-    fn into_par_stream_config(self) -> ParStreamConfig {
-        match self {
-            Some(size) => {
-                assert!(
-                    size >= 1,
-                    "the number of workers must be equal to greater to 1"
-                );
-                ParStreamConfig::Absolute(size)
-            }
-            None => ParStreamConfig::Auto,
-        }
-    }
-}
-
-impl IntoParStreamConfig for usize {
-    fn into_par_stream_config(self) -> ParStreamConfig {
-        assert!(
-            self >= 1,
-            "the number of workers must be a number greater or equal to 1"
-        );
-        ParStreamConfig::Absolute(self)
-    }
-}
-
-impl IntoParStreamConfig for f64 {
-    fn into_par_stream_config(self) -> ParStreamConfig {
-        assert!(
-            self.is_finite() && self >= 0.0,
-            "the scaling number must be positive"
-        );
-        ParStreamConfig::Scale(self)
-    }
-}
-
-impl IntoParStreamConfig for (usize, usize) {
-    fn into_par_stream_config(self) -> ParStreamConfig {
-        let (num_workers, buf_size) = self;
-        assert!(
-            num_workers >= 1,
-            "the number of workers must be equal to greater to 1"
-        );
-        assert!(
-            buf_size >= 1,
-            "the buffer size must be equal to greater to 1"
-        );
-        ParStreamConfig::Custom {
-            num_workers,
-            buf_size,
-        }
+        let config: ParStreamConfig = self.into();
+        let params: ParStreamParams = config.into();
+        params
     }
 }
 
 /// Parallel stream configuration.
 #[derive(Debug, Clone)]
-pub enum ParStreamConfig {
+pub struct ParStreamConfig {
+    pub num_workers: Value,
+    pub buf_size: Value,
+}
+
+impl From<Option<usize>> for ParStreamConfig {
+    fn from(size: Option<usize>) -> Self {
+        match size {
+            Some(size) => ParStreamConfig {
+                num_workers: Value::Absolute(size),
+                buf_size: Value::Absolute(size),
+            },
+            None => ParStreamConfig {
+                num_workers: Value::Auto,
+                buf_size: Value::Auto,
+            },
+        }
+    }
+}
+
+impl From<usize> for ParStreamConfig {
+    fn from(size: usize) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Absolute(size),
+            buf_size: Value::Absolute(size),
+        }
+    }
+}
+
+impl From<f64> for ParStreamConfig {
+    fn from(scale: f64) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Scale(scale),
+            buf_size: Value::Scale(scale),
+        }
+    }
+}
+
+impl From<(usize, usize)> for ParStreamConfig {
+    fn from((num_workers, buf_size): (usize, usize)) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Absolute(num_workers),
+            buf_size: Value::Absolute(buf_size),
+        }
+    }
+}
+
+impl From<(f64, usize)> for ParStreamConfig {
+    fn from((num_workers, buf_size): (f64, usize)) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Scale(num_workers),
+            buf_size: Value::Absolute(buf_size),
+        }
+    }
+}
+
+impl From<(usize, f64)> for ParStreamConfig {
+    fn from((num_workers, buf_size): (usize, f64)) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Absolute(num_workers),
+            buf_size: Value::Scale(buf_size),
+        }
+    }
+}
+
+impl From<(f64, f64)> for ParStreamConfig {
+    fn from((num_workers, buf_size): (f64, f64)) -> Self {
+        ParStreamConfig {
+            num_workers: Value::Scale(num_workers),
+            buf_size: Value::Scale(buf_size),
+        }
+    }
+}
+
+/// Sum type of absolute value and scaling value.
+#[derive(Debug, Clone)]
+pub enum Value {
     Auto,
     Absolute(usize),
     Scale(f64),
-    Custom { num_workers: usize, buf_size: usize },
+}
+
+impl Value {
+    pub fn to_absolute(&self) -> usize {
+        match *self {
+            Self::Auto => num_cpus::get(),
+            Self::Absolute(val) => {
+                assert!(val > 0, "absolute value must be positive");
+                val
+            }
+            Self::Scale(scale) => {
+                assert!(
+                    scale.is_finite() && scale.is_sign_positive(),
+                    "scaling value must be positive finite"
+                );
+                (num_cpus::get() as f64 * scale).ceil() as usize
+            }
+        }
+    }
 }
 
 /// Parallel stream parameters.
@@ -79,28 +125,13 @@ pub struct ParStreamParams {
 
 impl From<ParStreamConfig> for ParStreamParams {
     fn from(from: ParStreamConfig) -> Self {
-        use ParStreamConfig::*;
+        let ParStreamConfig {
+            num_workers,
+            buf_size,
+        } = from;
 
-        let (num_workers, buf_size) = match from {
-            Auto => {
-                let num_workers = num_cpus::get();
-                let buf_size = num_workers * 2;
-                (num_workers, buf_size)
-            }
-            Absolute(num_workers) => {
-                let buf_size = num_workers * 2;
-                (num_workers, buf_size)
-            }
-            Scale(scale) => {
-                let num_workers = (num_cpus::get() as f64 * scale).ceil() as usize;
-                let buf_size = num_workers * 2;
-                (num_workers, buf_size)
-            }
-            Custom {
-                num_workers,
-                buf_size,
-            } => (num_workers, buf_size),
-        };
+        let num_workers = num_workers.to_absolute();
+        let buf_size = buf_size.to_absolute();
 
         Self {
             num_workers,

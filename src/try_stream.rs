@@ -1,6 +1,6 @@
 use crate::{
     common::*,
-    config::{IntoParStreamConfig, ParStreamParams},
+    config::{IntoParStreamParams, ParStreamParams},
 };
 
 /// An extension trait for [TryStream](TryStream) that provides parallel combinator functions.
@@ -8,7 +8,7 @@ pub trait TryParStreamExt {
     /// Fallible parallel stream.
     fn try_par_then<T, F, Fut>(
         mut self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParMap<T, Self::Error>
     where
@@ -96,7 +96,7 @@ pub trait TryParStreamExt {
     /// Fallible parallel stream with in-local thread initializer.
     fn try_par_then_init<T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> TryParMap<T, Self::Error>
@@ -117,7 +117,7 @@ pub trait TryParStreamExt {
     /// Fallible parallel stream that does not respect the ordering of input items.
     fn try_par_then_unordered<T, F, Fut>(
         mut self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParMapUnordered<T, Self::Error>
     where
@@ -181,7 +181,7 @@ pub trait TryParStreamExt {
     /// in-local thread initializer
     fn try_par_then_init_unordered<T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> TryParMapUnordered<T, Self::Error>
@@ -202,7 +202,7 @@ pub trait TryParStreamExt {
     /// Fallible parallel stream that runs blocking workers.
     fn try_par_map<T, F, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParMap<T, Self::Error>
     where
@@ -222,7 +222,7 @@ pub trait TryParStreamExt {
     /// Fallible parallel stream that runs blocking workers with in-local thread initializer.
     fn try_par_map_init<T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> TryParMap<T, Self::Error>
@@ -247,7 +247,7 @@ pub trait TryParStreamExt {
     /// the order of input items.
     fn try_par_map_unordered<T, F, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParMapUnordered<T, Self::Error>
     where
@@ -268,7 +268,7 @@ pub trait TryParStreamExt {
     /// in-local thread initializer.
     fn try_par_map_init_unordered<T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> TryParMapUnordered<T, Self::Error>
@@ -322,7 +322,7 @@ pub trait TryParStreamExt {
     /// in parallel.
     fn try_par_for_each<F, Fut>(
         mut self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParForEach<Self::Error>
     where
@@ -414,7 +414,7 @@ pub trait TryParStreamExt {
     /// Runs an fallible blocking task on each element of an stream in parallel.
     fn try_par_for_each_init<B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> TryParForEach<Self::Error>
@@ -433,7 +433,7 @@ pub trait TryParStreamExt {
 
     fn try_par_for_each_blocking<F, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> TryParForEach<Self::Error>
     where
@@ -453,7 +453,7 @@ pub trait TryParStreamExt {
     /// with a in-local thread initializer.
     fn try_par_for_each_blocking_init<B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut f: MapF,
     ) -> TryParForEach<Self::Error>

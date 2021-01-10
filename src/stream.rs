@@ -2,7 +2,7 @@
 
 use crate::{
     common::*,
-    config::{IntoParStreamConfig, ParStreamParams},
+    config::{IntoParStreamParams, ParStreamParams},
 };
 
 /// Collect multiple streams into single stream.
@@ -93,7 +93,7 @@ pub trait ParStreamExt {
     ///     assert_eq!(doubled, expect);
     /// }
     /// ```
-    fn par_then<T, F, Fut>(self, config: impl IntoParStreamConfig, mut f: F) -> ParMap<T>
+    fn par_then<T, F, Fut>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -119,7 +119,7 @@ pub trait ParStreamExt {
     /// Creates a parallel stream with in-local thread initializer.
     fn par_then_init<T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMap<T>
@@ -184,7 +184,7 @@ pub trait ParStreamExt {
     /// ```
     fn par_then_unordered<T, F, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         f: F,
     ) -> ParMapUnordered<T>
     where
@@ -201,7 +201,7 @@ pub trait ParStreamExt {
     /// in-local thread initializer.
     fn par_then_init_unordered<T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> ParMapUnordered<T>
@@ -253,7 +253,7 @@ pub trait ParStreamExt {
     ///     assert_eq!(doubled, expect);
     /// }
     /// ```
-    fn par_map<T, F, Func>(self, config: impl IntoParStreamConfig, mut f: F) -> ParMap<T>
+    fn par_map<T, F, Func>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -271,7 +271,7 @@ pub trait ParStreamExt {
     /// in-local thread initializer.
     fn par_map_init<T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMap<T>
@@ -330,7 +330,7 @@ pub trait ParStreamExt {
     /// ```
     fn par_map_unordered<T, F, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> ParMapUnordered<T>
     where
@@ -350,7 +350,7 @@ pub trait ParStreamExt {
     /// in-local thread initializer.
     fn par_map_init_unordered<T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMapUnordered<T>
@@ -846,7 +846,7 @@ pub trait ParStreamExt {
     }
 
     /// Runs an asynchronous task on each element of an stream in parallel.
-    fn par_for_each<F, Fut>(self, config: impl IntoParStreamConfig, f: F) -> ParForEach
+    fn par_for_each<F, Fut>(self, config: impl IntoParStreamParams, f: F) -> ParForEach
     where
         Self: 'static + Stream + Unpin + Sized + Send,
         Self::Item: Send,
@@ -860,7 +860,7 @@ pub trait ParStreamExt {
     /// in-local thread initializer.
     fn par_for_each_init<B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> ParForEach
@@ -879,7 +879,7 @@ pub trait ParStreamExt {
     /// Runs an blocking task on each element of an stream in parallel.
     fn par_for_each_blocking<F, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut f: F,
     ) -> ParForEach
     where
@@ -898,7 +898,7 @@ pub trait ParStreamExt {
     /// in-local thread initializer.
     fn par_for_each_blocking_init<B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamConfig,
+        config: impl IntoParStreamParams,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParForEach
@@ -952,7 +952,7 @@ pub struct ParMapUnordered<T> {
 }
 
 impl<T> ParMapUnordered<T> {
-    fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamConfig, mut f: F) -> Self
+    fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamParams, mut f: F) -> Self
     where
         T: 'static + Send,
         F: 'static + FnMut(S::Item) -> Fut + Send,
@@ -1296,7 +1296,7 @@ pub struct ParForEach {
 }
 
 impl ParForEach {
-    pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamConfig, mut f: F) -> Self
+    pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamParams, mut f: F) -> Self
     where
         St: 'static + Stream + Unpin + Sized + Send,
         St::Item: Send,
