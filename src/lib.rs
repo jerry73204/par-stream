@@ -17,6 +17,14 @@
 //! - `2.3` or non-zero floating points: Scale the number of workers to 2.3 times the number of system CPUs, and double size of input buffer.
 //! - `(10, 15)`: Scales to absolute 10 workers, and sets the input buffer size to 15.
 
+#[cfg(not(any(
+    all(feature = "runtime_async-std", not(feature = "runtime_tokio")),
+    all(not(feature = "runtime_async-std"), feature = "runtime_tokio"),
+)))]
+compile_error!(
+    "exact one of 'runtime_async-std' and 'runtime_tokio' cargo feature must be enabled"
+);
+
 mod base;
 mod common;
 mod config;
