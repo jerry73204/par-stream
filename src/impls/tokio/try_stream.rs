@@ -754,8 +754,8 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         for _ in 0..10 {
-            let err_index_1 = rng.gen_range(0, len);
-            let err_index_2 = rng.gen_range(0, len);
+            let err_index_1 = rng.gen_range(0..len);
+            let err_index_2 = rng.gen_range(0..len);
             let min_err_index = err_index_1.min(err_index_2);
 
             let results = futures::stream::iter(0..len)
