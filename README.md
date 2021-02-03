@@ -4,17 +4,18 @@
 
 An Rust implementation of asynchronous parallel streams analogous to [rayon](https://github.com/rayon-rs/rayon).
 
-It is a re-design of [async-rs/parallel-stream](https://github.com/async-rs/parallel-stream).
-It guarantees the compatibility with [futures](https://github.com/rust-lang/futures-rs) stream by providing extension traits.
-Unlike parallel-stream, it does not introduce incompatible types.
-
 ## Usage
 
-The crate is not published to crates.io yet. Add the Git repository to your `Cargo.toml` to include this crate.
+You must specify one of the following features to select appropriate runtime.
+
+- **runtime_async-std**
+- **runtime_tokio**
+
+Here is an example `Cargo.toml`.
 
 ```toml
 [dependencies]
-par-stream = "0.2"
+par-stream = { version = "0.3", features = ["runtime_tokio"] }
 ```
 
 ## Features
@@ -37,10 +38,10 @@ use par_stream::ParStreamExt;
 
 The `limit` parameter configures the worker pool size. It accepts the following values:
 
-- `None`: The worker pool size scales to the number of system CPUs, and double size of input buffer.
-- `10` or non-zero integers: Scales the worker pool size to absolute 10, and double size of input buffer.
-- `2.3` or non-zero floating points: Scale the number of workers to 2.3 times the number of system CPUs, and double size of input buffer.
-- `(10, 15)`: Scales to absolute 10 workers, and sets the input buffer size to 15.
+- `None`: The worker pool size scales to the number of system CPUs.
+- `10`: Scale the number of workers and buffer size by 10.
+- `2.3`: Scale the number of workers by 2.3 times.
+- `(10, 15)`: Use 10 workers and buffer size 15.
 
 ### Scatter and gather combinators
 
