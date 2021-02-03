@@ -1,3 +1,4 @@
+use super::error::NullResult;
 use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
@@ -34,15 +35,17 @@ pub trait TryParStreamExt {
                     match self.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            map_tx.send((counter, fut)).await.unwrap();
+                            map_tx.send((counter, fut)).await?;
                         }
                         Ok(None) => break,
                         Err(err) => {
-                            reorder_tx.send((counter, Err(err))).await.unwrap();
+                            reorder_tx.send((counter, Err(err))).await?;
                         }
                     }
                     counter = counter.wrapping_add(1);
                 }
+
+                Ok(())
             }
         };
 
@@ -56,17 +59,19 @@ pub trait TryParStreamExt {
                     continue;
                 }
 
-                output_tx.send(output).await.unwrap();
+                output_tx.send(output).await?;
                 counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
-                    output_tx.send(output).await.unwrap();
+                    output_tx.send(output).await?;
                     counter = counter.wrapping_add(1);
                 }
             }
+
+            Ok(())
         };
 
-        let worker_futs = (0..num_workers)
+        let worker_futs: Vec<_> = (0..num_workers)
             .map(|_| {
                 let map_rx = map_rx.clone();
                 let reorder_tx = reorder_tx.clone();
@@ -74,16 +79,20 @@ pub trait TryParStreamExt {
                 let worker_fut = async move {
                     while let Ok((index, fut)) = map_rx.recv().await {
                         let output = fut.await;
-                        reorder_tx.send((index, output)).await.unwrap();
+                        reorder_tx.send((index, output)).await?;
                     }
+                    Ok(())
                 };
                 let worker_fut = tokio::task::spawn(worker_fut).map(|result| result.unwrap());
                 worker_fut
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        let par_then_fut =
-            futures::future::join3(map_fut, reorder_fut, futures::future::join_all(worker_futs));
+        let par_then_fut = futures::future::try_join3(
+            map_fut,
+            reorder_fut,
+            futures::future::try_join_all(worker_futs),
+        );
 
         TryParMap {
             fut: Some(Box::pin(par_then_fut)),
@@ -138,14 +147,15 @@ pub trait TryParStreamExt {
                     match self.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            map_tx.send(fut).await.unwrap();
+                            map_tx.send(fut).await?;
                         }
                         Ok(None) => break,
                         Err(err) => {
-                            output_tx.send(Err(err)).await.unwrap();
+                            output_tx.send(Err(err)).await?;
                         }
                     }
                 }
+                Ok(())
             }
         };
 
@@ -157,15 +167,17 @@ pub trait TryParStreamExt {
                 let worker_fut = async move {
                     while let Ok(fut) = map_rx.recv().await {
                         let result = fut.await;
-                        output_tx.send(result).await.unwrap();
+                        output_tx.send(result).await?;
                     }
+                    Ok(())
                 };
                 let worker_fut = tokio::task::spawn(worker_fut).map(|result| result.unwrap());
                 worker_fut
             })
             .collect::<Vec<_>>();
 
-        let par_then_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
+        let par_then_fut =
+            futures::future::try_join(map_fut, futures::future::try_join_all(worker_futs));
 
         TryParMapUnordered {
             fut: Some(Box::pin(par_then_fut)),
@@ -331,15 +343,14 @@ pub trait TryParStreamExt {
                     match self.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            map_tx.send(fut).await.unwrap();
+                            if let Err(_) = map_tx.send(fut).await {
+                                break Ok(());
+                            }
                         }
                         Ok(None) => break Ok(()),
                         Err(err) => {
-                            // shutdown workers
-                            let _ = terminate_tx.send(());
-
-                            // output error
-                            break Err(err);
+                            let _result = terminate_tx.send(()); // shutdown workers
+                            break Err(err); // output error
                         }
                     }
                 }
@@ -356,17 +367,14 @@ pub trait TryParStreamExt {
                     loop {
                         tokio::select! {
                             result = map_rx.recv() => {
-                                match result {
-                                    Ok(fut) => {
-                                        if let Err(err) = fut.await {
-                                            // shutdown workers
-                                            let _ = terminate_tx.send(());
-
-                                            // output error
-                                            break Err(err);
-                                        }
-                                    }
+                                let fut = match result {
+                                    Ok(fut) => fut,
                                     Err(_) => break Ok(()),
+                                };
+
+                                if let Err(err) = fut.await {
+                                    let _result = terminate_tx.send(()); // shutdown workers
+                                    break Err(err); // return error
                                 }
                             }
                             _ = terminate_rx.recv() => break Ok(()),
@@ -464,7 +472,7 @@ impl<S> TryParStreamExt for S where S: TryStream {}
 #[derivative(Debug)]
 pub struct TryParMap<T, E> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<Result<T, E>>,
 }
@@ -501,7 +509,7 @@ impl<T, E> Stream for TryParMap<T, E> {
 #[derivative(Debug)]
 pub struct TryParMapUnordered<T, E> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<Result<T, E>>,
 }

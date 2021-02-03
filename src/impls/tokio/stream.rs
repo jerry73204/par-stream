@@ -1,9 +1,10 @@
+use super::error::{NullError, NullResult};
 use crate::{
     base::ParStreamExt as _,
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
 };
-pub use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Notify, Semaphore};
 
 pub fn par_gather<S>(
     streams: impl IntoIterator<Item = S>,
@@ -20,11 +21,12 @@ where
         let output_tx = output_tx.clone();
         async move {
             while let Some(item) = stream.next().await {
-                output_tx.send(item).await.unwrap();
+                output_tx.send(item).await?;
             }
+            Ok(())
         }
     });
-    let gather_fut = futures::future::join_all(futs);
+    let gather_fut = futures::future::try_join_all(futs);
 
     ParGather {
         fut: Some(Box::pin(gather_fut)),
@@ -233,17 +235,18 @@ pub trait ParStreamExt {
             async move {
                 while let Some(item) = self.next().await {
                     let permit = counter.clone().acquire_owned().await;
-                    buf_tx.send((item, permit)).await.unwrap();
+                    buf_tx.send((item, permit)).await?;
                 }
                 fused.notify_one();
+                Ok(())
             }
         };
 
         let pairing_fut = async move {
             let (lhs_item, lhs_permit) = loop {
-                let (lhs_item, lhs_permit) = buf_rx.next().await.unwrap();
+                let (lhs_item, lhs_permit) = buf_rx.recv().await?;
                 let (rhs_item, rhs_permit) = tokio::select! {
-                    rhs = &mut buf_rx.next() => rhs.unwrap(),
+                    rhs = &mut buf_rx.next() => rhs.ok_or_else(|| NullError)?,
                     _ = fused.notified() => {
                         break (lhs_item, lhs_permit);
                     }
@@ -253,29 +256,31 @@ pub trait ParStreamExt {
                 mem::drop(rhs_permit);
 
                 let fut = f(lhs_item, rhs_item);
-                job_tx.send((fut, lhs_permit)).await.unwrap();
+                job_tx.send((fut, lhs_permit)).await?;
             };
 
             if counter.available_permits() <= buf_size - 2 {
-                let (rhs_item, rhs_permit) = buf_rx.next().await.unwrap();
+                let (rhs_item, rhs_permit) = buf_rx.recv().await?;
                 mem::drop(rhs_permit);
                 let fut = f(lhs_item, rhs_item);
-                job_tx.send((fut, lhs_permit)).await.unwrap();
+                job_tx.send((fut, lhs_permit)).await?;
             }
 
             while counter.available_permits() <= buf_size - 2 {
-                let (lhs_item, lhs_permit) = buf_rx.next().await.unwrap();
-                let (rhs_item, rhs_permit) = buf_rx.next().await.unwrap();
+                let (lhs_item, lhs_permit) = buf_rx.recv().await?;
+                let (rhs_item, rhs_permit) = buf_rx.recv().await?;
                 mem::drop(rhs_permit);
                 let fut = f(lhs_item, rhs_item);
-                job_tx.send((fut, lhs_permit)).await.unwrap();
+                job_tx.send((fut, lhs_permit)).await?;
             }
 
-            let (item, _permit) = buf_rx.next().await.unwrap();
-            let _ = output_tx.send(item);
+            let (item, _permit) = buf_rx.recv().await?;
+            output_tx.send(item).map_err(|_| ())?;
+
+            Ok(())
         };
 
-        let reduce_futs = (0..limit)
+        let reduce_futs: Vec<_> = (0..limit)
             .map(|_| {
                 let job_rx = job_rx.clone();
                 let buf_tx = buf_tx.clone();
@@ -283,17 +288,18 @@ pub trait ParStreamExt {
                 let fut = async move {
                     while let Ok((fut, permit)) = job_rx.recv().await {
                         let output = fut.await;
-                        buf_tx.send((output, permit)).await.unwrap();
+                        buf_tx.send((output, permit)).await?;
                     }
+                    Ok(())
                 };
                 tokio::task::spawn(fut).map(|result| result.unwrap())
             })
-            .collect::<Vec<_>>();
+            .collect();
 
-        let par_reduce_fut = futures::future::join3(
+        let par_reduce_fut = futures::future::try_join3(
             buffering_fut,
             pairing_fut,
-            futures::future::join_all(reduce_futs),
+            futures::future::try_join_all(reduce_futs),
         );
 
         ParReduce {
@@ -334,8 +340,9 @@ pub trait ParStreamExt {
                     let map_fut = tokio::task::spawn(async move {
                         while let Ok((counter, fut)) = map_rx.recv().await {
                             let output = fut.await;
-                            reorder_tx.send((counter, output)).await.unwrap();
+                            reorder_tx.send((counter, output)).await?;
                         }
+                        Ok(())
                     })
                     .map(|result| result.unwrap());
 
@@ -354,10 +361,12 @@ pub trait ParStreamExt {
                     .expect("the routing function returns an invalid index");
                 let map_tx = map_txs.get_mut(index).unwrap();
                 let fut = map_fn(item);
-                map_tx.send((counter, fut)).await.unwrap();
+                map_tx.send((counter, fut)).await?;
 
                 counter = counter.wrapping_add(1);
             }
+
+            Ok(())
         };
 
         let reorder_fut = async move {
@@ -370,20 +379,22 @@ pub trait ParStreamExt {
                     continue;
                 }
 
-                output_tx.send(output).await.unwrap();
+                output_tx.send(output).await?;
                 counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
-                    output_tx.send(output).await.unwrap();
+                    output_tx.send(output).await?;
                     counter = counter.wrapping_add(1);
                 }
             }
+
+            Ok(())
         };
 
-        let par_routing_fut = futures::future::join3(
+        let par_routing_fut = futures::future::try_join3(
             routing_fut,
             reorder_fut,
-            futures::future::join_all(map_futs),
+            futures::future::try_join_all(map_futs),
         );
 
         ParRouting {
@@ -423,8 +434,9 @@ pub trait ParStreamExt {
                     let map_fut = tokio::task::spawn(async move {
                         while let Ok(fut) = map_rx.recv().await {
                             let output = fut.await;
-                            output_tx.send(output).await.unwrap();
+                            output_tx.send(output).await?;
                         }
+                        Ok(())
                     })
                     .map(|result| result.unwrap());
 
@@ -441,12 +453,13 @@ pub trait ParStreamExt {
                     .expect("the routing function returns an invalid index");
                 let map_tx = map_txs.get_mut(index).unwrap();
                 let fut = map_fn(item);
-                map_tx.send(fut).await.unwrap();
+                map_tx.send(fut).await?;
             }
+            Ok(())
         };
 
         let par_routing_fut =
-            futures::future::join(routing_fut, futures::future::join_all(map_futs));
+            futures::future::try_join(routing_fut, futures::future::try_join_all(map_futs));
 
         ParRoutingUnordered {
             fut: Some(Box::pin(par_routing_fut)),
@@ -469,7 +482,9 @@ pub trait ParStreamExt {
 
         let scatter_fut = Box::pin(async move {
             while let Some(item) = self.next().await {
-                tx.send(item).await.unwrap();
+                if let Err(_) = tx.send(item).await {
+                    break;
+                }
             }
         });
 
@@ -571,7 +586,7 @@ impl<T> Stream for ParMap<T> {
 #[derivative(Debug)]
 pub struct ParMapUnordered<T> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, NullResult<Vec<()>>)> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<T>,
 }
@@ -595,8 +610,9 @@ impl<T> ParMapUnordered<T> {
         let map_fut = async move {
             while let Some(item) = stream.next().await {
                 let fut = f(item);
-                map_tx.send(fut).await.unwrap();
+                map_tx.send(fut).await?;
             }
+            Ok(())
         };
 
         let worker_futs: Vec<_> = (0..num_workers)
@@ -607,15 +623,17 @@ impl<T> ParMapUnordered<T> {
                 let worker_fut = async move {
                     while let Ok(fut) = map_rx.recv().await {
                         let output = fut.await;
-                        output_tx.send(output).await.unwrap();
+                        output_tx.send(output).await?;
                     }
+                    Ok(())
                 };
                 let worker_fut = tokio::task::spawn(worker_fut).map(|result| result.unwrap());
                 worker_fut
             })
             .collect();
 
-        let par_then_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
+        let par_then_fut =
+            futures::future::join(map_fut, futures::future::try_join_all(worker_futs));
 
         Self {
             fut: Some(Box::pin(par_then_fut)),
@@ -656,7 +674,7 @@ impl<T> Stream for ParMapUnordered<T> {
 #[derivative(Debug)]
 pub struct ParReduce<T> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: futures::channel::oneshot::Receiver<T>,
 }
@@ -698,7 +716,7 @@ impl<T> Future for ParReduce<T> {
 #[derivative(Debug)]
 pub struct ParRouting<T> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), (), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<T>,
 }
@@ -735,7 +753,7 @@ impl<T> Stream for ParRouting<T> {
 #[derivative(Debug)]
 pub struct ParRoutingUnordered<T> {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<T>,
 }
@@ -775,7 +793,7 @@ where
     T: Send,
 {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = Vec<()>> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = NullResult<Vec<()>>> + Send>>>,
     #[derivative(Debug = "ignore")]
     output_rx: async_std::channel::Receiver<T>,
 }
@@ -815,7 +833,7 @@ where
 #[derivative(Debug)]
 pub struct ParForEach {
     #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = ((), Vec<()>)> + Send>>>,
+    fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, Vec<()>)> + Send>>>,
 }
 
 impl ParForEach {
@@ -835,8 +853,9 @@ impl ParForEach {
         let map_fut = async move {
             while let Some(item) = stream.next().await {
                 let fut = f(item);
-                map_tx.send(fut).await.unwrap();
+                map_tx.send(fut).await?;
             }
+            Ok(())
         };
 
         let worker_futs: Vec<_> = (0..num_workers)
