@@ -25,6 +25,12 @@ compile_error!(
     "exact one of 'runtime_async-std' and 'runtime_tokio' cargo feature must be enabled"
 );
 
+/// Commonly used traits.
+pub mod prelude {
+    pub use super::stream::ParStreamExt;
+    pub use super::try_stream::TryParStreamExt;
+}
+
 mod base;
 mod common;
 mod config;
