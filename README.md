@@ -15,7 +15,7 @@ Here is an example `Cargo.toml`.
 
 ```toml
 [dependencies]
-par-stream = { version = "0.3", features = ["runtime_tokio"] }
+par-stream = { version = "0.4", features = ["runtime_tokio"] }
 ```
 
 ## Features
