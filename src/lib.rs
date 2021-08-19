@@ -27,8 +27,7 @@ compile_error!(
 
 /// Commonly used traits.
 pub mod prelude {
-    pub use super::stream::ParStreamExt;
-    pub use super::try_stream::TryParStreamExt;
+    pub use super::{stream::ParStreamExt, try_stream::TryParStreamExt};
 }
 
 mod base;
