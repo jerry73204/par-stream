@@ -12,21 +12,23 @@ readme = "README.md"
 license = "MIT"
 
 [dependencies]
-futures = "0.3.16"
+futures = "0.3.17"
 num_cpus = "1.13.0"
-async-std = { version = "1.9.0", optional = true }
-tokio = { version = "1.10.0", features = ["rt-multi-thread"], optional = true }
+async-std = { version = "1.10.0", optional = true }
+tokio = { version = "1.11.0", features = ["sync", "macros"] }
 pin-project = "1.0.8"
 derivative = "2.2.0"
+async-channel = "1.6.1"
 
 [dev-dependencies]
+tokio = { version = "1.11.0", features = ["sync", "macros", "rt-multi-thread"] }
 rand = "0.8.4"
-async-std = { version = "1.9.0", features = ["unstable", "attributes"] } # for doc tests
+async-std = { version = "1.10.0", features = ["unstable", "attributes"] } # for doc tests
 
 [features]
-runtime_async-std = ["async-std", "async-std/unstable", "async-std/attributes", "tokio", "tokio/sync", "tokio/macros"]
-runtime_tokio = ["tokio", "tokio/sync", "tokio/macros", "async-std", "async-std/unstable"]
-doc-only = ["runtime_async-std"]
+runtime-async-std = ["async-std"]
+runtime-tokio = ["tokio/rt-multi-thread"]
+doc-tokio = ["runtime-tokio"]
 
 [package.metadata.docs.rs]
 features = ["doc-only"]

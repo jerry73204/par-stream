@@ -43,13 +43,13 @@ async fn main_async() {
     println!("worker2 process {} numbers", n_neg);
 }
 
-#[cfg(feature = "runtime_async-std")]
+#[cfg(feature = "runtime-async-std")]
 #[async_std::main]
 async fn main() {
     main_async().await
 }
 
-#[cfg(feature = "runtime_tokio")]
+#[cfg(feature = "runtime-tokio")]
 #[tokio::main]
 async fn main() {
     main_async().await

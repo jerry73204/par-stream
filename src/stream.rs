@@ -15,7 +15,7 @@ where
     S::Item: Send,
 {
     let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
-    let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+    let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
     let futs = streams.into_iter().map(|mut stream| {
         let output_tx = output_tx.clone();
@@ -244,8 +244,8 @@ pub trait ParStreamExt {
 
         let fused = Arc::new(Notify::new());
         let counter = Arc::new(Semaphore::new(buf_size));
-        let (buf_tx, mut buf_rx) = async_std::channel::bounded(buf_size);
-        let (job_tx, job_rx) = async_std::channel::bounded(limit);
+        let (buf_tx, mut buf_rx) = async_channel::bounded(buf_size);
+        let (job_tx, job_rx) = async_channel::bounded(limit);
         let (output_tx, output_rx) = futures::channel::oneshot::channel();
 
         let buffering_fut = {
@@ -348,14 +348,14 @@ pub trait ParStreamExt {
             Some(size) => size,
         };
 
-        let (reorder_tx, reorder_rx) = async_std::channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+        let (reorder_tx, reorder_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
         let (mut map_txs, map_futs) =
             map_fns
                 .iter()
                 .fold((vec![], vec![]), |(mut map_txs, mut map_futs), _| {
-                    let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
+                    let (map_tx, map_rx) = async_channel::bounded(buf_size);
                     let reorder_tx = reorder_tx.clone();
 
                     let map_fut = rt::spawn(async move {
@@ -443,13 +443,13 @@ pub trait ParStreamExt {
             Some(size) => size,
         };
 
-        let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
         let (mut map_txs, map_futs) =
             map_fns
                 .iter()
                 .fold((vec![], vec![]), |(mut map_txs, mut map_futs), _| {
-                    let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
+                    let (map_tx, map_rx) = async_channel::bounded(buf_size);
                     let output_tx = output_tx.clone();
 
                     let map_fut = rt::spawn(async move {
@@ -493,13 +493,13 @@ pub trait ParStreamExt {
         buf_size: impl Into<Option<usize>>,
     ) -> (
         Pin<Box<dyn Future<Output = ()>>>,
-        async_std::channel::Receiver<Self::Item>,
+        async_channel::Receiver<Self::Item>,
     )
     where
         Self: 'static + StreamExt + Sized + Unpin,
     {
         let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
-        let (tx, rx) = async_std::channel::bounded(buf_size);
+        let (tx, rx) = async_channel::bounded(buf_size);
 
         let scatter_fut = Box::pin(async move {
             while let Some(item) = self.next().await {
@@ -711,7 +711,7 @@ pub struct ParMapUnordered<T> {
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, NullResult<Vec<()>>)> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<T>,
+    output_rx: async_channel::Receiver<T>,
 }
 
 impl<T> ParMapUnordered<T> {
@@ -727,8 +727,8 @@ impl<T> ParMapUnordered<T> {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+        let (map_tx, map_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
         let map_fut = async move {
             while let Some(item) = stream.next().await {
@@ -841,7 +841,7 @@ pub struct ParRouting<T> {
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<T>,
+    output_rx: async_channel::Receiver<T>,
 }
 
 impl<T> Stream for ParRouting<T> {
@@ -878,7 +878,7 @@ pub struct ParRoutingUnordered<T> {
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<T>,
+    output_rx: async_channel::Receiver<T>,
 }
 
 impl<T> Stream for ParRoutingUnordered<T> {
@@ -918,7 +918,7 @@ where
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = NullResult<Vec<()>>> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<T>,
+    output_rx: async_channel::Receiver<T>,
 }
 
 impl<T> Stream for ParGather<T>
@@ -971,7 +971,7 @@ impl ParForEach {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
+        let (map_tx, map_rx) = async_channel::bounded(buf_size);
 
         let map_fut = async move {
             while let Some(item) = stream.next().await {

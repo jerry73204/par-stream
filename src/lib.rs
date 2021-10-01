@@ -17,25 +17,15 @@
 //! - `2.3` or non-zero floating points: Scale the number of workers to 2.3 times the number of system CPUs, and double size of input buffer.
 //! - `(10, 15)`: Scales to absolute 10 workers, and sets the input buffer size to 15.
 
-#[cfg(not(any(
-    all(feature = "runtime_async-std", not(feature = "runtime_tokio")),
-    all(not(feature = "runtime_async-std"), feature = "runtime_tokio"),
-)))]
-compile_error!(
-    "exact one of 'runtime_async-std' and 'runtime_tokio' cargo feature must be enabled"
-);
-
 /// Commonly used traits.
 pub mod prelude {
     pub use super::{stream::ParStreamExt, try_stream::TryParStreamExt};
 }
 
-mod error;
-mod rt;
-// mod base;
 mod common;
 mod config;
-// mod impls;
+mod error;
+mod rt;
 mod stream;
 mod try_stream;
 

@@ -1,12 +1,75 @@
 use crate::common::*;
 
-#[cfg(feature = "runtime_tokio")]
+#[cfg(not(any(
+    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
+    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+)))]
+compile_error!(
+    "one of 'runtime-async-std' 'runtime-tokio', 'runtime-tokio-multi-threaded' feature must be enabled for this crate"
+);
+
+#[cfg(not(any(
+    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
+    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+)))]
+pub use rt_dummy::*;
+
+#[cfg(all(not(feature = "runtime-async-std"), feature = "runtime-tokio"))]
 pub use rt_tokio::*;
 
-#[cfg(feature = "runtime_async-std")]
+#[cfg(all(
+    feature = "runtime-async-std",
+    not(feature = "runtime-tokio"),
+    not(feature = "runtime-tokio-multi-threaded")
+))]
 pub use rt_async_std::*;
 
-#[cfg(feature = "runtime_tokio")]
+#[cfg(not(any(
+    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
+    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+)))]
+mod rt_dummy {
+    use super::*;
+
+    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: 'static + Future + Send,
+        F::Output: 'static + Send,
+    {
+        panic!();
+    }
+
+    pub fn spawn_blocking<F, R>(f: F) -> JoinHandle<R>
+    where
+        F: 'static + Send + FnOnce() -> R,
+        R: 'static + Send,
+    {
+        panic!();
+    }
+
+    #[derive(Debug)]
+    #[repr(transparent)]
+    pub struct JoinHandle<T> {
+        _private: [u8; 0],
+        _phantom: PhantomData<T>,
+    }
+
+    impl<T> Future for JoinHandle<T> {
+        type Output = Result<T, JoinError>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            panic!();
+        }
+    }
+
+    #[derive(Debug)]
+    #[repr(transparent)]
+    pub struct JoinError {
+        _private: [u8; 0],
+    }
+}
+
+#[cfg(all(not(feature = "runtime-async-std"), feature = "runtime-tokio"))]
 mod rt_tokio {
     use super::*;
 
@@ -45,7 +108,11 @@ mod rt_tokio {
     pub struct JoinError(tokio::task::JoinError);
 }
 
-#[cfg(feature = "runtime_async-std")]
+#[cfg(all(
+    feature = "runtime-async-std",
+    not(feature = "runtime-tokio"),
+    not(feature = "runtime-tokio-multi-threaded")
+))]
 mod rt_async_std {
     use super::*;
 

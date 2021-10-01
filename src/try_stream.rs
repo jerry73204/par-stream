@@ -46,9 +46,9 @@ pub trait TryParStreamExt {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
-        let (reorder_tx, reorder_rx) = async_std::channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+        let (map_tx, map_rx) = async_channel::bounded(buf_size);
+        let (reorder_tx, reorder_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
         let map_fut = {
             let reorder_tx = reorder_tx.clone();
@@ -161,8 +161,8 @@ pub trait TryParStreamExt {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_std::channel::bounded(buf_size);
+        let (map_tx, map_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
         let map_fut = {
             let output_tx = output_tx.clone();
@@ -329,7 +329,7 @@ pub trait TryParStreamExt {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_std::channel::bounded(buf_size);
+        let (map_tx, map_rx) = async_channel::bounded(buf_size);
         let (terminate_tx, _terminate_rx22) = tokio::sync::broadcast::channel(1);
 
         let map_fut = {
@@ -471,7 +471,7 @@ pub struct TryParMap<T, E> {
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<Result<T, E>>,
+    output_rx: async_channel::Receiver<Result<T, E>>,
 }
 
 impl<T, E> Stream for TryParMap<T, E> {
@@ -508,7 +508,7 @@ pub struct TryParMapUnordered<T, E> {
     #[derivative(Debug = "ignore")]
     fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
     #[derivative(Debug = "ignore")]
-    output_rx: async_std::channel::Receiver<Result<T, E>>,
+    output_rx: async_channel::Receiver<Result<T, E>>,
 }
 
 impl<T, E> Stream for TryParMapUnordered<T, E> {

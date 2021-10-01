@@ -6,14 +6,14 @@ impl From<()> for NullError {
     }
 }
 
-impl<T> From<async_std::channel::SendError<T>> for NullError {
-    fn from(_: async_std::channel::SendError<T>) -> Self {
+impl<T> From<async_channel::SendError<T>> for NullError {
+    fn from(_: async_channel::SendError<T>) -> Self {
         Self
     }
 }
 
-impl From<async_std::channel::RecvError> for NullError {
-    fn from(_: async_std::channel::RecvError) -> Self {
+impl From<async_channel::RecvError> for NullError {
+    fn from(_: async_channel::RecvError) -> Self {
         Self
     }
 }
