@@ -6,7 +6,7 @@ use crate::{
 };
 use tokio::sync::Mutex;
 
-/// An extension trait for [TryStream](TryStream) that provides parallel combinator functions.
+/// An extension trait for streams providing fallible combinators for parallel processing.
 pub trait TryParStreamExt {
     /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
     /// receiving an error.
@@ -49,7 +49,7 @@ pub trait TryParStreamExt {
                         .filter(|(result, tx)| {
                             let ok = result.is_ok();
                             if !ok {
-                                sender_set.pin().remove(&tx);
+                                sender_set.pin().remove(tx);
                             }
                             ok
                         })

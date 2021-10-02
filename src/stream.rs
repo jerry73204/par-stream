@@ -74,7 +74,7 @@ where
     }
 }
 
-/// An extension trait for [Stream](Stream) that provides parallel combinator functions.
+/// An extension trait for streams providing combinators for parallel processing.
 pub trait ParStreamExt {
     /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
     ///
@@ -161,7 +161,7 @@ pub trait ParStreamExt {
                         .filter(|(result, tx)| {
                             let ok = result.is_ok();
                             if !ok {
-                                sender_set.pin().remove(&tx);
+                                sender_set.pin().remove(tx);
                             }
                             ok
                         })

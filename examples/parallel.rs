@@ -6,7 +6,7 @@ async fn main_async() {
     let scale = Box::new(2usize);
     let addition = Box::new(1usize);
 
-    let doubled = futures::stream::iter(0..1000)
+    let doubled: Vec<_> = futures::stream::iter(0..1000)
         // parallel tasks on futures
         .par_then(None, move |value| {
             // cloned needed variables in the main thread
@@ -24,7 +24,7 @@ async fn main_async() {
             move || value + cloned
         })
         // call `collect()` from futures crate
-        .collect::<Vec<_>>()
+        .collect()
         .await;
 
     // the output will be ordered
