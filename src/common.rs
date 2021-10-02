@@ -4,16 +4,23 @@ pub use futures::{
     stream::{FusedStream, Stream, StreamExt, TryStream, TryStreamExt},
     FutureExt,
 };
+pub use owning_ref::ArcRef;
 pub use pin_project::pin_project;
 pub use std::{
     cmp,
     cmp::Ordering,
     collections::HashMap,
     future::Future,
+    iter,
     marker::PhantomData,
-    mem,
+    mem::{self, ManuallyDrop},
+    ops::{Deref, DerefMut},
     pin::Pin,
+    ptr::{self, NonNull},
     slice,
-    sync::{Arc, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering::*},
+        Arc, Weak,
+    },
     task::{Context, Poll},
 };
