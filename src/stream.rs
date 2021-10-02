@@ -18,19 +18,16 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
 /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
 /// async fn main() {
-///     let outer = Box::new(2);
+///     let orig = futures::stream::iter(0..1000);
 ///
-///     // scatter to two receivers
-///     let (scatter_fut, rx1) = futures::stream::iter(0..1000).par_scatter(None);
+///     // scatter stream items to two receivers
+///     let rx1 = orig.scatter(None);
 ///     let rx2 = rx1.clone();
 ///
 ///     // gather back from two receivers
-///     let gather_fut = par_stream::gather(vec![rx1, rx2], None).collect::<HashSet<_>>();
+///     let values: HashSet<_> = par_stream::gather(vec![rx1, rx2], None).collect().await;
 ///
-///     // collect the items from respective workers
-///     let ((), values) = futures::join!(scatter_fut, gather_fut);
-///
-///     // the gathered values have exactly the same size with the stream
+///     // the gathered values have equal content with the original
 ///     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
 /// }
 /// ```
@@ -912,50 +909,28 @@ pub trait ParStreamExt {
     /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
     /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
-    ///     let outer = Box::new(2);
+    ///     let orig = futures::stream::iter(1isize..=1000);
     ///
-    ///     let (scatter_fut, rx1) = futures::stream::iter(0..1000).par_scatter(None);
+    ///     // scatter the items
+    ///     let rx1 = orig.scatter(None);
     ///     let rx2 = rx1.clone();
     ///
-    ///     // first parallel worker
-    ///     let worker1 = async_std::task::spawn(async move {
-    ///         let mut values = vec![];
-    ///         while let Ok(value) = rx1.recv().await {
-    ///             values.push(value);
-    ///         }
-    ///         values
-    ///     });
+    ///     // collect the values concurrently
+    ///     let (values1, values2): (Vec<_>, Vec<_>) = futures::join!(rx1.collect(), rx2.collect());
     ///
-    ///     // second parallel worker
-    ///     let worker2 = async_std::task::spawn(async move {
-    ///         let mut values = vec![];
-    ///         while let Ok(value) = rx2.recv().await {
-    ///             values.push(value);
-    ///         }
-    ///         values
-    ///     });
-    ///
-    ///     // collect the items from respective workers
-    ///     let ((), values1, values2) = futures::join!(scatter_fut, worker1, worker2);
-    ///
-    ///     // the union of collected values have exactly the same size with the stream
+    ///     // the total item count is equal to the original set
     ///     assert_eq!(values1.len() + values2.len(), 1000);
     /// }
     /// ```
-    fn par_scatter(
-        mut self,
-        buf_size: impl Into<Option<usize>>,
-    ) -> (
-        Pin<Box<dyn Future<Output = ()>>>,
-        async_channel::Receiver<Self::Item>,
-    )
+    fn scatter(mut self, buf_size: impl Into<Option<usize>>) -> Scatter<Self::Item>
     where
-        Self: 'static + StreamExt + Sized + Unpin,
+        Self: 'static + StreamExt + Sized + Unpin + Send,
+        Self::Item: Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
         let (tx, rx) = async_channel::bounded(buf_size);
 
-        let scatter_fut = Box::pin(async move {
+        let future = rt::spawn(async move {
             while let Some(item) = self.next().await {
                 if tx.send(item).await.is_err() {
                     break;
@@ -963,7 +938,10 @@ pub trait ParStreamExt {
             }
         });
 
-        (scatter_fut, rx)
+        Scatter {
+            future: Arc::new(Mutex::new(Some(future))),
+            receiver: rx,
+        }
     }
 
     /// Runs an asynchronous task on each element of an stream in parallel.
@@ -1041,6 +1019,45 @@ pub trait ParStreamExt {
 }
 
 impl<S> ParStreamExt for S where S: Stream {}
+
+// scatter
+
+pub use scatter::*;
+
+mod scatter {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct Scatter<T> {
+        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) receiver: async_channel::Receiver<T>,
+    }
+
+    impl<T> Stream for Scatter<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Ok(mut future_opt) = self.future.try_lock() {
+                if let Some(future) = &mut *future_opt {
+                    if Pin::new(future).poll(cx).is_ready() {
+                        *future_opt = None;
+                    }
+                }
+            }
+
+            Pin::new(&mut self.receiver).poll_next(cx)
+        }
+    }
+
+    impl<T> Clone for Scatter<T> {
+        fn clone(&self) -> Self {
+            Self {
+                future: self.future.clone(),
+                receiver: self.receiver.clone(),
+            }
+        }
+    }
+}
 
 // tee
 
