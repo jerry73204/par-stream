@@ -25,15 +25,15 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 ///     let rx2 = rx1.clone();
 ///
 ///     // gather back from two receivers
-///     let values: HashSet<_> = par_stream::gather(vec![rx1, rx2], None).collect().await;
+///     let values: HashSet<_> = par_stream::gather(None, vec![rx1, rx2]).collect().await;
 ///
 ///     // the gathered values have equal content with the original
 ///     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
 /// }
 /// ```
 pub fn gather<S>(
-    streams: impl IntoIterator<Item = S>,
     buf_size: impl Into<Option<usize>>,
+    streams: impl IntoIterator<Item = S>,
 ) -> Gather<S::Item>
 where
     S: 'static + StreamExt + Unpin + Send,

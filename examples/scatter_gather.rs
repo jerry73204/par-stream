@@ -7,7 +7,7 @@ async fn main_async() {
 
     // gather from workers
     let gathered_values: Vec<_> =
-        par_stream::gather(vec![rx1.boxed(), rx2.map(|val| -val).boxed()], None)
+        par_stream::gather(None, vec![rx1.boxed(), rx2.map(|val| -val).boxed()])
             .collect()
             .await;
 
