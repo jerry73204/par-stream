@@ -6,7 +6,7 @@ use crate::{
     error::{NullError, NullResult},
     rt,
 };
-use tokio::sync::{Notify, Semaphore};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 /// Collect multiple streams into single stream.
 ///
@@ -64,6 +64,99 @@ where
 
 /// An extension trait for [Stream](Stream) that provides parallel combinator functions.
 pub trait ParStreamExt {
+    /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
+    ///
+    /// When a receiver is cloned, it creates a separate internal buffer, so that a background
+    /// worker clones and passes each stream item to available receiver buffers. It can be used
+    /// to _fork_ a stream into copies and pass them to concurrent workers.
+    ///
+    /// The internal buffer size is determined by the `buf_size`. If `buf_size` is `None`,
+    /// the buffer size will be unbounded. A background worker is started and keeps
+    /// copying item to available receivers. The background worker halts when all receivers
+    /// are dropped.
+    ///
+    ///
+    /// ```rust
+    /// use futures::stream::StreamExt;
+    /// use par_stream::ParStreamExt;
+    ///
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
+    /// async fn main() {
+    ///     let orig: Vec<_> = (0..1000).collect();
+    ///
+    ///     let rx1 = futures::stream::iter(orig.clone()).distribute(1);
+    ///     let rx2 = rx1.clone();
+    ///     let rx3 = rx1.clone();
+    ///
+    ///     let fut1 = rx1.map(|val| val).collect();
+    ///     let fut2 = rx2.map(|val| val * 2).collect();
+    ///     let fut3 = rx3.map(|val| val * 3).collect();
+    ///
+    ///     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+    /// }
+    /// ```
+    fn tee<T>(mut self, buf_size: impl Into<Option<usize>>) -> Tee<T>
+    where
+        Self: 'static + Stream<Item = T> + Sized + Unpin + Send,
+        T: 'static + Send + Clone,
+    {
+        let buf_size = buf_size.into();
+        let (tx, rx) = match buf_size {
+            Some(buf_size) => async_channel::bounded(buf_size),
+            None => async_channel::unbounded(),
+        };
+        let sender_set = Arc::new(flurry::HashSet::new());
+        let guard = sender_set.guard();
+        sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+
+        let future = {
+            let sender_set = sender_set.clone();
+
+            let future = rt::spawn(async move {
+                while let Some(item) = self.next().await {
+                    let futures: Vec<_> = sender_set
+                        .pin()
+                        .iter()
+                        .map(|tx| {
+                            let tx = tx.clone();
+                            let item = item.clone();
+                            async move {
+                                let result = tx.send(item).await;
+                                (result, tx)
+                            }
+                        })
+                        .collect();
+
+                    let results = futures::future::join_all(futures).await;
+                    let success_count = results
+                        .iter()
+                        .filter(|(result, tx)| {
+                            let ok = result.is_ok();
+                            if !ok {
+                                sender_set.pin().remove(&tx);
+                            }
+                            ok
+                        })
+                        .count();
+
+                    if success_count == 0 {
+                        break;
+                    }
+                }
+            });
+
+            Arc::new(Mutex::new(Some(future)))
+        };
+
+        Tee {
+            future,
+            sender_set: Arc::downgrade(&sender_set),
+            receiver: rx,
+            buf_size,
+        }
+    }
+
     /// Gives the current iteration count that may overflow to zero as well as the next value.
     fn wrapping_enumerate<T>(self) -> WrappingEnumerate<T, Self>
     where
@@ -949,6 +1042,58 @@ pub trait ParStreamExt {
 
 impl<S> ParStreamExt for S where S: Stream {}
 
+// par_distribute
+
+#[derive(Debug)]
+pub struct Tee<T> {
+    buf_size: Option<usize>,
+    future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+    sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<T>>>>>,
+    receiver: async_channel::Receiver<T>,
+}
+
+impl<T> Clone for Tee<T>
+where
+    T: 'static + Send,
+{
+    fn clone(&self) -> Self {
+        let buf_size = self.buf_size;
+        let (tx, rx) = match buf_size {
+            Some(buf_size) => async_channel::bounded(buf_size),
+            None => async_channel::unbounded(),
+        };
+        let sender_set = self.sender_set.clone();
+
+        if let Some(sender_set) = sender_set.upgrade() {
+            let guard = sender_set.guard();
+            sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+        }
+
+        Self {
+            future: self.future.clone(),
+            sender_set,
+            receiver: rx,
+            buf_size,
+        }
+    }
+}
+
+impl<T> Stream for Tee<T> {
+    type Item = T;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Ok(mut future_opt) = self.future.try_lock() {
+            if let Some(future) = &mut *future_opt {
+                if Pin::new(future).poll(cx).is_ready() {
+                    *future_opt = None;
+                }
+            }
+        }
+
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
+
 // wrapping_enumerate
 
 #[pin_project(project = WrappingEnumerateProj)]
@@ -1393,6 +1538,8 @@ impl Future for ParForEach {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::prelude::*;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn par_then_output_is_ordered_test() {
@@ -1493,5 +1640,61 @@ mod tests {
                 .await;
             assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
         }
+    }
+
+    #[tokio::test]
+    async fn tee_halt_test() {
+        let mut rx1 = futures::stream::iter(0..).tee(1);
+        let mut rx2 = rx1.clone();
+
+        assert_eq!(rx1.next().await, Some(0));
+        assert_eq!(rx2.next().await, Some(0));
+
+        // drop rx1
+        drop(rx1);
+
+        // the following should not block
+        assert_eq!(rx2.next().await, Some(1));
+        assert_eq!(rx2.next().await, Some(2));
+        assert_eq!(rx2.next().await, Some(3));
+        assert_eq!(rx2.next().await, Some(4));
+        assert_eq!(rx2.next().await, Some(5));
+    }
+
+    #[tokio::test]
+    async fn tee_test() {
+        let orig: Vec<_> = (0..100).collect();
+
+        let rx1 = futures::stream::iter(orig.clone()).tee(1);
+        let rx2 = rx1.clone();
+        let rx3 = rx1.clone();
+
+        let fut1 = rx1
+            .then(|val| async move {
+                let millis = rand::thread_rng().gen_range(0..5);
+                tokio::time::sleep(Duration::from_millis(millis)).await;
+                val
+            })
+            .collect();
+        let fut2 = rx2
+            .then(|val| async move {
+                let millis = rand::thread_rng().gen_range(0..5);
+                tokio::time::sleep(Duration::from_millis(millis)).await;
+                val * 2
+            })
+            .collect();
+        let fut3 = rx3
+            .then(|val| async move {
+                let millis = rand::thread_rng().gen_range(0..5);
+                tokio::time::sleep(Duration::from_millis(millis)).await;
+                val * 3
+            })
+            .collect();
+
+        let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+
+        assert!(orig.iter().zip(&vec1).all(|(&orig, &val)| orig == val));
+        assert!(orig.iter().zip(&vec2).all(|(&orig, &val)| orig * 2 == val));
+        assert!(orig.iter().zip(&vec3).all(|(&orig, &val)| orig * 3 == val));
     }
 }

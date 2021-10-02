@@ -19,9 +19,12 @@ tokio = { version = "1.11.0", features = ["sync", "macros"] }
 pin-project = "1.0.8"
 derivative = "2.2.0"
 async-channel = "1.6.1"
+flurry = "0.3.1"
+owning_ref = "0.4.1"
+by_address = "1.0.4"
 
 [dev-dependencies]
-tokio = { version = "1.11.0", features = ["sync", "macros", "rt-multi-thread"] }
+tokio = { version = "1.11.0", features = ["sync", "macros", "rt-multi-thread", "time"] }
 rand = "0.8.4"
 async-std = { version = "1.10.0", features = ["unstable", "attributes"] } # for doc tests
 

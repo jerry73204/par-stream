@@ -1,3 +1,4 @@
+pub use by_address::ByAddress;
 pub use derivative::Derivative;
 pub use futures::{
     stream::{FusedStream, Stream, StreamExt, TryStream, TryStreamExt},
@@ -11,6 +12,6 @@ pub use std::{
     marker::PhantomData,
     mem,
     pin::Pin,
-    sync::Arc,
+    sync::{Arc, Weak},
     task::{Context, Poll},
 };
