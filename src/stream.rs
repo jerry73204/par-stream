@@ -85,7 +85,7 @@ pub trait ParStreamExt {
     /// async fn main() {
     ///     let orig: Vec<_> = (0..1000).collect();
     ///
-    ///     let rx1 = futures::stream::iter(orig.clone()).distribute(1);
+    ///     let rx1 = futures::stream::iter(orig.clone()).tee(1);
     ///     let rx2 = rx1.clone();
     ///     let rx3 = rx1.clone();
     ///
@@ -1042,7 +1042,7 @@ pub trait ParStreamExt {
 
 impl<S> ParStreamExt for S where S: Stream {}
 
-// par_distribute
+// tee
 
 #[derive(Debug)]
 pub struct Tee<T> {

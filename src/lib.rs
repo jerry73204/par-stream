@@ -4,13 +4,13 @@
 //! existing [Stream](futures::stream::Stream)s with parallel stream combinators.
 //!
 //! The followings are common combinators.
-//! - [`stream.par_then(limit, map_fut)`](ParStreamExt::par_then) processes stream items to parallel futures.
-//! - [`stream.par_map(limit, map_fn)`](ParStreamExt::par_map) processes stream items to parallel closures.
-//! - [`stream.par_then_unordered(limit, map_fut)`](ParStreamExt::par_then_unordered) is unordered version of [`stream.par_then`](ParStreamExt::par_then).
-//! - [`stream.par_then_init(limit, init_fut, map_fut)`](ParStreamExt::par_then_init) accepts an extra in-local thread initializer.
-//! - [`stream.try_par_then(limit, map_fut)`](TryParStreamExt::try_par_then) is the fallible version of [`stream.par_then`](ParStreamExt::par_then).
+//! - [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
+//! - [`stream.par_then(config, map_fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
+//! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered) are unordered variances.
+//! - [`try_par_map()`](TryParStreamExt::try_par_map), [`try_par_then()`](TryParStreamExt::try_par_then), [`try_par_then_unordered()`](TryParStreamExt::try_par_then_unordered)
+//!   are the fallible variances.
 //!
-//! The `limit` parameter configures the worker pool size. It accepts the following values.
+//! The `config` parameter configures the worker pool size. It accepts the following values.
 //!
 //! - `None`: The worker pool size scales to the number of system CPUs, and double size of input buffer.
 //! - `10` or non-zero integers: Scales the worker pool size to absolute 10, and double size of input buffer.
