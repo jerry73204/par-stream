@@ -53,14 +53,18 @@
 
 /// Commonly used traits.
 pub mod prelude {
-    pub use super::{stream::ParStreamExt, try_stream::TryParStreamExt, slice::SliceExt};
+    pub use super::{
+        slice::{SliceExt, SliceMutExt},
+        stream::ParStreamExt,
+        try_stream::TryParStreamExt,
+    };
 }
 
-mod slice;
 mod common;
 mod config;
 mod error;
 mod rt;
+mod slice;
 mod stream;
 mod try_stream;
 

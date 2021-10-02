@@ -6,14 +6,14 @@ pub use futures::{
 };
 pub use pin_project::pin_project;
 pub use std::{
+    cmp,
     cmp::Ordering,
     collections::HashMap,
     future::Future,
     marker::PhantomData,
     mem,
     pin::Pin,
+    slice,
     sync::{Arc, Weak},
     task::{Context, Poll},
-    cmp,
-    slice,
 };
