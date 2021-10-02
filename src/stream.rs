@@ -1044,491 +1044,552 @@ impl<S> ParStreamExt for S where S: Stream {}
 
 // tee
 
-#[derive(Debug)]
-pub struct Tee<T> {
-    buf_size: Option<usize>,
-    future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-    sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<T>>>>>,
-    receiver: async_channel::Receiver<T>,
-}
+pub use tee::*;
 
-impl<T> Clone for Tee<T>
-where
-    T: 'static + Send,
-{
-    fn clone(&self) -> Self {
-        let buf_size = self.buf_size;
-        let (tx, rx) = match buf_size {
-            Some(buf_size) => async_channel::bounded(buf_size),
-            None => async_channel::unbounded(),
-        };
-        let sender_set = self.sender_set.clone();
+mod tee {
+    use super::*;
 
-        if let Some(sender_set) = sender_set.upgrade() {
-            let guard = sender_set.guard();
-            sender_set.insert(ByAddress(Arc::new(tx)), &guard);
-        }
-
-        Self {
-            future: self.future.clone(),
-            sender_set,
-            receiver: rx,
-            buf_size,
-        }
+    #[derive(Debug)]
+    pub struct Tee<T> {
+        pub(super) buf_size: Option<usize>,
+        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<T>>>>>,
+        pub(super) receiver: async_channel::Receiver<T>,
     }
-}
 
-impl<T> Stream for Tee<T> {
-    type Item = T;
+    impl<T> Clone for Tee<T>
+    where
+        T: 'static + Send,
+    {
+        fn clone(&self) -> Self {
+            let buf_size = self.buf_size;
+            let (tx, rx) = match buf_size {
+                Some(buf_size) => async_channel::bounded(buf_size),
+                None => async_channel::unbounded(),
+            };
+            let sender_set = self.sender_set.clone();
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        if let Ok(mut future_opt) = self.future.try_lock() {
-            if let Some(future) = &mut *future_opt {
-                if Pin::new(future).poll(cx).is_ready() {
-                    *future_opt = None;
-                }
+            if let Some(sender_set) = sender_set.upgrade() {
+                let guard = sender_set.guard();
+                sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+            }
+
+            Self {
+                future: self.future.clone(),
+                sender_set,
+                receiver: rx,
+                buf_size,
             }
         }
+    }
 
-        Pin::new(&mut self.receiver).poll_next(cx)
+    impl<T> Stream for Tee<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Ok(mut future_opt) = self.future.try_lock() {
+                if let Some(future) = &mut *future_opt {
+                    if Pin::new(future).poll(cx).is_ready() {
+                        *future_opt = None;
+                    }
+                }
+            }
+
+            Pin::new(&mut self.receiver).poll_next(cx)
+        }
     }
 }
 
 // wrapping_enumerate
 
-#[pin_project(project = WrappingEnumerateProj)]
-#[derive(Debug)]
-pub struct WrappingEnumerate<T, S>
-where
-    S: Stream<Item = T> + Unpin,
-{
-    #[pin]
-    stream: S,
-    counter: usize,
-}
+pub use wrapping_enumerate::*;
 
-impl<T, S> Stream for WrappingEnumerate<T, S>
-where
-    S: Stream<Item = T> + Unpin,
-{
-    type Item = (usize, T);
+mod wrapping_enumerate {
+    use super::*;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let WrappingEnumerateProj { stream, counter } = self.project();
+    #[pin_project(project = WrappingEnumerateProj)]
+    #[derive(Debug)]
+    pub struct WrappingEnumerate<T, S>
+    where
+        S: Stream<Item = T> + Unpin,
+    {
+        #[pin]
+        pub(super) stream: S,
+        pub(super) counter: usize,
+    }
 
-        match stream.poll_next(cx) {
-            Poll::Ready(Some(item)) => {
-                let index = *counter;
-                *counter = counter.wrapping_add(1);
-                Poll::Ready(Some((index, item)))
+    impl<T, S> Stream for WrappingEnumerate<T, S>
+    where
+        S: Stream<Item = T> + Unpin,
+    {
+        type Item = (usize, T);
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let WrappingEnumerateProj { stream, counter } = self.project();
+
+            match stream.poll_next(cx) {
+                Poll::Ready(Some(item)) => {
+                    let index = *counter;
+                    *counter = counter.wrapping_add(1);
+                    Poll::Ready(Some((index, item)))
+                }
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Pending => Poll::Pending,
             }
-            Poll::Ready(None) => Poll::Ready(None),
-            Poll::Pending => Poll::Pending,
         }
     }
 }
 
 // reorder_enumerated
 
-#[pin_project]
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ReorderEnumerated<T, S>
-where
-    S: Stream<Item = (usize, T)> + Unpin,
-{
-    #[pin]
-    stream: S,
-    counter: usize,
-    buffer: HashMap<usize, T>,
-}
+pub use reorder_enumerated::*;
 
-impl<T, S> Stream for ReorderEnumerated<T, S>
-where
-    S: Stream<Item = (usize, T)> + Unpin,
-{
-    type Item = T;
+mod reorder_enumerated {
+    use super::*;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        let stream = this.stream;
-        let counter = this.counter;
-        let buffer = this.buffer;
+    #[pin_project]
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ReorderEnumerated<T, S>
+    where
+        S: Stream<Item = (usize, T)> + Unpin,
+    {
+        #[pin]
+        pub(super) stream: S,
+        pub(super) counter: usize,
+        pub(super) buffer: HashMap<usize, T>,
+    }
 
-        let buffered_item_opt = buffer.remove(counter);
-        if buffered_item_opt.is_some() {
-            *counter = counter.wrapping_add(1);
-        }
+    impl<T, S> Stream for ReorderEnumerated<T, S>
+    where
+        S: Stream<Item = (usize, T)> + Unpin,
+    {
+        type Item = T;
 
-        match (stream.poll_next(cx), buffered_item_opt) {
-            (Poll::Ready(Some((index, item))), Some(buffered_item)) => {
-                assert!(
-                    *counter <= index,
-                    "the enumerated index {} appears more than once",
-                    index
-                );
-                buffer.insert(index, item);
-                Poll::Ready(Some(buffered_item))
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let this = self.project();
+            let stream = this.stream;
+            let counter = this.counter;
+            let buffer = this.buffer;
+
+            let buffered_item_opt = buffer.remove(counter);
+            if buffered_item_opt.is_some() {
+                *counter = counter.wrapping_add(1);
             }
-            (Poll::Ready(Some((index, item))), None) => match (*counter).cmp(&index) {
-                Ordering::Less => {
+
+            match (stream.poll_next(cx), buffered_item_opt) {
+                (Poll::Ready(Some((index, item))), Some(buffered_item)) => {
+                    assert!(
+                        *counter <= index,
+                        "the enumerated index {} appears more than once",
+                        index
+                    );
                     buffer.insert(index, item);
-                    Poll::Pending
+                    Poll::Ready(Some(buffered_item))
                 }
-                Ordering::Equal => {
-                    *counter = counter.wrapping_add(1);
-                    Poll::Ready(Some(item))
+                (Poll::Ready(Some((index, item))), None) => match (*counter).cmp(&index) {
+                    Ordering::Less => {
+                        buffer.insert(index, item);
+                        Poll::Pending
+                    }
+                    Ordering::Equal => {
+                        *counter = counter.wrapping_add(1);
+                        Poll::Ready(Some(item))
+                    }
+                    Ordering::Greater => {
+                        panic!("the enumerated index {} appears more than once", index)
+                    }
+                },
+                (_, Some(buffered_item)) => Poll::Ready(Some(buffered_item)),
+                (Poll::Ready(None), None) => {
+                    if buffer.is_empty() {
+                        Poll::Ready(None)
+                    } else {
+                        Poll::Pending
+                    }
                 }
-                Ordering::Greater => {
-                    panic!("the enumerated index {} appears more than once", index)
-                }
-            },
-            (_, Some(buffered_item)) => Poll::Ready(Some(buffered_item)),
-            (Poll::Ready(None), None) => {
-                if buffer.is_empty() {
-                    Poll::Ready(None)
-                } else {
-                    Poll::Pending
-                }
+                (Poll::Pending, None) => Poll::Pending,
             }
-            (Poll::Pending, None) => Poll::Pending,
         }
     }
 }
 
 // par_map
 
-#[pin_project]
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParMap<T> {
-    #[pin]
-    #[derivative(Debug = "ignore")]
-    stream: Pin<Box<dyn Stream<Item = T> + Send>>,
-}
+pub use par_map::*;
 
-impl<T> Stream for ParMap<T> {
-    type Item = T;
+mod par_map {
+    use super::*;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        self.project().stream.poll_next(cx)
+    #[pin_project]
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParMap<T> {
+        #[pin]
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    }
+
+    impl<T> Stream for ParMap<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            self.project().stream.poll_next(cx)
+        }
     }
 }
 
 // par_map_unordered
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParMapUnordered<T> {
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, NullResult<Vec<()>>)> + Send>>>,
-    #[derivative(Debug = "ignore")]
-    output_rx: async_channel::Receiver<T>,
-}
+pub use par_map_unordered::*;
 
-impl<T> ParMapUnordered<T> {
-    fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamParams, mut f: F) -> Self
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(S::Item) -> Fut + Send,
-        Fut: 'static + Future<Output = T> + Send,
-        S: 'static + StreamExt + Sized + Unpin + Send,
-        S::Item: Send,
-    {
-        let ParStreamParams {
-            num_workers,
-            buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_channel::bounded(buf_size);
+mod par_map_unordered {
+    use super::*;
 
-        let map_fut = async move {
-            while let Some(item) = stream.next().await {
-                let fut = f(item);
-                map_tx.send(fut).await?;
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParMapUnordered<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) fut:
+            Option<Pin<Box<dyn Future<Output = (NullResult<()>, NullResult<Vec<()>>)> + Send>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) output_rx: async_channel::Receiver<T>,
+    }
+
+    impl<T> ParMapUnordered<T> {
+        pub fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamParams, mut f: F) -> Self
+        where
+            T: 'static + Send,
+            F: 'static + FnMut(S::Item) -> Fut + Send,
+            Fut: 'static + Future<Output = T> + Send,
+            S: 'static + StreamExt + Sized + Unpin + Send,
+            S::Item: Send,
+        {
+            let ParStreamParams {
+                num_workers,
+                buf_size,
+            } = config.into_par_stream_params();
+            let (map_tx, map_rx) = async_channel::bounded(buf_size);
+            let (output_tx, output_rx) = async_channel::bounded(buf_size);
+
+            let map_fut = async move {
+                while let Some(item) = stream.next().await {
+                    let fut = f(item);
+                    map_tx.send(fut).await?;
+                }
+                Ok(())
+            };
+
+            let worker_futs: Vec<_> = (0..num_workers)
+                .map(|_| {
+                    let map_rx = map_rx.clone();
+                    let output_tx = output_tx.clone();
+
+                    let worker_fut = async move {
+                        while let Ok(fut) = map_rx.recv().await {
+                            let output = fut.await;
+                            output_tx.send(output).await?;
+                        }
+                        Ok(())
+                    };
+                    rt::spawn(worker_fut).map(|result| result.unwrap())
+                })
+                .collect();
+
+            let par_then_fut =
+                futures::future::join(map_fut, futures::future::try_join_all(worker_futs));
+
+            Self {
+                fut: Some(Box::pin(par_then_fut)),
+                output_rx,
             }
-            Ok(())
-        };
-
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let output_tx = output_tx.clone();
-
-                let worker_fut = async move {
-                    while let Ok(fut) = map_rx.recv().await {
-                        let output = fut.await;
-                        output_tx.send(output).await?;
-                    }
-                    Ok(())
-                };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
-            })
-            .collect();
-
-        let par_then_fut =
-            futures::future::join(map_fut, futures::future::try_join_all(worker_futs));
-
-        Self {
-            fut: Some(Box::pin(par_then_fut)),
-            output_rx,
         }
     }
-}
 
-impl<T> Stream for ParMapUnordered<T> {
-    type Item = T;
+    impl<T> Stream for ParMapUnordered<T> {
+        type Item = T;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut should_wake = match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => true,
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    false
-                }
-            },
-            None => false,
-        };
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let mut should_wake = match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        false
+                    }
+                },
+                None => false,
+            };
 
-        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-        should_wake |= !self.output_rx.is_empty();
+            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+            should_wake |= !self.output_rx.is_empty();
 
-        if should_wake {
-            cx.waker().wake_by_ref();
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
-
-        poll
     }
 }
 
 // par_reduce
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParReduce<T> {
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
-    #[derivative(Debug = "ignore")]
-    output_rx: futures::channel::oneshot::Receiver<T>,
-}
+pub use par_reduce::*;
 
-impl<T> Future for ParReduce<T> {
-    type Output = T;
+mod par_reduce {
+    use super::*;
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-        let mut should_wake = match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => true,
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    false
-                }
-            },
-            None => false,
-        };
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParReduce<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) output_rx: futures::channel::oneshot::Receiver<T>,
+    }
 
-        let poll = Pin::new(&mut self.output_rx)
-            .poll(cx)
-            .map(|result| result.unwrap());
+    impl<T> Future for ParReduce<T> {
+        type Output = T;
 
-        if poll.is_pending() {
-            should_wake |= true;
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            let mut should_wake = match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        false
+                    }
+                },
+                None => false,
+            };
+
+            let poll = Pin::new(&mut self.output_rx)
+                .poll(cx)
+                .map(|result| result.unwrap());
+
+            if poll.is_pending() {
+                should_wake |= true;
+            }
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
-
-        if should_wake {
-            cx.waker().wake_by_ref();
-        }
-
-        poll
     }
 }
 
 // par_routing
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParRouting<T> {
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
-    #[derivative(Debug = "ignore")]
-    output_rx: async_channel::Receiver<T>,
-}
+pub use par_routing::*;
 
-impl<T> Stream for ParRouting<T> {
-    type Item = T;
+mod par_routing {
+    use super::*;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut should_wake = match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => true,
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    false
-                }
-            },
-            None => false,
-        };
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParRouting<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) output_rx: async_channel::Receiver<T>,
+    }
 
-        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-        should_wake |= !self.output_rx.is_empty();
+    impl<T> Stream for ParRouting<T> {
+        type Item = T;
 
-        if should_wake {
-            cx.waker().wake_by_ref();
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let mut should_wake = match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        false
+                    }
+                },
+                None => false,
+            };
+
+            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+            should_wake |= !self.output_rx.is_empty();
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
-
-        poll
     }
 }
 
 // par_routing_unordered
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParRoutingUnordered<T> {
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
-    #[derivative(Debug = "ignore")]
-    output_rx: async_channel::Receiver<T>,
-}
+pub use par_routing_unordered::*;
 
-impl<T> Stream for ParRoutingUnordered<T> {
-    type Item = T;
+mod par_routing_unordered {
+    use super::*;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut should_wake = match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => true,
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    false
-                }
-            },
-            None => false,
-        };
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParRoutingUnordered<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) output_rx: async_channel::Receiver<T>,
+    }
 
-        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-        should_wake |= !self.output_rx.is_empty();
+    impl<T> Stream for ParRoutingUnordered<T> {
+        type Item = T;
 
-        if should_wake {
-            cx.waker().wake_by_ref();
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let mut should_wake = match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        false
+                    }
+                },
+                None => false,
+            };
+
+            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+            should_wake |= !self.output_rx.is_empty();
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
-
-        poll
     }
 }
 
 // gather
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct Gather<T>
-where
-    T: Send,
-{
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = NullResult<Vec<()>>> + Send>>>,
-    #[derivative(Debug = "ignore")]
-    output_rx: async_channel::Receiver<T>,
-}
+pub use gather::*;
 
-impl<T> Stream for Gather<T>
-where
-    T: Send,
-{
-    type Item = T;
+mod gather {
+    use super::*;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        let mut should_wake = match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => true,
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    false
-                }
-            },
-            None => false,
-        };
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct Gather<T>
+    where
+        T: Send,
+    {
+        #[derivative(Debug = "ignore")]
+        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<Vec<()>>> + Send>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) output_rx: async_channel::Receiver<T>,
+    }
 
-        let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-        should_wake |= !self.output_rx.is_empty();
+    impl<T> Stream for Gather<T>
+    where
+        T: Send,
+    {
+        type Item = T;
 
-        if should_wake {
-            cx.waker().wake_by_ref();
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let mut should_wake = match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => true,
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        false
+                    }
+                },
+                None => false,
+            };
+
+            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
+            should_wake |= !self.output_rx.is_empty();
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
-
-        poll
     }
 }
 
 // for each
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct ParForEach {
-    #[derivative(Debug = "ignore")]
-    fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, Vec<()>)> + Send>>>,
-}
+pub use par_for_each::*;
 
-impl ParForEach {
-    pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamParams, mut f: F) -> Self
-    where
-        St: 'static + Stream + Unpin + Sized + Send,
-        St::Item: Send,
-        F: 'static + FnMut(St::Item) -> Fut + Send,
-        Fut: 'static + Future<Output = ()> + Send,
-    {
-        let ParStreamParams {
-            num_workers,
-            buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_channel::bounded(buf_size);
+mod par_for_each {
+    use super::*;
 
-        let map_fut = async move {
-            while let Some(item) = stream.next().await {
-                let fut = f(item);
-                map_tx.send(fut).await?;
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParForEach {
+        #[derivative(Debug = "ignore")]
+        fut: Option<Pin<Box<dyn Future<Output = (NullResult<()>, Vec<()>)> + Send>>>,
+    }
+
+    impl ParForEach {
+        pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamParams, mut f: F) -> Self
+        where
+            St: 'static + Stream + Unpin + Sized + Send,
+            St::Item: Send,
+            F: 'static + FnMut(St::Item) -> Fut + Send,
+            Fut: 'static + Future<Output = ()> + Send,
+        {
+            let ParStreamParams {
+                num_workers,
+                buf_size,
+            } = config.into_par_stream_params();
+            let (map_tx, map_rx) = async_channel::bounded(buf_size);
+
+            let map_fut = async move {
+                while let Some(item) = stream.next().await {
+                    let fut = f(item);
+                    map_tx.send(fut).await?;
+                }
+                Ok(())
+            };
+
+            let worker_futs: Vec<_> = (0..num_workers)
+                .map(|_| {
+                    let map_rx = map_rx.clone();
+
+                    let worker_fut = async move {
+                        while let Ok(fut) = map_rx.recv().await {
+                            fut.await;
+                        }
+                    };
+                    rt::spawn(worker_fut).map(|result| result.unwrap())
+                })
+                .collect();
+
+            let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
+
+            Self {
+                fut: Some(Box::pin(join_fut)),
             }
-            Ok(())
-        };
-
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-
-                let worker_fut = async move {
-                    while let Ok(fut) = map_rx.recv().await {
-                        fut.await;
-                    }
-                };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
-            })
-            .collect();
-
-        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
-
-        Self {
-            fut: Some(Box::pin(join_fut)),
         }
     }
-}
 
-impl Future for ParForEach {
-    type Output = ();
+    impl Future for ParForEach {
+        type Output = ();
 
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.fut.as_mut() {
-            Some(fut) => match Pin::new(fut).poll(cx) {
-                Poll::Pending => {
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-                Poll::Ready(_) => {
-                    self.fut = None;
-                    Poll::Ready(())
-                }
-            },
-            None => Poll::Ready(()),
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            match self.fut.as_mut() {
+                Some(fut) => match Pin::new(fut).poll(cx) {
+                    Poll::Pending => {
+                        cx.waker().wake_by_ref();
+                        Poll::Pending
+                    }
+                    Poll::Ready(_) => {
+                        self.fut = None;
+                        Poll::Ready(())
+                    }
+                },
+                None => Poll::Ready(()),
+            }
         }
     }
 }
