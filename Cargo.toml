@@ -31,7 +31,7 @@ async-std = { version = "1.10.0", features = ["unstable", "attributes"] } # for 
 [features]
 runtime-async-std = ["async-std"]
 runtime-tokio = ["tokio/rt-multi-thread"]
-doc-only = ["runtime-tokio"]
+doc-only = ["runtime-tokio", "async-std"]
 
 [package.metadata.docs.rs]
 features = ["doc-only"]

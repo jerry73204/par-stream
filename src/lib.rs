@@ -1,21 +1,54 @@
 //! Asynchronous parallel streams analogous to [rayon](https://github.com/rayon-rs/rayon).
 //!
-//! The [ParStreamExt](ParStreamExt) and [TryParStreamExt](TryParStreamExt) traits extends
-//! existing [Stream](futures::stream::Stream)s with parallel stream combinators.
+//! # Combinators
 //!
-//! The followings are common combinators.
-//! - [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
-//! - [`stream.par_then(config, map_fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
-//! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered) are unordered variances.
-//! - [`try_par_map()`](TryParStreamExt::try_par_map), [`try_par_then()`](TryParStreamExt::try_par_then), [`try_par_then_unordered()`](TryParStreamExt::try_par_then_unordered)
-//!   are the fallible variances.
+//! The [ParStreamExt](ParStreamExt) and [TryParStreamExt](TryParStreamExt) traits add
+//! new combinators to existing [streams](futures::stream::Stream), that are targeted for
+//! parallel computing and data processing.
 //!
-//! The `config` parameter configures the worker pool size. It accepts the following values.
+//! ## Parallel Processing
 //!
-//! - `None`: The worker pool size scales to the number of system CPUs, and double size of input buffer.
-//! - `10` or non-zero integers: Scales the worker pool size to absolute 10, and double size of input buffer.
-//! - `2.3` or non-zero floating points: Scale the number of workers to 2.3 times the number of system CPUs, and double size of input buffer.
-//! - `(10, 15)`: Scales to absolute 10 workers, and sets the input buffer size to 15.
+//! - [`stream.par_map(config, fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
+//! - [`stream.par_then(config, fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
+//! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered)
+//!   are unordered variances.
+//! - [`try_par_map()`](TryParStreamExt::try_par_map), [`try_par_then()`](TryParStreamExt::try_par_then),
+//!   [`try_par_then_unordered()`](TryParStreamExt::try_par_then_unordered) are the fallible variances.
+//!
+//! ## Distributing Patterns
+//!
+//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates a copy of a stream.
+//! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) forks a stream into parts.
+//! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
+//!
+//! ## Ordering
+//!
+//! - [`stream.wrapping_enumerate()`](ParStreamExt::wrapping_enumerate) is like [`enumerate()`](futures::StreamExt::enumerate),
+//!   but wraps around to zero after reaching [usize::MAX].
+//! - [`stream.reorder_enumerated()`](ParStreamExt::reorder_enumerated) accepts a `(usize, T)` typed stream and
+//!   reorder the items according to the index number.
+//! - [`stream.try_wrapping_enumerate()`](TryParStreamExt::try_wrapping_enumerate) and
+//!   [`stream.try_reorder_enumerated()`](TryParStreamExt::try_reorder_enumerated) are fallible counterparts.
+//!
+//! ## Configure Number of Workers
+//!
+//! The `config` parameter of [`stream.par_map(config, fn)`](ParStreamExt::par_map) controls
+//! the number of concurrent workers and internal buffer size. It accepts the following values.
+//!
+//! - `None`: The number of workers defaults to the number of system processors.
+//! - `10` or non-zero integers: 10 workers.
+//! - `2.5` or non-zero floating points: The number of worker is 2.5 times the system processors.
+//! - `(10, 15)`: 10 workers and internal buffer size 15.
+//!
+//! If the buffer size is not specified, the default is the double of number of workers.
+//!
+//! # Cargo Features
+//!
+//! The following cargo features select the backend runtime for concurrent workers.
+//! One of them must be specified, otherwise the crate raises a compile error.
+//!
+//! - `runtime-tokio` uses the multi-threaded [tokio] runtime.
+//! - `runtime-async-std` uses the default [async-std](async_std) runtime.
 
 /// Commonly used traits.
 pub mod prelude {
