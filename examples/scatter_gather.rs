@@ -6,9 +6,10 @@ async fn main_async() {
     let rx2 = rx1.clone();
 
     // gather from workers
-    let gathered_values: Vec<_> = par_stream::gather(vec![rx1.boxed(), rx2.map(|val| -val).boxed()], None)
-        .collect()
-        .await;
+    let gathered_values: Vec<_> =
+        par_stream::gather(vec![rx1.boxed(), rx2.map(|val| -val).boxed()], None)
+            .collect()
+            .await;
 
     // summary
     let n_pos = gathered_values

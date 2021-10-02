@@ -44,7 +44,6 @@ mod rt_dummy {
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct JoinHandle<T> {
-        _private: [u8; 0],
         _phantom: PhantomData<T>,
     }
 

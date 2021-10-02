@@ -558,7 +558,8 @@ mod try_tee {
     pub struct TryTee<T, E> {
         pub(super) buf_size: Option<usize>,
         pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<Result<T, E>>>>>>,
+        pub(super) sender_set:
+            Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<Result<T, E>>>>>>,
         pub(super) receiver: async_channel::Receiver<Result<T, E>>,
     }
 
