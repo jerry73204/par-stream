@@ -14,4 +14,6 @@ pub use std::{
     pin::Pin,
     sync::{Arc, Weak},
     task::{Context, Poll},
+    cmp,
+    slice,
 };
