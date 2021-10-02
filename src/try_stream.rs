@@ -107,8 +107,7 @@ pub trait TryParStreamExt {
                     }
                     Ok(())
                 };
-                let worker_fut = rt::spawn(worker_fut).map(|result| result.unwrap());
-                worker_fut
+                rt::spawn(worker_fut).map(|result| result.unwrap())
             })
             .collect();
 
@@ -195,8 +194,7 @@ pub trait TryParStreamExt {
                     }
                     Ok(())
                 };
-                let worker_fut = rt::spawn(worker_fut).map(|result| result.unwrap());
-                worker_fut
+                rt::spawn(worker_fut).map(|result| result.unwrap())
             })
             .collect::<Vec<_>>();
 
@@ -340,7 +338,7 @@ pub trait TryParStreamExt {
                     match self.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            if let Err(_) = map_tx.send(fut).await {
+                            if map_tx.send(fut).await.is_err() {
                                 break Ok(());
                             }
                         }
@@ -378,8 +376,7 @@ pub trait TryParStreamExt {
                         }
                     }
                 };
-                let worker_fut = rt::spawn(worker_fut).map(|result| result.unwrap());
-                worker_fut
+                rt::spawn(worker_fut).map(|result| result.unwrap())
             })
             .collect();
 
@@ -650,7 +647,7 @@ where
         // get item from buffer
         let buffered_item_opt = buffer.remove(counter);
 
-        if let Some(_) = buffered_item_opt {
+        if buffered_item_opt.is_some() {
             *counter = counter.wrapping_add(1);
         }
 

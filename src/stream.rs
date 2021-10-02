@@ -14,7 +14,7 @@ where
     S: 'static + StreamExt + Unpin + Send,
     S::Item: Send,
 {
-    let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+    let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
     let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
     let futs = streams.into_iter().map(|mut stream| {
@@ -267,7 +267,7 @@ pub trait ParStreamExt {
             let (lhs_item, lhs_permit) = loop {
                 let (lhs_item, lhs_permit) = buf_rx.recv().await?;
                 let (rhs_item, rhs_permit) = tokio::select! {
-                    rhs = &mut buf_rx.next() => rhs.ok_or_else(|| NullError)?,
+                    rhs = &mut buf_rx.next() => rhs.ok_or(NullError)?,
                     _ = fused.notified() => {
                         break (lhs_item, lhs_permit);
                     }
@@ -498,12 +498,12 @@ pub trait ParStreamExt {
     where
         Self: 'static + StreamExt + Sized + Unpin,
     {
-        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
         let (tx, rx) = async_channel::bounded(buf_size);
 
         let scatter_fut = Box::pin(async move {
             while let Some(item) = self.next().await {
-                if let Err(_) = tx.send(item).await {
+                if tx.send(item).await.is_err() {
                     break;
                 }
             }
@@ -549,7 +549,7 @@ pub trait ParStreamExt {
         Self: 'static + Stream + Unpin + Sized + Send,
         Self::Item: Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
-        Func: 'static + FnOnce() -> () + Send,
+        Func: 'static + FnOnce() + Send,
     {
         self.par_for_each(config, move |item| {
             let func = f(item);
@@ -569,7 +569,7 @@ pub trait ParStreamExt {
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
-        Func: 'static + FnOnce() -> () + Send,
+        Func: 'static + FnOnce() + Send,
     {
         let init = init_f();
 
@@ -644,7 +644,7 @@ where
         let buffer = this.buffer;
 
         let buffered_item_opt = buffer.remove(counter);
-        if let Some(_) = buffered_item_opt {
+        if buffered_item_opt.is_some() {
             *counter = counter.wrapping_add(1);
         }
 
@@ -750,8 +750,7 @@ impl<T> ParMapUnordered<T> {
                     }
                     Ok(())
                 };
-                let worker_fut = rt::spawn(worker_fut).map(|result| result.unwrap());
-                worker_fut
+                rt::spawn(worker_fut).map(|result| result.unwrap())
             })
             .collect();
 
@@ -821,7 +820,7 @@ impl<T> Future for ParReduce<T> {
             .poll(cx)
             .map(|result| result.unwrap());
 
-        if let Poll::Pending = poll {
+        if poll.is_pending() {
             should_wake |= true;
         }
 
@@ -990,8 +989,7 @@ impl ParForEach {
                         fut.await;
                     }
                 };
-                let worker_fut = rt::spawn(worker_fut).map(|result| result.unwrap());
-                worker_fut
+                rt::spawn(worker_fut).map(|result| result.unwrap())
             })
             .collect();
 

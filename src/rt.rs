@@ -93,7 +93,7 @@ mod rt_tokio {
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             Pin::new(&mut self.0)
                 .poll(cx)
-                .map(|result| result.map_err(|err| JoinError(err)))
+                .map(|result| result.map_err(JoinError))
         }
     }
 
