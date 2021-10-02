@@ -4,9 +4,7 @@ use crate::common::*;
     all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
     all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
 )))]
-compile_error!(
-    "one of 'runtime-async-std' 'runtime-tokio', 'runtime-tokio-multi-threaded' feature must be enabled for this crate"
-);
+compile_error!("one of 'runtime-async-std' 'runtime-tokio' feature must be enabled for this crate");
 
 #[cfg(not(any(
     all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
@@ -17,11 +15,7 @@ pub use rt_dummy::*;
 #[cfg(all(not(feature = "runtime-async-std"), feature = "runtime-tokio"))]
 pub use rt_tokio::*;
 
-#[cfg(all(
-    feature = "runtime-async-std",
-    not(feature = "runtime-tokio"),
-    not(feature = "runtime-tokio-multi-threaded")
-))]
+#[cfg(all(feature = "runtime-async-std", not(feature = "runtime-tokio"),))]
 pub use rt_async_std::*;
 
 #[cfg(not(any(
@@ -108,11 +102,7 @@ mod rt_tokio {
     pub struct JoinError(tokio::task::JoinError);
 }
 
-#[cfg(all(
-    feature = "runtime-async-std",
-    not(feature = "runtime-tokio"),
-    not(feature = "runtime-tokio-multi-threaded")
-))]
+#[cfg(all(feature = "runtime-async-std", not(feature = "runtime-tokio"),))]
 mod rt_async_std {
     use super::*;
 
