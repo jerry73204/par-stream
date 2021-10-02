@@ -1,26 +1,80 @@
 use crate::common::*;
 
 #[cfg(not(any(
-    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
-    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+    all(
+        feature = "runtime-async-std",
+        not(feature = "runtime-tokio"),
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        feature = "runtime-tokio",
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        not(feature = "runtime-tokio"),
+        feature = "runtime-smol"
+    ),
 )))]
-compile_error!("one of 'runtime-async-std' 'runtime-tokio' feature must be enabled for this crate");
+compile_error!("one of 'runtime-async-std', 'runtime-tokio', 'runtime-smol' feature must be enabled for this crate");
 
 #[cfg(not(any(
-    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
-    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+    all(
+        feature = "runtime-async-std",
+        not(feature = "runtime-tokio"),
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        feature = "runtime-tokio",
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        not(feature = "runtime-tokio"),
+        feature = "runtime-smol"
+    ),
 )))]
 pub use rt_dummy::*;
 
-#[cfg(all(not(feature = "runtime-async-std"), feature = "runtime-tokio"))]
+#[cfg(all(
+    not(feature = "runtime-async-std"),
+    feature = "runtime-tokio",
+    not(feature = "runtime-smol")
+))]
 pub use rt_tokio::*;
 
-#[cfg(all(feature = "runtime-async-std", not(feature = "runtime-tokio"),))]
+#[cfg(all(
+    feature = "runtime-async-std",
+    not(feature = "runtime-tokio"),
+    not(feature = "runtime-smol")
+))]
 pub use rt_async_std::*;
 
+#[cfg(all(
+    not(feature = "runtime-async-std"),
+    not(feature = "runtime-tokio"),
+    feature = "runtime-smol"
+))]
+pub use rt_smol::*;
+
 #[cfg(not(any(
-    all(feature = "runtime-async-std", not(feature = "runtime-tokio")),
-    all(not(feature = "runtime-async-std"), feature = "runtime-tokio"),
+    all(
+        feature = "runtime-async-std",
+        not(feature = "runtime-tokio"),
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        feature = "runtime-tokio",
+        not(feature = "runtime-smol")
+    ),
+    all(
+        not(feature = "runtime-async-std"),
+        not(feature = "runtime-tokio"),
+        feature = "runtime-smol"
+    ),
 )))]
 mod rt_dummy {
     use super::*;
@@ -62,7 +116,11 @@ mod rt_dummy {
     }
 }
 
-#[cfg(all(not(feature = "runtime-async-std"), feature = "runtime-tokio"))]
+#[cfg(all(
+    not(feature = "runtime-async-std"),
+    feature = "runtime-tokio",
+    not(feature = "runtime-smol")
+))]
 mod rt_tokio {
     use super::*;
 
@@ -101,7 +159,11 @@ mod rt_tokio {
     pub struct JoinError(tokio::task::JoinError);
 }
 
-#[cfg(all(feature = "runtime-async-std", not(feature = "runtime-tokio"),))]
+#[cfg(all(
+    feature = "runtime-async-std",
+    not(feature = "runtime-tokio"),
+    not(feature = "runtime-smol")
+))]
 mod rt_async_std {
     use super::*;
 
@@ -130,6 +192,56 @@ mod rt_async_std {
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             Pin::new(&mut self.0).poll(cx).map(|output| Ok(output))
+        }
+    }
+
+    #[derive(Debug)]
+    #[repr(transparent)]
+    pub struct JoinError {
+        _private: [u8; 0],
+    }
+}
+
+#[cfg(all(
+    not(feature = "runtime-async-std"),
+    not(feature = "runtime-tokio"),
+    feature = "runtime-smol"
+))]
+mod rt_smol {
+    use super::*;
+
+    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    where
+        F: 'static + Future + Send,
+        F::Output: 'static + Send,
+    {
+        JoinHandle::Task(smol::spawn(future))
+    }
+
+    pub fn spawn_blocking<F, R>(f: F) -> JoinHandle<R>
+    where
+        F: 'static + Send + FnOnce() -> R,
+        R: 'static + Send,
+    {
+        JoinHandle::UnBlock(Box::pin(smol::unblock(f)))
+    }
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub enum JoinHandle<T> {
+        Task(smol::Task<T>),
+        UnBlock(#[derivative(Debug = "ignore")] Pin<Box<dyn Future<Output = T> + Send>>),
+    }
+
+    impl<T> Future for JoinHandle<T> {
+        type Output = Result<T, JoinError>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            match &mut *self {
+                Self::Task(task) => Pin::new(task).poll(cx),
+                Self::UnBlock(future) => Pin::new(future).poll(cx),
+            }
+            .map(Ok)
         }
     }
 

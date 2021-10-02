@@ -15,9 +15,7 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 /// use par_stream::ParStreamExt;
 /// use std::collections::HashSet;
 ///
-/// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-/// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-/// async fn main() {
+/// async fn main_async() {
 ///     let orig = futures::stream::iter(0..1000);
 ///
 ///     // scatter stream items to two receivers
@@ -30,6 +28,23 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 ///     // the gathered values have equal content with the original
 ///     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
 /// }
+///
+/// # #[cfg(feature = "runtime-async-std")]
+/// # #[async_std::main]
+/// # async fn main() {
+/// #     main_async().await
+/// # }
+/// #
+/// # #[cfg(feature = "runtime-tokio")]
+/// # #[tokio::main]
+/// # async fn main() {
+/// #     main_async().await
+/// # }
+/// #
+/// # #[cfg(feature = "runtime-smol")]
+/// # fn main() {
+/// #     smol::block_on(main_async())
+/// # }
 /// ```
 pub fn gather<S>(
     buf_size: impl Into<Option<usize>>,
@@ -77,9 +92,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let orig: Vec<_> = (0..1000).collect();
     ///
     ///     let rx1 = futures::stream::iter(orig.clone()).tee(1);
@@ -92,6 +105,23 @@ pub trait ParStreamExt {
     ///
     ///     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn tee<T>(mut self, buf_size: impl Into<Option<usize>>) -> Tee<T>
     where
@@ -178,9 +208,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let doubled = futures::stream::iter(0..1000)
     ///         // add enumerated index that does not panic on overflow
     ///         .wrapping_enumerate()
@@ -201,6 +229,23 @@ pub trait ParStreamExt {
     ///     let expect = (0..1000).map(|value| value * 2 + 1).collect::<Vec<_>>();
     ///     assert_eq!(doubled, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn reorder_enumerated<T>(self) -> ReorderEnumerated<T, Self>
     where
@@ -227,9 +272,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let outer = Box::new(2);
     ///
     ///     let doubled = futures::stream::iter(0..1000)
@@ -247,6 +290,23 @@ pub trait ParStreamExt {
     ///     let expect = (0..1000).map(|value| value * 2).collect::<Vec<_>>();
     ///     assert_eq!(doubled, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_then<T, F, Fut>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
     where
@@ -317,9 +377,7 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::collections::HashSet;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let outer = Box::new(2);
     ///
     ///     let doubled = futures::stream::iter(0..1000)
@@ -337,6 +395,23 @@ pub trait ParStreamExt {
     ///     let expect = (0..1000).map(|value| value * 2).collect::<HashSet<_>>();
     ///     assert_eq!(doubled, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_then_unordered<T, F, Fut>(
         self,
@@ -388,9 +463,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
     ///     let outer = Box::new(2);
     ///
@@ -409,6 +482,23 @@ pub trait ParStreamExt {
     ///     let expect = (0..1000).map(|value| value * 2).collect::<Vec<_>>();
     ///     assert_eq!(doubled, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_map<T, F, Func>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
     where
@@ -464,9 +554,7 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::collections::HashSet;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
     ///     let outer = Box::new(2);
     ///
@@ -485,6 +573,23 @@ pub trait ParStreamExt {
     ///     let expect = (0..1000).map(|value| value * 2).collect::<HashSet<_>>();
     ///     assert_eq!(doubled, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_map_unordered<T, F, Func>(
         self,
@@ -545,9 +650,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
     ///     let sum = futures::stream::iter(1..=1000)
     ///         // sum up the values in parallel
@@ -558,6 +661,23 @@ pub trait ParStreamExt {
     ///         .await;
     ///     assert_eq!(sum, (1 + 1000) * 1000 / 2);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_reduce<F, Fut>(
         mut self,
@@ -683,9 +803,7 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::{future::Future, pin::Pin};
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let map_fns: Vec<
     ///         Box<dyn FnMut(usize) -> Pin<Box<dyn Future<Output = usize> + Send>> + Send>,
     ///     > = vec![
@@ -723,6 +841,23 @@ pub trait ParStreamExt {
     ///         .collect::<Vec<_>>();
     ///     assert_eq!(transformed, expect);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn par_routing<F1, F2, Fut, T>(
         mut self,
@@ -906,9 +1041,7 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
-    /// async fn main() {
+    /// async fn main_async() {
     ///     let orig = futures::stream::iter(1isize..=1000);
     ///
     ///     // scatter the items
@@ -921,6 +1054,23 @@ pub trait ParStreamExt {
     ///     // the total item count is equal to the original set
     ///     assert_eq!(values1.len() + values2.len(), 1000);
     /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
     /// ```
     fn scatter(mut self, buf_size: impl Into<Option<usize>>) -> Scatter<Self::Item>
     where

@@ -38,3 +38,8 @@ async fn main() {
 async fn main() {
     main_async().await
 }
+
+#[cfg(feature = "runtime-smol")]
+fn main() {
+    smol::block_on(main_async())
+}

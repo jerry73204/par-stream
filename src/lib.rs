@@ -49,6 +49,7 @@
 //!
 //! - `runtime-tokio` uses the multi-threaded [tokio] runtime.
 //! - `runtime-async-std` uses the default [async-std](async_std) runtime.
+//! - `runtime-smol` uses the default [smol] runtime.
 
 /// Commonly used traits.
 pub mod prelude {
