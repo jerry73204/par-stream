@@ -4,9 +4,74 @@ use crate::{
     config::{IntoParStreamParams, ParStreamParams},
     rt,
 };
+use tokio::sync::Mutex;
 
 /// An extension trait for [TryStream](TryStream) that provides parallel combinator functions.
 pub trait TryParStreamExt {
+    /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
+    /// receiving an error.
+    fn try_tee<T, E>(mut self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
+    where
+        Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
+        T: 'static + Send + Clone,
+        E: 'static + Send + Clone,
+    {
+        let buf_size = buf_size.into();
+        let (tx, rx) = match buf_size {
+            Some(buf_size) => async_channel::bounded(buf_size),
+            None => async_channel::unbounded(),
+        };
+        let sender_set = Arc::new(flurry::HashSet::new());
+        let guard = sender_set.guard();
+        sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+
+        let future = {
+            let sender_set = sender_set.clone();
+
+            let future = rt::spawn(async move {
+                while let Some(item) = self.next().await {
+                    let futures: Vec<_> = sender_set
+                        .pin()
+                        .iter()
+                        .map(|tx| {
+                            let tx = tx.clone();
+                            let item = item.clone();
+                            async move {
+                                let result = tx.send(item).await;
+                                (result, tx)
+                            }
+                        })
+                        .collect();
+
+                    let results = futures::future::join_all(futures).await;
+                    let success_count = results
+                        .iter()
+                        .filter(|(result, tx)| {
+                            let ok = result.is_ok();
+                            if !ok {
+                                sender_set.pin().remove(&tx);
+                            }
+                            ok
+                        })
+                        .count();
+
+                    if item.is_err() || success_count == 0 {
+                        break;
+                    }
+                }
+            });
+
+            Arc::new(Mutex::new(Some(future)))
+        };
+
+        TryTee {
+            future,
+            sender_set: Arc::downgrade(&sender_set),
+            receiver: rx,
+            buf_size,
+        }
+    }
+
     /// Create a fallible stream that gives the current iteration count.
     ///
     /// The count wraps to zero if the count overflows.
@@ -481,6 +546,59 @@ pub trait TryParStreamExt {
 }
 
 impl<S> TryParStreamExt for S where S: TryStream {}
+
+// try_tee
+
+#[derive(Debug)]
+pub struct TryTee<T, E> {
+    buf_size: Option<usize>,
+    future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+    sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<Result<T, E>>>>>>,
+    receiver: async_channel::Receiver<Result<T, E>>,
+}
+
+impl<T, E> Clone for TryTee<T, E>
+where
+    T: 'static + Send,
+    E: 'static + Send,
+{
+    fn clone(&self) -> Self {
+        let buf_size = self.buf_size;
+        let (tx, rx) = match buf_size {
+            Some(buf_size) => async_channel::bounded(buf_size),
+            None => async_channel::unbounded(),
+        };
+        let sender_set = self.sender_set.clone();
+
+        if let Some(sender_set) = sender_set.upgrade() {
+            let guard = sender_set.guard();
+            sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+        }
+
+        Self {
+            future: self.future.clone(),
+            sender_set,
+            receiver: rx,
+            buf_size,
+        }
+    }
+}
+
+impl<T, E> Stream for TryTee<T, E> {
+    type Item = Result<T, E>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Ok(mut future_opt) = self.future.try_lock() {
+            if let Some(future) = &mut *future_opt {
+                if Pin::new(future).poll(cx).is_ready() {
+                    *future_opt = None;
+                }
+            }
+        }
+
+        Pin::new(&mut self.receiver).poll_next(cx)
+    }
+}
 
 // try_par_then
 
