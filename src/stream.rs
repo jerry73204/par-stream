@@ -15,8 +15,8 @@ use tokio::sync::{Notify, Semaphore};
 /// use par_stream::ParStreamExt;
 /// use std::collections::HashSet;
 ///
-/// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-/// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+/// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+/// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
 /// async fn main() {
 ///     let outer = Box::new(2);
 ///
@@ -88,8 +88,8 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     let doubled = futures::stream::iter(0..1000)
     ///         // add enumerated index that does not panic on overflow
@@ -137,8 +137,8 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     let outer = Box::new(2);
     ///
@@ -227,8 +227,8 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::collections::HashSet;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     let outer = Box::new(2);
     ///
@@ -298,8 +298,8 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     // the variable will be shared by parallel workers
     ///     let outer = Box::new(2);
@@ -374,8 +374,8 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::collections::HashSet;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     // the variable will be shared by parallel workers
     ///     let outer = Box::new(2);
@@ -455,8 +455,8 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     // the variable will be shared by parallel workers
     ///     let sum = futures::stream::iter(1..=1000)
@@ -593,8 +593,8 @@ pub trait ParStreamExt {
     /// use par_stream::ParStreamExt;
     /// use std::{future::Future, pin::Pin};
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     let map_fns: Vec<
     ///         Box<dyn FnMut(usize) -> Pin<Box<dyn Future<Output = usize> + Send>> + Send>,
@@ -816,8 +816,8 @@ pub trait ParStreamExt {
     /// use futures::stream::StreamExt;
     /// use par_stream::ParStreamExt;
     ///
-    /// # #[cfg_attr(feature = "runtime_async-std", async_std::main)]
-    /// # #[cfg_attr(feature = "runtime_tokio", tokio::main)]
+    /// # #[cfg_attr(feature = "runtime-async-std", async_std::main)]
+    /// # #[cfg_attr(feature = "runtime-tokio", tokio::main)]
     /// async fn main() {
     ///     let outer = Box::new(2);
     ///
