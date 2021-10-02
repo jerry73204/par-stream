@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 ///     let rx2 = rx1.clone();
 ///
 ///     // gather back from two receivers
-///     let gather_fut = par_stream::par_gather(vec![rx1, rx2], None).collect::<HashSet<_>>();
+///     let gather_fut = par_stream::gather(vec![rx1, rx2], None).collect::<HashSet<_>>();
 ///
 ///     // collect the items from respective workers
 ///     let ((), values) = futures::join!(scatter_fut, gather_fut);
@@ -34,10 +34,10 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 ///     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
 /// }
 /// ```
-pub fn par_gather<S>(
+pub fn gather<S>(
     streams: impl IntoIterator<Item = S>,
     buf_size: impl Into<Option<usize>>,
-) -> ParGather<S::Item>
+) -> Gather<S::Item>
 where
     S: 'static + StreamExt + Unpin + Send,
     S::Item: Send,
@@ -56,7 +56,7 @@ where
     });
     let gather_fut = futures::future::try_join_all(futs);
 
-    ParGather {
+    Gather {
         fut: Some(Box::pin(gather_fut)),
         output_rx,
     }
@@ -1418,11 +1418,11 @@ impl<T> Stream for ParRoutingUnordered<T> {
     }
 }
 
-// par_gather
+// gather
 
 #[derive(Derivative)]
 #[derivative(Debug)]
-pub struct ParGather<T>
+pub struct Gather<T>
 where
     T: Send,
 {
@@ -1432,7 +1432,7 @@ where
     output_rx: async_channel::Receiver<T>,
 }
 
-impl<T> Stream for ParGather<T>
+impl<T> Stream for Gather<T>
 where
     T: Send,
 {

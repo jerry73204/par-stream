@@ -22,7 +22,7 @@ async fn main_async() {
     });
 
     // gather from workers
-    let gather_fut = par_stream::par_gather(vec![worker1_rx, worker2_rx], None).collect::<Vec<_>>();
+    let gather_fut = par_stream::gather(vec![worker1_rx, worker2_rx], None).collect::<Vec<_>>();
 
     // join parallel tasks
     let ((), (), (), gathered_values) = futures::join!(scatter_fut, worker1, worker2, gather_fut);
