@@ -191,6 +191,13 @@ mod concurrent_chunks {
         T: 'static + Send,
     {
     }
+
+    unsafe impl<S, T> Sync for ConcurrentChunks<S, T>
+    where
+        S: 'static + Send,
+        T: 'static + Send,
+    {
+    }
 }
 
 // chunk
@@ -207,6 +214,7 @@ mod chunk {
     }
 
     unsafe impl<S> Send for ChunkInner<S> {}
+    unsafe impl<S> Sync for ChunkInner<S> {}
 
     /// A mutable sub-slice reference-counted reference to a slice-like data.
     #[derive(Debug)]
@@ -343,6 +351,7 @@ mod chunk {
     }
 
     unsafe impl<S, T> Send for Chunk<S, T> {}
+    unsafe impl<S, T> Sync for Chunk<S, T> {}
 
     impl<S, T> Drop for Chunk<S, T> {
         fn drop(&mut self) {
