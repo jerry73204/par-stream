@@ -2,9 +2,8 @@
 //!
 //! # Combinators
 //!
-//! The [ParStreamExt](ParStreamExt) and [TryParStreamExt](TryParStreamExt) traits add
-//! new combinators to existing [streams](futures::stream::Stream), that are targeted for
-//! parallel computing and data processing.
+//! The crate provides extension traits to add new combinators to existing [streams](futures::stream::Stream),
+//! that are targeted for parallel computing and concurrent data processing. Most traits can be found at [`prelude`](prelude).
 //!
 //! ## Parallel Processing
 //!
@@ -47,9 +46,9 @@
 //! The following cargo features select the backend runtime for concurrent workers.
 //! One of them must be specified, otherwise the crate raises a compile error.
 //!
-//! - `runtime-tokio` uses the multi-threaded [tokio] runtime.
-//! - `runtime-async-std` uses the default [async-std](async_std) runtime.
-//! - `runtime-smol` uses the default [smol] runtime.
+//! - `runtime-tokio` enables the [tokio] multi-threaded runtime.
+//! - `runtime-async-std` enables the [async-std](async_std) default runtime.
+//! - `runtime-smol` enables the [smol] default runtime.
 
 /// Commonly used traits.
 pub mod prelude {

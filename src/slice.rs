@@ -1,6 +1,17 @@
 use crate::common::*;
 
+/// The trait provides extensions for concurrent processing on slice-like types.
 pub trait SliceExt<T> {
+    /// Returns an iterator of fixed-sized chunks of the slice.
+    ///
+    /// Each chunk has `chunk_size` elements, expect the last chunk maybe shorter
+    /// if there aren't enough elements.
+    ///
+    /// The yielded chunks maintain a global reference count. Each chunk refers to
+    /// a mutable and exclusive sub-slice, enabling concurrent processing on input data.
+    ///
+    /// # Panics
+    /// The method panics if `chunk_size` is zero and slice length is not zero.
     fn concurrent_chunks(mut self, chunk_size: usize) -> ConcurrentChunks<Self, T>
     where
         Self: 'static + AsMut<[T]> + Sized + Send,
@@ -21,9 +32,16 @@ pub trait SliceExt<T> {
         unsafe { ConcurrentChunks::new_unchecked(self, chunk_size, num_chunks, len) }
     }
 
-    /// Returns an iterator of exactly `num_chunks` chunks of the slice.
+    /// Returns an iterator of exactly `num_chunks` fixed-sized chunks of the slice.
     ///
-    /// If `num_chunks` is `None`, it defaults to the number of system processors.
+    /// The chunk size is determined by `num_chunks`. The last chunk maybe shorter if
+    /// there aren't enough elements. If `num_chunks` is `None`, it defaults to
+    /// the number of system processors.
+    ///
+    /// The method is a proxy of [`concurrent_chunks`](SliceExt::concurrent_chunks).
+    ///
+    /// # Panics
+    /// The method panics if `num_chunks` is zero and slice length is not zero.
     fn concurrent_chunks_by_division(
         mut self,
         num_chunks: impl Into<Option<usize>>,
@@ -55,6 +73,7 @@ pub use concurrent_chunks::*;
 mod concurrent_chunks {
     use super::*;
 
+    /// An iterator that yields [chunks](Chunk).
     #[derive(Debug)]
     pub struct ConcurrentChunks<S, T>
     where
@@ -189,6 +208,7 @@ mod chunk {
 
     unsafe impl<S> Send for ChunkInner<S> {}
 
+    /// A mutable sub-slice reference-counted reference to a slice-like data.
     #[derive(Debug)]
     pub struct Chunk<S, T> {
         pub(super) ptr: NonNull<ChunkInner<S>>,
@@ -196,6 +216,11 @@ mod chunk {
     }
 
     impl<S, T> Chunk<S, T> {
+        /// Consumes all chunk instances and recover the referenced data.
+        ///
+        /// # Panics
+        /// The method panics if any one of associate chunks is missing, or
+        /// the chunks refer to inconsistent data.
         pub fn into_owner(chunks: impl IntoIterator<Item = Self>) -> S
         where
             S: AsMut<[T]>,
@@ -258,6 +283,11 @@ mod chunk {
             }
         }
 
+        /// Concatenates contiguous chunks into one chunk.
+        ///
+        /// # Panics
+        /// The method panics if the chunks are not contiguous, or
+        /// the chunks refer to inconsistent data.
         pub fn cat(chunks: impl IntoIterator<Item = Self>) -> Self
         where
             S: AsMut<[T]>,

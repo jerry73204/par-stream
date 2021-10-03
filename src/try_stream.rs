@@ -554,6 +554,7 @@ pub use try_tee::*;
 mod try_tee {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_tee()](TryParStreamExt::try_tee).
     #[derive(Debug)]
     pub struct TryTee<T, E> {
         pub(super) buf_size: Option<usize>,
@@ -614,6 +615,7 @@ pub use try_par_then::*;
 mod try_par_then {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_par_map()](TryParStreamExt::try_par_map) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParMap<T, E> {
@@ -657,6 +659,7 @@ pub use try_par_map_unordered::*;
 mod try_par_map_unordered {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_par_map_unordered()](TryParStreamExt::try_par_map_unordered) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParMapUnordered<T, E> {
@@ -700,6 +703,7 @@ pub use try_par_for_each::*;
 mod try_par_for_each {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_par_for_each()](TryParStreamExt::try_par_for_each) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParForEach<E> {
@@ -735,6 +739,7 @@ pub use try_wrapping_enumerate::*;
 mod try_wrapping_enumerate {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_wrapping_enumerate()](TryParStreamExt::try_wrapping_enumerate).
     #[derive(Debug)]
     pub struct TryWrappingEnumerate<T, E, S>
     where
@@ -789,6 +794,7 @@ pub use try_reorder_enumerated::*;
 mod try_reorder_enumerated {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_reorder_enumerated()](TryParStreamExt::try_reorder_enumerated).
     #[pin_project(project = TryReorderEnumeratedProj)]
     #[derive(Debug)]
     pub struct TryReorderEnumerated<T, E, S>

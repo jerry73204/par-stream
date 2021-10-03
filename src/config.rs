@@ -1,3 +1,4 @@
+/// A conversion trait that converts an input type to parallel stream parameters.
 pub trait IntoParStreamParams {
     fn into_par_stream_params(self) -> ParStreamParams;
 }
@@ -89,7 +90,7 @@ impl From<(f64, f64)> for ParStreamConfig {
     }
 }
 
-/// Sum type of absolute value and scaling value.
+/// Specifies an absolute value, a scaling factor, or a value determined in runtime.
 #[derive(Debug, Clone)]
 pub enum Count {
     Auto,

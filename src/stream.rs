@@ -1177,6 +1177,7 @@ pub use scatter::*;
 mod scatter {
     use super::*;
 
+    /// A stream combinator returned from [scatter()](ParStreamExt::scatter).
     #[derive(Debug)]
     pub struct Scatter<T> {
         pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
@@ -1216,6 +1217,7 @@ pub use tee::*;
 mod tee {
     use super::*;
 
+    /// A stream combinator returned from [tee()](ParStreamExt::tee).
     #[derive(Debug)]
     pub struct Tee<T> {
         pub(super) buf_size: Option<usize>,
@@ -1274,6 +1276,7 @@ pub use wrapping_enumerate::*;
 mod wrapping_enumerate {
     use super::*;
 
+    /// A stream combinator returned from [wrapping_enumerate()](ParStreamExt::wrapping_enumerate).
     #[pin_project(project = WrappingEnumerateProj)]
     #[derive(Debug)]
     pub struct WrappingEnumerate<T, S>
@@ -1314,6 +1317,7 @@ pub use reorder_enumerated::*;
 mod reorder_enumerated {
     use super::*;
 
+    /// A stream combinator returned from [reorder_enumerated()](ParStreamExt::reorder_enumerated).
     #[pin_project]
     #[derive(Derivative)]
     #[derivative(Debug)]
@@ -1388,6 +1392,7 @@ pub use par_map::*;
 mod par_map {
     use super::*;
 
+    /// A stream combinator returned from [par_map()](ParStreamExt::par_map) and its siblings.
     #[pin_project]
     #[derive(Derivative)]
     #[derivative(Debug)]
@@ -1413,6 +1418,7 @@ pub use par_map_unordered::*;
 mod par_map_unordered {
     use super::*;
 
+    /// A stream combinator returned from [par_map_unordered()](ParStreamExt::par_map_unordered) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParMapUnordered<T> {
@@ -1507,6 +1513,7 @@ pub use par_reduce::*;
 mod par_reduce {
     use super::*;
 
+    /// A stream combinator returned from [par_reduce()](ParStreamExt::par_reduce).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParReduce<T> {
@@ -1555,6 +1562,7 @@ pub use par_routing::*;
 mod par_routing {
     use super::*;
 
+    /// A stream combinator returned from [par_routing()](ParStreamExt::par_routing).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParRouting<T> {
@@ -1598,6 +1606,7 @@ pub use par_routing_unordered::*;
 mod par_routing_unordered {
     use super::*;
 
+    /// A stream combinator returned from [par_routing_unordered()](ParStreamExt::par_routing_unordered).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParRoutingUnordered<T> {
@@ -1641,6 +1650,7 @@ pub use gather::*;
 mod gather {
     use super::*;
 
+    /// A stream combinator returned from [gather()](gather()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct Gather<T>
@@ -1690,6 +1700,7 @@ pub use par_for_each::*;
 mod par_for_each {
     use super::*;
 
+    /// A stream combinator returned from [par_for_each()](ParStreamExt::par_for_each) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParForEach {
