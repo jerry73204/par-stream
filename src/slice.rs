@@ -62,9 +62,60 @@ pub trait SliceExt<T> {
 
         unsafe { ConcurrentChunks::new_unchecked(self, chunk_size, num_chunks, len) }
     }
+
+    fn concurrent_iter(self: Arc<Self>) -> ConcurrentIter<Self, T>
+    where
+        Self: 'static + AsRef<[T]> + Sized + Send,
+    {
+        let owner = ArcRef::new(self.clone()).map(|me| me.as_ref());
+        let len = owner.len();
+
+        ConcurrentIter {
+            owner,
+            len,
+            index: 0,
+        }
+    }
 }
 
 impl<S, T> SliceExt<T> for S {}
+
+pub use concurrent_iter::*;
+
+mod concurrent_iter {
+    use super::*;
+
+    #[derive(Debug)]
+    pub struct ConcurrentIter<S, T> {
+        pub(super) owner: ArcRef<S, [T]>,
+        pub(super) len: usize,
+        pub(super) index: usize,
+    }
+
+    impl<S, T> Clone for ConcurrentIter<S, T> {
+        fn clone(&self) -> Self {
+            Self {
+                owner: self.owner.clone(),
+                len: self.len,
+                index: self.index,
+            }
+        }
+    }
+
+    impl<S, T> Iterator for ConcurrentIter<S, T> {
+        type Item = ArcRef<S, T>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            if self.index == self.len {
+                return None;
+            }
+
+            let item = self.owner.clone().map(|slice| &slice[self.index]);
+            self.index += 1;
+            Some(item)
+        }
+    }
+}
 
 // concurrent_chunks
 
