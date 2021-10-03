@@ -174,11 +174,11 @@ mod concurrent_chunks {
     }
 }
 
-// chunk_ref
+// chunk
 
-pub use chunk_ref::*;
+pub use chunk::*;
 
-mod chunk_ref {
+mod chunk {
     use super::*;
 
     #[derive(Debug)]

@@ -784,9 +784,9 @@ mod try_wrapping_enumerate {
 
 // reorder_enumerated
 
-pub use reorder_enumerated::*;
+pub use try_reorder_enumerated::*;
 
-mod reorder_enumerated {
+mod try_reorder_enumerated {
     use super::*;
 
     #[pin_project(project = TryReorderEnumeratedProj)]
