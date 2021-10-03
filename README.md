@@ -4,85 +4,120 @@
 
 An Rust implementation of asynchronous parallel streams analogous to [rayon](https://github.com/rayon-rs/rayon).
 
+# Cargo Features
+
+The following cargo features select the backend runtime for concurrent workers.
+One of them must be specified, otherwise the crate raises a compile error.
+
+- `runtime-tokio` enables the tokio multi-threaded runtime.
+- `runtime-async-std` enables the async-std default runtime.
+- `runtime-smol` enables the smol default runtime.
+
+# Combinators
+
 ## Usage
 
-You must specify one of the following features to select appropriate runtime.
+The crate provides extension traits to add new combinators to existing streams,
+that are targeted for parallel computing and concurrent data processing. Most traits can be found at `prelude`.
 
-- **runtime_async-std**
-- **runtime_tokio**
-
-Here is an example `Cargo.toml`.
-
-```toml
-[dependencies]
-par-stream = { version = "0.4", features = ["runtime_tokio"] }
-```
-
-## Features
-
-### Easy usage
-
-Add one line and you can obtain parallel combinators on existing [futures]((https://github.com/rust-lang/futures-rs)) stream.
+The extension traits can be imported from `prelude`.
 
 ```rust
-use par_stream::ParStreamExt;
+use par_stream::prelude::*;
 ```
 
-### Parallel combinators
+## Parallel Processing
 
-- `stream.par_then(limit, map_fut)` processes stream items to parallel futures.
-- `stream.par_map(limit, map_fn)` processes stream items to parallel closures.
-- `stream.par_then_unordered(limit, map_fut)` and `stream.par_map_unordered(limit, map_fn)` are unordered correspondings of above.
-- `stream.par_then_init(limit, init_fut, map_fut)` accepts an extra in-local thread initializer.
-- `stream.try_par_then(limit, map_fut)` is the fallible version of `stream.par_then(limit, map_fut)`.
+- `stream.par_map(config, fn)` processes stream items in parallel closures.
+- `stream.par_then(config, fut)` processes stream items in parallel futures.
+- `par_map_unordered()` and `par_then_unordered()`
+  are unordered variances.
+- `try_par_map()`, `try_par_then()`,
+  `try_par_then_unordered()` are the fallible variances.
 
-The `limit` parameter configures the worker pool size. It accepts the following values:
+## Distributing Patterns
 
-- `None`: The worker pool size scales to the number of system CPUs.
-- `10`: Scale the number of workers and buffer size by 10.
-- `2.3`: Scale the number of workers by 2.3 times.
-- `(10, 15)`: Use 10 workers and buffer size 15.
+- `stream.tee(buf_size)` creates a copy of a stream.
+- `stream.scatter(buf_size)` forks a stream into parts.
+- `gather(buf_size, streams)` merges multiple streams into one stream.
 
-### Scatter and gather combinators
+### Scatter-Gather Pattern
 
-The feature is convenient to work with your custom organization of parallel workers.
-
-`stream.par_scatter(buf_size)` allows you to convert a stream to a scattering worker and a clonable receiver.
-You can distribute cloned receivers to respective workers to share a stream.
-
-`par_gather(streams, buf_size)` gathers multiple streams into one stream.
+The combinators can construct a scatter-gather pattern that passes each to one of concurrent workers,
+and gathers the outputs together.
 
 ```rust
-let (scatter_fut, rx) = stream.par_scatter(buf_size);
+async fn main_async() {
+    let orig = futures::stream::iter(0..1000);
 
-let rx1 = rx.clone();
-let rx2 = rx.clone();
+    // scatter stream items to two receivers
+    let rx1 = orig.scatter(None);
+    let rx2 = rx1.clone();
 
-let stream1 = worker1(rx1);
-let stream2 = worker1(rx2);
+    // gather back from two receivers
+    let values: HashSet<_> = par_stream::gather(None, vec![rx1, rx2]).collect().await;
 
-let gathered_stream = par_stream::par_gather(vec![stream1, stream2], buf_size);
+    // the gathered values have equal content with the original
+    assert_eq!(values, (0..1000).collect::<HashSet<_>>());
+}
 ```
 
-### Control the ordering of stream items
+### Tee-Zip Pattern
 
-The combination of `stream.wrapping_enumerate()` and `stream.reorder_enumerated()`
-enable you to control the ordering of the stream items.
+Another example is to construct a tee-zip pattern that clones each element to
+several concurrent workers, and pairs up outputs from each worker.
 
-It gives the way to mark items with index numbers, apply to multiple unordered parallel tasks,
-and reorder them back. It effectively avoids reordering after each parallel task.
+```rust
+async fn main_async() {
+    let orig: Vec<_> = (0..1000).collect();
+
+    let rx1 = futures::stream::iter(orig.clone()).tee(1);
+    let rx2 = rx1.clone();
+    let rx3 = rx1.clone();
+
+    let fut1 = rx1.map(|val| val).collect();
+    let fut2 = rx2.map(|val| val * 2).collect();
+    let fut3 = rx3.map(|val| val * 3).collect();
+
+    let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+}
+```
+
+## Item Ordering
+
+- `stream.wrapping_enumerate()` is like `enumerate()`,
+  but wraps around to zero after reaching [usize::MAX].
+- `stream.reorder_enumerated()` accepts a `(usize, T)` typed stream and
+  reorder the items according to the index number.
+- `stream.try_wrapping_enumerate()` and
+  `stream.try_reorder_enumerated()` are fallible counterparts.
+
+The item ordering combinators are usually combined with unordered concurrent processing methods,
+allowing on-demand data passing between stages.
 
 ```rust
 stream
     // mark items with index numbers
     .wrapping_enumerate()
     // a series of unordered maps
-    .par_then_unordered(limit, map_fut1)
-    .par_then_unordered(limit, map_fut2)
-    .par_then_unordered(limit, map_fut3)
+    .par_then_unordered(config, fn)
+    .par_then_unordered(config, fn)
+    .par_then_unordered(config, fn)
     // reorder the items back by indexes
     .reorder_enumerated()
 ```
+
+## Configure Number of Workers
+
+The `config` parameter of `stream.par_map(config, fn)` controls
+the number of concurrent workers and internal buffer size. It accepts the following values.
+
+- `None`: The number of workers defaults to the number of system processors.
+- `10` or non-zero integers: 10 workers.
+- `2.5` or non-zero floating points: The number of worker is 2.5 times the system processors.
+- `(10, 15)`: 10 workers and internal buffer size 15.
+
+If the buffer size is not specified, the default is the double of number of workers.
 
 ## Example
 
