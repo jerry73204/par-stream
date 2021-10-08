@@ -134,7 +134,7 @@ mod concurrent_chunks {
         pub(super) index: usize,
         pub(super) chunk_size: usize,
         pub(super) len: usize,
-        pub(super) ptr: NonNull<ChunkInner<S>>,
+        pub(super) data: Arc<S>,
         pub(super) _phantom: PhantomData<T>,
     }
 
@@ -165,23 +165,15 @@ mod concurrent_chunks {
                 (0..len as isize).contains(&residual)
             });
 
-            let inner = Box::new(ChunkInner {
-                count: AtomicUsize::new(1), // referenced by iterator
-                data: owner,
-            });
-            let ptr = NonNull::new_unchecked(Box::into_raw(inner));
+            let data = Arc::new(owner);
 
             ConcurrentChunks {
                 index: 0,
                 chunk_size,
                 len,
-                ptr,
+                data,
                 _phantom: PhantomData,
             }
-        }
-
-        pub(super) fn inner(&self) -> &ChunkInner<S> {
-            unsafe { self.ptr.as_ref() }
         }
     }
 
@@ -201,38 +193,15 @@ mod concurrent_chunks {
             let end = cmp::min(start + self.chunk_size, self.len);
             self.index = end;
 
-            self.inner().count.fetch_add(1, Relaxed);
+            let data = self.data.clone();
 
             let slice = unsafe {
-                NonNull::new_unchecked(&mut self.ptr.as_mut().data.as_mut()[start..end] as *mut [T])
+                let ptr = Arc::as_ptr(&data) as *mut S;
+                let slice: &mut [T] = ptr.as_mut().unwrap().as_mut();
+                NonNull::new_unchecked(&mut slice[start..end] as *mut [T])
             };
 
-            Some(Chunk {
-                ptr: self.ptr,
-                slice,
-            })
-        }
-    }
-
-    impl<S, T> Drop for ConcurrentChunks<S, T>
-    where
-        S: 'static + Send,
-        T: 'static + Send,
-    {
-        fn drop(&mut self) {
-            // decrease ref count
-            if self.inner().count.fetch_sub(1, Release) != 1 {
-                return;
-            }
-
-            // memory fencing
-            self.inner().count.load(Acquire);
-
-            unsafe {
-                // free the inner counter
-                let inner = Box::from_raw(self.ptr.as_mut());
-                drop(inner);
-            }
+            Some(Chunk { data, slice })
         }
     }
 
@@ -258,19 +227,10 @@ pub use chunk::*;
 mod chunk {
     use super::*;
 
-    #[derive(Debug)]
-    pub(super) struct ChunkInner<S> {
-        pub(super) count: AtomicUsize,
-        pub(super) data: S,
-    }
-
-    unsafe impl<S> Send for ChunkInner<S> {}
-    unsafe impl<S> Sync for ChunkInner<S> {}
-
     /// A mutable sub-slice reference-counted reference to a slice-like data.
     #[derive(Debug)]
     pub struct Chunk<S, T> {
-        pub(super) ptr: NonNull<ChunkInner<S>>,
+        pub(super) data: Arc<S>,
         pub(super) slice: NonNull<[T]>,
     }
 
@@ -289,20 +249,22 @@ mod chunk {
 
                 // obtain inner pointer from the first chunk
                 let first = chunks.next().expect("the chunks must be non-empty");
-                let mut ptr = first.ptr;
-                let data = ptr.as_mut().data.as_mut();
+                let data = first.data.clone();
 
                 // verify if all chunks points to the same owner
                 let mut chunks: Vec<_> = iter::once(first)
                     .chain(chunks.inspect(|chunk| {
-                        assert!(chunk.ptr == ptr, "inconsistent owner of the chunks");
+                        assert_eq!(
+                            Arc::as_ptr(&chunk.data),
+                            Arc::as_ptr(&data),
+                            "inconsistent owner of the chunks"
+                        );
                     }))
                     .collect();
 
                 // make sure no extra reference counts
                 assert_eq!(
-                    ptr.as_ref().count.load(Acquire),
-                    chunks.len(),
+                    Arc::strong_count(&data), chunks.len() + 1,
                     "the creating iterator of the chunks must be dropped before calling this method. try `drop(iterator)`"
                 );
 
@@ -310,16 +272,21 @@ mod chunk {
                 chunks.sort_by_cached_key(|chunk| chunk.slice.as_ptr());
 
                 // verify the boundary addresses
-                assert!(
-                    chunks.first().unwrap().slice.as_ref().as_ptr_range().start
-                        == data.as_ptr_range().start,
-                    "the first chunk is missing"
-                );
-                assert!(
-                    chunks.last().unwrap().slice.as_ref().as_ptr_range().end
-                        == data.as_ptr_range().end,
-                    "the last chunk is missing"
-                );
+                {
+                    let ptr = Arc::as_ptr(&data) as *mut S;
+                    let slice = ptr.as_mut().unwrap().as_mut();
+                    let range = slice.as_ptr_range();
+                    assert_eq!(
+                        chunks.first().unwrap().slice.as_ref().as_ptr_range().start,
+                        range.start,
+                        "the first chunk is missing"
+                    );
+                    assert_eq!(
+                        chunks.last().unwrap().slice.as_ref().as_ptr_range().end,
+                        range.end,
+                        "the last chunk is missing"
+                    );
+                }
 
                 // verify if chunks are contiguous
                 chunks
@@ -332,11 +299,10 @@ mod chunk {
                     });
 
                 // free chunk references
-                chunks.into_iter().map(ManuallyDrop::new).for_each(|_| {});
+                drop(chunks);
 
                 // recover owner
-                let inner = Box::from_raw(ptr.as_mut());
-                let ChunkInner { data, .. } = *inner;
+                let data = Arc::try_unwrap(data).map_err(|_| ()).unwrap();
 
                 data
             }
@@ -356,12 +322,16 @@ mod chunk {
 
                 // obtain inner pointer from the first chunk
                 let first = chunks.next().expect("the chunks must be non-empty");
-                let ptr = first.ptr;
+                let data = first.data.clone();
 
                 let mut chunks: Vec<_> = iter::once(first)
                     .chain(chunks.inspect(|chunk| {
                         // verify if all chunks points to the same owner
-                        assert!(chunk.ptr == ptr, "inconsistent owner of the chunks");
+                        assert_eq!(
+                            Arc::as_ptr(&chunk.data),
+                            Arc::as_ptr(&data),
+                            "inconsistent owner of the chunks"
+                        );
                     }))
                     .collect();
 
@@ -381,7 +351,7 @@ mod chunk {
                 let slice_ptr: *mut T = chunks.first_mut().unwrap().as_mut().as_mut_ptr();
 
                 // free chunk references
-                chunks.into_iter().map(ManuallyDrop::new).for_each(|_| {});
+                drop(chunks);
 
                 // create returning chunk
                 let slice = {
@@ -389,37 +359,13 @@ mod chunk {
                     NonNull::new_unchecked(slice as *mut [T])
                 };
 
-                // update reference count
-                ptr.as_ref().count.fetch_sub(num_chunks - 1, Release);
-
-                Chunk { ptr, slice }
+                Chunk { data, slice }
             }
-        }
-
-        pub(super) fn inner(&self) -> &ChunkInner<S> {
-            unsafe { self.ptr.as_ref() }
         }
     }
 
     unsafe impl<S, T> Send for Chunk<S, T> {}
     unsafe impl<S, T> Sync for Chunk<S, T> {}
-
-    impl<S, T> Drop for Chunk<S, T> {
-        fn drop(&mut self) {
-            // decrease ref count
-            if self.inner().count.fetch_sub(1, Release) != 1 {
-                return;
-            }
-
-            // memory fencing
-            self.inner().count.load(Acquire);
-
-            unsafe {
-                // free the inner counter
-                drop(Box::from_raw(self.ptr.as_mut()));
-            }
-        }
-    }
 
     impl<S, T> AsRef<[T]> for Chunk<S, T> {
         fn as_ref(&self) -> &[T] {
