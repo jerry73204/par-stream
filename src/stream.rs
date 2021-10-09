@@ -8,6 +8,130 @@ use crate::{
 };
 use tokio::sync::{Mutex, Notify, Semaphore};
 
+use tokio_stream::wrappers::ReceiverStream;
+
+pub fn unfold_blocking<F, Item>(
+    buf_size: impl Into<Option<usize>>,
+    mut f: F,
+) -> UnfoldBlocking<Item>
+where
+    F: 'static + FnMut() -> Option<Item> + Send,
+    Item: 'static + Send,
+{
+    use tokio::sync::mpsc;
+
+    let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
+    let (data_tx, data_rx) = mpsc::channel(buf_size);
+
+    let producer_fut = rt::spawn_blocking(move || {
+        while let Some(item) = f() {
+            let result = data_tx.blocking_send(item);
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+
+    let stream = futures::stream::select(
+        producer_fut
+            .into_stream()
+            .map(|result| {
+                if let Err(err) = result {
+                    panic!("unable to spawn a worker: {:?}", err);
+                }
+                None
+            })
+            .fuse(),
+        ReceiverStream::new(data_rx).map(|item: Item| Some(item)),
+    )
+    .filter_map(|item| async move { item });
+
+    UnfoldBlocking {
+        stream: Box::pin(stream),
+    }
+}
+
+// pub fn par_unfold_unordered<F, Fut, Item>(
+//     config: impl IntoParStreamParams,
+//     mut f: F,
+// ) -> ParUnfoldUnordered<Item>
+// where
+//     F: 'static + FnMut() -> Fut + Send,
+//     Fut: 'static + Future<Output = Option<Item>> + Send,
+//     Item: 'static + Send,
+// {
+//     use tokio::sync::{broadcast, mpsc};
+
+//     let ParStreamParams {
+//         num_workers,
+//         buf_size,
+//     } = config.into_par_stream_params();
+//     let (terminate_tx, _terminate_rx) = broadcast::channel(1);
+//     let (job_tx, job_rx) = async_channel::bounded(num_workers);
+//     let (output_tx, output_rx) = mpsc::channel(buf_size);
+
+//     let unfold_future = rt::spawn(async move {
+//         loop {
+//             let fut = f();
+//             let result = job_tx.send(fut).await;
+//             if result.is_err() {
+//                 break;
+//             }
+//         }
+//     });
+
+//     let worker_futures = (0..num_workers).map(move |_| {
+//         let job_rx = job_rx.clone();
+//         let terminate_tx = terminate_tx.clone();
+//         let mut terminate_rx = terminate_tx.subscribe();
+//         let output_tx = output_tx.clone();
+
+//         rt::spawn(async move {
+//             loop {
+//                 tokio::select! {
+//                     _ = terminate_rx.recv() => {
+//                         break;
+//                     }
+//                     fut = job_rx.recv() => {
+//                         match fut {
+//                             Ok(fut)  => {
+//                                 let item = match fut.await {
+//                                     Some(item) => item,
+//                                     None => {
+//                                         let _ = terminate_tx.send(());
+//                                         break;
+//                                     }
+//                                 };
+//                                 let result = output_tx.send(item).await;
+//                                 if result.is_err() {
+//                                     break;
+//                                 }
+//                             }
+//                             Err(_) => {
+//                                 let _ = terminate_tx.send(());
+//                                 break;
+//                             }
+//                         }
+//                     }
+//                 }
+//             }
+//         })
+//     });
+
+//     let join_future =
+//         futures::future::join(unfold_future, futures::future::join_all(worker_futures));
+
+//     let stream = futures::stream::select(
+//         join_future.map(|_| None).into_stream(),
+//         ReceiverStream::new(output_rx).map(|item| Some(item)),
+//     )
+//     .filter_map(|item: Option<Item>| async move { item });
+
+//     ParUnfoldUnordered {
+//         stream: Box::pin(stream),
+//     }
+// }
+
 /// Collect multiple streams into single stream.
 ///
 /// ```rust
@@ -76,6 +200,31 @@ where
 
 /// An extension trait for streams providing combinators for parallel processing.
 pub trait ParStreamExt {
+    // fn par_unfold<T, F, Fut>(
+    //     config: impl IntoParStreamParams,
+    //     f: F,
+    // )
+    // where
+    //     T: 'static + Send,
+    //     F: 'static + FnMut(Self::Item) -> Fut + Send,
+    //     Fut: 'static + Future<Output = T> + Send,
+    //     // Self: 'static + StreamExt + Sized + Unpin + Send,
+    //     // Self::Item: Send,
+    // {
+    //     let ParStreamParams {
+    //         num_workers,
+    //         buf_size,
+    //     } = config.into_par_stream_params();
+
+    //     let (map_tx, map_rx) = async_channel::bounded(num_workers);
+
+    //     let map_fut = async move {
+
+    //     };
+
+    //     // (0..num_workers).map(|_| {})
+    // }
+
     /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
     ///
     /// When a receiver is cloned, it creates a separate internal buffer, so that a background
@@ -1170,6 +1319,52 @@ pub trait ParStreamExt {
 
 impl<S> ParStreamExt for S where S: Stream {}
 
+// unfold_blocking
+
+pub use unfold_blocking::*;
+
+mod unfold_blocking {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct UnfoldBlocking<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    }
+
+    impl<T> Stream for UnfoldBlocking<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
+// par_unfold_unordered
+
+pub use par_unfold_unordered::*;
+
+mod par_unfold_unordered {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParUnfoldUnordered<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    }
+
+    impl<T> Stream for ParUnfoldUnordered<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // scatter
 
 pub use scatter::*;
@@ -1935,5 +2130,26 @@ mod tests {
         assert!(orig.iter().zip(&vec1).all(|(&orig, &val)| orig == val));
         assert!(orig.iter().zip(&vec2).all(|(&orig, &val)| orig * 2 == val));
         assert!(orig.iter().zip(&vec3).all(|(&orig, &val)| orig * 3 == val));
+    }
+
+    #[tokio::test]
+    async fn unfold_blocking_test() {
+        let mut count = 0;
+
+        let numbers: Vec<_> = super::unfold_blocking(None, move || {
+            let output = count;
+            if output < 1000 {
+                count += 1;
+                Some(output)
+            } else {
+                None
+            }
+        })
+        .collect()
+        .await;
+
+        let expect: Vec<_> = (0..1000).collect();
+
+        assert_eq!(numbers, expect);
     }
 }

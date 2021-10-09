@@ -346,7 +346,6 @@ mod chunk {
                     });
 
                 // save slice range
-                let num_chunks = chunks.len();
                 let len = chunks.iter().map(|chunk| chunk.slice.as_ref().len()).sum();
                 let slice_ptr: *mut T = chunks.first_mut().unwrap().as_mut().as_mut_ptr();
 
