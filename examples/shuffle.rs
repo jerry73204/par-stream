@@ -27,7 +27,7 @@ async fn main_async() {
     };
     eprintln!("single:\t{:?}", instant.elapsed());
 
-    // parallel merge sort
+    // benchmark parallel algorithm
     let instant = Instant::now();
     let _array_concurrent = {
         // shuffle each chunk locally
@@ -41,7 +41,7 @@ async fn main_async() {
             .collect()
             .await;
 
-        // merge sort
+        // merge shuffle
         while chunks.len() > 1 {
             let chunks_: Vec<_> = stream::iter(chunks)
                 .chunks(2)
