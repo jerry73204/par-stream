@@ -2,6 +2,35 @@ use crate::common::*;
 
 /// The trait provides extensions for concurrent processing on slice-like types.
 pub trait SliceExt<T> {
+    /// Splits the slice-like data into two sub-slices, divided at specified index.
+    ///
+    /// # Panics
+    /// The method panics if the index is out of bound.
+    fn concurrent_split_at(self, index: usize) -> (Chunk<Self, T>, Chunk<Self, T>)
+    where
+        Self: 'static + AsMut<[T]> + Sized + Send,
+        T: 'static + Send,
+    {
+        unsafe {
+            let data = Arc::new(self);
+            let ptr = Arc::as_ptr(&data) as *mut Self;
+            let slice: &mut [T] = ptr.as_mut().unwrap().as_mut();
+            let lslice = NonNull::new_unchecked(&mut slice[0..index] as *mut [T]);
+            let rslice = NonNull::new_unchecked(&mut slice[index..] as *mut [T]);
+
+            (
+                Chunk {
+                    data: data.clone(),
+                    slice: lslice,
+                },
+                Chunk {
+                    data,
+                    slice: rslice,
+                },
+            )
+        }
+    }
+
     /// Returns an iterator of fixed-sized chunks of the slice.
     ///
     /// Each chunk has `chunk_size` elements, expect the last chunk maybe shorter
