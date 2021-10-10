@@ -31,7 +31,7 @@ pub trait SliceExt<T> {
         }
     }
 
-    /// Returns an iterator of fixed-sized chunks of the slice.
+    /// Returns an iterator of roughly fixed-sized chunks of the slice.
     ///
     /// Each chunk has `chunk_size` elements, expect the last chunk maybe shorter
     /// if there aren't enough elements.
@@ -47,49 +47,56 @@ pub trait SliceExt<T> {
         T: 'static + Send,
     {
         let len = self.as_mut().len();
+        assert!(
+            len == 0 || chunk_size > 0,
+            "chunk_size must be positive for non-empty slice"
+        );
 
-        let num_chunks = if len == 0 {
-            0
-        } else {
-            assert!(
-                chunk_size > 0,
-                "chunk_size must be positive for non-empty slice"
-            );
-            (len + chunk_size - 1) / chunk_size
-        };
-
-        unsafe { ConcurrentChunks::new_unchecked(self, chunk_size, num_chunks, len) }
+        ConcurrentChunks {
+            index: 0,
+            chunk_size,
+            end: len,
+            data: Arc::new(self),
+            _phantom: PhantomData,
+        }
     }
 
-    /// Returns an iterator of exactly `num_chunks` fixed-sized chunks of the slice.
+    /// Returns an iterator of roughly `division` roughly fixed-sized chunks of the slice.
     ///
-    /// The chunk size is determined by `num_chunks`. The last chunk maybe shorter if
-    /// there aren't enough elements. If `num_chunks` is `None`, it defaults to
+    /// The chunk size is determined by `division`. The last chunk maybe shorter if
+    /// there aren't enough elements. If `division` is `None`, it defaults to
     /// the number of system processors.
     ///
-    /// The method is a proxy of [`concurrent_chunks`](SliceExt::concurrent_chunks).
-    ///
     /// # Panics
-    /// The method panics if `num_chunks` is zero and slice length is not zero.
+    /// The method panics if `division` is zero and slice length is not zero.
     fn concurrent_chunks_by_division(
         mut self,
-        num_chunks: impl Into<Option<usize>>,
+        division: impl Into<Option<usize>>,
     ) -> ConcurrentChunks<Self, T>
     where
         Self: 'static + AsMut<[T]> + Sized + Send,
         T: 'static + Send,
     {
         let len = self.as_mut().len();
-        let num_chunks = num_chunks.into().unwrap_or_else(|| num_cpus::get());
+        let division = division.into().unwrap_or_else(|| num_cpus::get());
 
         let chunk_size = if len == 0 {
             0
         } else {
-            assert!(num_chunks > 0, "num_chunks must be positive, but get zero");
-            (len + num_chunks - 1) / num_chunks
+            assert!(
+                division > 0,
+                "division must be positive for non-empty slice, but get zero"
+            );
+            (len + division - 1) / division
         };
 
-        unsafe { ConcurrentChunks::new_unchecked(self, chunk_size, num_chunks, len) }
+        ConcurrentChunks {
+            index: 0,
+            chunk_size,
+            end: len,
+            data: Arc::new(self),
+            _phantom: PhantomData,
+        }
     }
 
     fn concurrent_iter(self: Arc<Self>) -> ConcurrentIter<Self, T>
@@ -162,7 +169,7 @@ mod concurrent_chunks {
     {
         pub(super) index: usize,
         pub(super) chunk_size: usize,
-        pub(super) len: usize,
+        pub(super) end: usize,
         pub(super) data: Arc<S>,
         pub(super) _phantom: PhantomData<T>,
     }
@@ -172,39 +179,6 @@ mod concurrent_chunks {
         S: 'static + Send,
         T: 'static + Send,
     {
-        pub(super) unsafe fn new_unchecked(
-            mut owner: S,
-            chunk_size: usize,
-            num_chunks: usize,
-            len: usize,
-        ) -> Self
-        where
-            S: AsMut<[T]>,
-        {
-            debug_assert!(
-                owner.as_mut().len() == len,
-                "expect {} sized slice, but get {}",
-                len,
-                owner.as_mut().len()
-            );
-            debug_assert!(if len == 0 {
-                chunk_size * num_chunks == 0
-            } else {
-                let residual = (chunk_size * num_chunks) as isize - len as isize;
-                (0..len as isize).contains(&residual)
-            });
-
-            let data = Arc::new(owner);
-
-            ConcurrentChunks {
-                index: 0,
-                chunk_size,
-                len,
-                data,
-                _phantom: PhantomData,
-            }
-        }
-
         /// Obtains the guard that is used to recover the owning data.
         pub fn guard(&self) -> ConcurrentChunksGuard<S> {
             ConcurrentChunksGuard {
@@ -221,12 +195,12 @@ mod concurrent_chunks {
         type Item = Chunk<S, T>;
 
         fn next(&mut self) -> Option<Self::Item> {
-            if self.index >= self.len {
+            if self.index >= self.end {
                 return None;
             }
 
             let start = self.index;
-            let end = cmp::min(start + self.chunk_size, self.len);
+            let end = cmp::min(start + self.chunk_size, self.end);
             self.index = end;
 
             let data = self.data.clone();

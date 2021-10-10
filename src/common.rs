@@ -7,9 +7,9 @@ pub use futures::{
 pub use owning_ref::ArcRef;
 pub use pin_project::pin_project;
 pub use std::{
-    cmp,
-    cmp::Ordering,
+    cmp::{self, Ordering},
     collections::HashMap,
+    fmt::Debug,
     future::Future,
     iter,
     marker::PhantomData,
