@@ -1,6 +1,7 @@
+use concurrent_slice::{Chunk, ConcurrentSlice};
 use futures::{stream, stream::StreamExt};
 use itertools::izip;
-use par_stream::{prelude::*, Chunk};
+use par_stream::prelude::*;
 use rand::prelude::*;
 use std::time::Instant;
 

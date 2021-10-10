@@ -4,8 +4,9 @@
 //! for the description of this algorithm.
 //! https://arxiv.org/abs/1508.03167
 
+use concurrent_slice::{Chunk, ConcurrentSlice};
 use futures::{stream, stream::StreamExt};
-use par_stream::{prelude::*, Chunk};
+use par_stream::prelude::*;
 use rand::prelude::*;
 use std::{mem, time::Instant};
 

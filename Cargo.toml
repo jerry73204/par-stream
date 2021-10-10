@@ -34,6 +34,7 @@ tokio = { version = "1.12.0", features = ["sync", "macros", "rt-multi-thread", "
 rand = "0.8.4"
 async-std = { version = "1.10.0", features = ["unstable", "attributes"] } # for doc tests
 itertools = "0.10.1"
+concurrent-slice = "0.1.0"
 
 [features]
 runtime-async-std = ["async-std"]
