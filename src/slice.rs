@@ -175,6 +175,13 @@ mod concurrent_chunks {
                 _phantom: PhantomData,
             }
         }
+
+        /// Obtains the guard that is used to recover the owning data.
+        pub fn guard(&self) -> ConcurrentChunksGuard<S> {
+            ConcurrentChunksGuard {
+                data: self.data.clone(),
+            }
+        }
     }
 
     impl<S, T> Iterator for ConcurrentChunks<S, T>
@@ -205,18 +212,23 @@ mod concurrent_chunks {
         }
     }
 
-    unsafe impl<S, T> Send for ConcurrentChunks<S, T>
-    where
-        S: 'static + Send,
-        T: 'static + Send,
-    {
+    /// The guard is used to recover the owning data from [ConcurrentChunks].
+    #[derive(Debug)]
+    pub struct ConcurrentChunksGuard<S> {
+        pub(super) data: Arc<S>,
     }
 
-    unsafe impl<S, T> Sync for ConcurrentChunks<S, T>
+    impl<S> ConcurrentChunksGuard<S>
     where
-        S: 'static + Send,
-        T: 'static + Send,
+        S: Send,
     {
+        /// Tries to recover the owning data.
+        ///
+        /// The method succeeds if the referencing chunk iterator and all chunks are dropped.
+        /// Otherwise, it returns the guard intact.
+        pub fn try_unwrap(self) -> Result<S, Self> {
+            Arc::try_unwrap(self.data).map_err(|data| ConcurrentChunksGuard { data })
+        }
     }
 }
 
@@ -235,6 +247,13 @@ mod chunk {
     }
 
     impl<S, T> Chunk<S, T> {
+        /// Returns the guard that is used to recover the owning data.
+        pub fn guard(&self) -> ConcurrentChunksGuard<S> {
+            ConcurrentChunksGuard {
+                data: self.data.clone(),
+            }
+        }
+
         /// Consumes all chunk instances and recover the referenced data.
         ///
         /// # Panics
