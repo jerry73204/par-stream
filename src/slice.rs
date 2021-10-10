@@ -254,79 +254,6 @@ mod chunk {
             }
         }
 
-        /// Consumes all chunk instances and recover the referenced data.
-        ///
-        /// # Panics
-        /// The method panics if any one of associate chunks is missing, or
-        /// the chunks refer to inconsistent data.
-        pub fn into_owner(chunks: impl IntoIterator<Item = Self>) -> S
-        where
-            S: AsMut<[T]>,
-        {
-            unsafe {
-                let mut chunks = chunks.into_iter();
-
-                // obtain inner pointer from the first chunk
-                let first = chunks.next().expect("the chunks must be non-empty");
-                let data = first.data.clone();
-
-                // verify if all chunks points to the same owner
-                let mut chunks: Vec<_> = iter::once(first)
-                    .chain(chunks.inspect(|chunk| {
-                        assert_eq!(
-                            Arc::as_ptr(&chunk.data),
-                            Arc::as_ptr(&data),
-                            "inconsistent owner of the chunks"
-                        );
-                    }))
-                    .collect();
-
-                // make sure no extra reference counts
-                assert_eq!(
-                    Arc::strong_count(&data), chunks.len() + 1,
-                    "the creating iterator of the chunks must be dropped before calling this method. try `drop(iterator)`"
-                );
-
-                // sort chunks by pointer address
-                chunks.sort_by_cached_key(|chunk| chunk.slice.as_ptr());
-
-                // verify the boundary addresses
-                {
-                    let ptr = Arc::as_ptr(&data) as *mut S;
-                    let slice = ptr.as_mut().unwrap().as_mut();
-                    let range = slice.as_ptr_range();
-                    assert_eq!(
-                        chunks.first().unwrap().slice.as_ref().as_ptr_range().start,
-                        range.start,
-                        "the first chunk is missing"
-                    );
-                    assert_eq!(
-                        chunks.last().unwrap().slice.as_ref().as_ptr_range().end,
-                        range.end,
-                        "the last chunk is missing"
-                    );
-                }
-
-                // verify if chunks are contiguous
-                chunks
-                    .iter()
-                    .zip(chunks.iter().skip(1))
-                    .for_each(|(prev, next)| {
-                        let prev_end = prev.slice.as_ref().as_ptr_range().end;
-                        let next_start = next.slice.as_ref().as_ptr_range().start;
-                        assert!(prev_end == next_start, "the chunks are not contiguous");
-                    });
-
-                // free chunk references
-                drop(chunks);
-
-                // recover owner
-                let data = Arc::try_unwrap(data).map_err(|_| ()).unwrap();
-
-                data
-            }
-        }
-
         /// Concatenates contiguous chunks into one chunk.
         ///
         /// # Panics
@@ -440,11 +367,13 @@ mod tests {
         let orig: Vec<_> = (0..16).collect();
 
         let mut chunks = orig.concurrent_chunks_by_division(3);
-        let chunk1 = chunks.next().unwrap();
-        let chunk2 = chunks.next().unwrap();
-        let chunk3 = chunks.next().unwrap();
-        drop(chunks); // decrease ref count
-        let new = Chunk::into_owner(vec![chunk3, chunk1, chunk2]);
+        let _ = chunks.next().unwrap();
+        let _ = chunks.next().unwrap();
+        let _ = chunks.next().unwrap();
+
+        let guard = chunks.guard();
+        drop(chunks);
+        let new = guard.try_unwrap().unwrap();
 
         assert!(izip!(new, 0..16).all(|(lhs, rhs)| lhs == rhs));
     }
@@ -469,7 +398,10 @@ mod tests {
         let chunk1234 = Chunk::cat(vec![chunk12, chunk34]);
         assert!(izip!(&chunk1234, 0..25).all(|(&lhs, rhs)| lhs == rhs));
 
-        let new = Chunk::into_owner(vec![chunk1234]);
+        let guard = chunk1234.guard();
+        drop(chunk1234);
+        let new = guard.try_unwrap().unwrap();
+
         assert!(izip!(&new, 0..25).all(|(&lhs, rhs)| lhs == rhs));
     }
 

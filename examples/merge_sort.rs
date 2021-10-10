@@ -23,9 +23,9 @@ async fn main_async() {
             })
             .collect()
             .await;
-        let array = Chunk::into_owner(chunks);
-
-        array
+        let guard = chunks[0].guard();
+        drop(chunks);
+        guard.try_unwrap().unwrap()
     };
     eprintln!("random vec generation:\t{:?}", instant.elapsed());
 
@@ -123,7 +123,9 @@ async fn main_async() {
         }
 
         // merge chunks back to array
-        Chunk::into_owner(chunks0)
+        let guard = chunks0[0].guard();
+        drop(chunks0);
+        guard.try_unwrap().unwrap()
     };
     eprintln!("merge sort:\t{:?}", instant.elapsed());
 
