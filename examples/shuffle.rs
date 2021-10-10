@@ -1,6 +1,6 @@
 //! The example demonstrates the MergeShuffle algorithm by Axel Bacher et al.
 //!
-//! See the paper _MERGESHUFFLE: A Very Fast, Parallel Random Permutation Algorithm_
+//! See the paper _MergeShuffle: A Very Fast, Parallel Random Permutation Algorithm_
 //! for the description of this algorithm.
 //! https://arxiv.org/abs/1508.03167
 
