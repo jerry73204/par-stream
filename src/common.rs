@@ -14,7 +14,7 @@ pub use std::{
     iter,
     marker::PhantomData,
     mem::{self, ManuallyDrop},
-    ops::{Deref, DerefMut},
+    ops::{ControlFlow, Deref, DerefMut},
     pin::Pin,
     ptr::{self, NonNull},
     slice,

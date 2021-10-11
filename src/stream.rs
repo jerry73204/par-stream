@@ -225,6 +225,87 @@ pub trait ParStreamExt {
     //     // (0..num_workers).map(|_| {})
     // }
 
+    fn batching<B, IF, BF, FF, IFut, BFut, FFut>(
+        mut self,
+        mut init_fn: IF,
+        mut batching_fn: BF,
+        mut finalize_fn: FF,
+    ) -> Batching<B>
+    where
+        Self: 'static + Stream + Sized + Unpin + Send,
+        Self::Item: Send,
+        IF: 'static + FnMut() -> IFut + Send,
+        BF: 'static + FnMut(Self::Item, IFut::Output) -> BFut + Send,
+        FF: 'static + FnMut(IFut::Output) -> FFut + Send,
+        IFut: 'static + Future + Send,
+        IFut::Output: Send,
+        BFut: 'static + Future<Output = ControlFlow<B, IFut::Output>> + Send,
+        FFut: 'static + Future<Output = Option<B>> + Send,
+        B: 'static + Send,
+    {
+        let (output_tx, output_rx) = tokio::sync::mpsc::channel(1);
+        let request = Arc::new(Notify::new());
+        let terminate = Arc::new(Notify::new());
+
+        let input_fut = {
+            let request = request.clone();
+            let terminate = terminate.clone();
+
+            async move {
+                'outer: loop {
+                    tokio::select! {
+                        _ = request.notified() => {}
+                        _ = terminate.notified() => {
+                            break 'outer;
+                        }
+                    }
+
+                    let mut state = init_fn().await;
+
+                    'inner: loop {
+                        let item = match self.next().await {
+                            Some(item) => item,
+                            None => {
+                                let output = finalize_fn(state).await;
+                                if let Some(output) = output {
+                                    let _ = output_tx.send(output).await;
+                                }
+                                break 'outer;
+                            }
+                        };
+                        let control = batching_fn(item, state).await;
+
+                        match control {
+                            ControlFlow::Continue(new_state) => {
+                                state = new_state;
+                            }
+                            ControlFlow::Break(output) => {
+                                let result = output_tx.send(output).await;
+                                if result.is_err() {
+                                    break 'outer;
+                                }
+                                break 'inner;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(|output| Some(output)),
+            input_fut.into_stream().map(|_| None),
+        )
+        .filter_map(|output| async move { output });
+
+        Batching {
+            stream: Box::pin(stream),
+            request,
+            terminate,
+            requested: false,
+        }
+    }
+
     /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
     ///
     /// When a receiver is cloned, it creates a separate internal buffer, so that a background
@@ -1967,6 +2048,54 @@ mod par_for_each {
     }
 }
 
+// for each
+
+pub use batching::*;
+
+mod batching {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct Batching<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+        pub(super) request: Arc<Notify>,
+        pub(super) terminate: Arc<Notify>,
+        pub(super) requested: bool,
+    }
+
+    impl<T> Stream for Batching<T> {
+        type Item = T;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            if !self.requested {
+                self.requested = true;
+                self.request.notify_one();
+            }
+
+            let poll = Pin::new(&mut self.stream).poll_next(context);
+
+            match poll {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(output) => {
+                    self.requested = false;
+                    Poll::Ready(output)
+                }
+            }
+        }
+    }
+
+    impl<T> Drop for Batching<T> {
+        fn drop(&mut self) {
+            self.terminate.notify_one();
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -1974,6 +2103,66 @@ mod tests {
     use super::*;
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn batching_test() {
+        let sums: Vec<_> = futures::stream::iter(0..10)
+            .batching(
+                || async move { 0 },
+                |val, sum| async move {
+                    let sum = sum + val;
+
+                    if sum >= 10 {
+                        ControlFlow::Break(sum)
+                    } else {
+                        ControlFlow::Continue(sum)
+                    }
+                },
+                |_sum| async move { None },
+            )
+            .collect()
+            .await;
+
+        assert_eq!(sums, vec![10, 11, 15]);
+    }
+
+    #[tokio::test]
+    async fn batching_on_demand_test() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut stream = {
+            let count = count.clone();
+            futures::stream::iter(0..).batching(
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Release);
+                        0
+                    }
+                },
+                |val, sum| async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let sum = sum + val;
+
+                    if sum >= 10 {
+                        ControlFlow::Break(sum)
+                    } else {
+                        ControlFlow::Continue(sum)
+                    }
+                },
+                |_sum| async move { None },
+            )
+        };
+
+        // request 3 times
+        assert_eq!(stream.next().await, Some(10));
+        assert_eq!(stream.next().await, Some(11));
+        assert_eq!(stream.next().await, Some(15));
+        drop(stream);
+
+        // the init_fn must be called exactly 3 times
+        assert_eq!(count.load(Acquire), 3);
+    }
 
     #[tokio::test]
     async fn par_then_output_is_ordered_test() {
