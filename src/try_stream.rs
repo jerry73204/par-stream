@@ -7,6 +7,7 @@ use crate::{
 use tokio::sync::{Mutex, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 
+/// A fallible analogue to [unfold_blocking](crate::stream::unfold_blocking).
 pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
     buf_size: impl Into<Option<usize>>,
     mut init_f: IF,
@@ -69,6 +70,7 @@ where
     }
 }
 
+/// A fallible analogue to [par_unfold_unordered](crate::stream::par_unfold_unordered).
 pub fn try_par_unfold_unordered<IF, UF, IFut, UFut, State, Item, Error>(
     config: impl IntoParStreamParams,
     mut init_f: IF,
@@ -142,6 +144,7 @@ where
     }
 }
 
+/// A fallible analogue to [par_unfold_blocking_unordered](crate::stream::par_unfold_blocking_unordered).
 pub fn try_par_unfold_blocking_unordered<IF, UF, State, Item, Error>(
     config: impl IntoParStreamParams,
     init_f: IF,
@@ -1314,6 +1317,7 @@ pub use try_batching::*;
 mod try_batching {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_batching()](TryParStreamExt::try_batching()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryBatching<T, E> {
@@ -1362,6 +1366,7 @@ pub use try_par_batching_unordered::*;
 mod try_par_batching_unordered {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_par_batching_unordered()](TryParStreamExt::try_par_batching_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParBatchingUnordered<T, E> {
@@ -1421,6 +1426,7 @@ pub use try_unfold_blocking::*;
 mod try_unfold_blocking {
     use super::*;
 
+    /// A fallible stream combinator returned from [try_unfold_blocking()](super::try_unfold_blocking()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryUnfoldBlocking<T, E> {
@@ -1444,6 +1450,8 @@ pub use try_par_unfold_unordered::*;
 mod try_par_unfold_unordered {
     use super::*;
 
+    /// A stream combinator returned from [try_par_unfold_unordered()](super::try_par_unfold_unordered())
+    /// and  [try_par_unfold_blocking_unordered()](super::try_par_unfold_blocking_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParUnfoldUnordered<T, E> {

@@ -131,7 +131,8 @@ where
     }
 }
 
-/// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to [par_unfold_unordered].
+/// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
+/// [par_unfold_unordered()].
 pub fn par_unfold_blocking_unordered<IF, UF, State, Item>(
     config: impl IntoParStreamParams,
     init_f: IF,
@@ -1582,6 +1583,7 @@ pub use unfold_blocking::*;
 mod unfold_blocking {
     use super::*;
 
+    /// A stream combinator returned from [unfold_blocking()](super::unfold_blocking()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct UnfoldBlocking<T> {
@@ -1605,6 +1607,8 @@ pub use par_unfold_unordered::*;
 mod par_unfold_unordered {
     use super::*;
 
+    /// A stream combinator returned from [par_unfold_unordered()](super::par_unfold_unordered())
+    /// and  [par_unfold_blocking_unordered()](super::par_unfold_blocking_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParUnfoldUnordered<T> {
