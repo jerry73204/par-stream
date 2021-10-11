@@ -224,6 +224,17 @@ pub trait ParStreamExt {
     //     // (0..num_workers).map(|_| {})
     // }
 
+    /// A combinator that consumes as many elements as it likes, and produces the next stream element.
+    ///
+    /// When a new batch is started, the `init_fn` creates an initial state. Then, the state
+    /// is passed to `batching_fn` as many times as it likes, indicated by the returned [`ControlFlow`](ControlFlow).
+    /// If `ControlFlow::Continue(state)` is returned, the new state is passed to the next round when
+    /// an incoming element arrives. If `ControlFlow::Break(output)` is returned, it produces the next
+    /// stream element immediately, and start a new batch for next incoming elements.
+    ///
+    /// When the input stream is depleted while a remainig batch is not finished yet, the `finalize_fn` is called to
+    /// finalize the remaining batch. If `finalize_fn` returns `Some(output)`, the output is produced as the
+    /// next stream element.
     fn batching<B, IF, BF, FF, IFut, BFut, FFut>(
         mut self,
         mut init_fn: IF,

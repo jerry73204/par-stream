@@ -9,6 +9,8 @@ use tokio_stream::wrappers::ReceiverStream;
 
 /// An extension trait for streams providing fallible combinators for parallel processing.
 pub trait TryParStreamExt {
+    /// A fallible analogue to [batching](crate::ParStreamExt::batching) that consumes
+    /// as many elements as it likes for each next output element.
     fn try_batching<T, B, C, E, IF, BF, FF, IFut, BFut, FFut>(
         mut self,
         mut init_fn: IF,
