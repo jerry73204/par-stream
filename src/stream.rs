@@ -9,12 +9,19 @@ use crate::{
 use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
 
-pub fn unfold_blocking<F, Item>(
+/// Creates a stream with elements produced by a function.
+///
+/// The `init_f` function creates an initial state. Then `unfold_f` consumes the state
+/// and is called repeatedly. If `unfold_f` returns `Some(output, state)`, it produces
+/// the output as stream element and updates the state, until it returns `None`.
+pub fn unfold_blocking<IF, UF, State, Item>(
     buf_size: impl Into<Option<usize>>,
-    mut f: F,
+    mut init_f: IF,
+    mut unfold_f: UF,
 ) -> UnfoldBlocking<Item>
 where
-    F: 'static + FnMut() -> Option<Item> + Send,
+    IF: 'static + FnMut() -> State + Send,
+    UF: 'static + FnMut(State) -> Option<(Item, State)> + Send,
     Item: 'static + Send,
 {
     use tokio::sync::mpsc;
@@ -23,11 +30,14 @@ where
     let (data_tx, data_rx) = mpsc::channel(buf_size);
 
     let producer_fut = rt::spawn_blocking(move || {
-        while let Some(item) = f() {
+        let mut state = init_f();
+
+        while let Some((item, new_state)) = unfold_f(state) {
             let result = data_tx.blocking_send(item);
             if result.is_err() {
                 break;
             }
+            state = new_state;
         }
     });
 
@@ -50,86 +60,136 @@ where
     }
 }
 
-// pub fn par_unfold_unordered<F, Fut, Item>(
-//     config: impl IntoParStreamParams,
-//     mut f: F,
-// ) -> ParUnfoldUnordered<Item>
-// where
-//     F: 'static + FnMut() -> Fut + Send,
-//     Fut: 'static + Future<Output = Option<Item>> + Send,
-//     Item: 'static + Send,
-// {
-//     use tokio::sync::{broadcast, mpsc};
+/// Creates a stream elements produced by multiple concurrent workers.
+///
+/// Each worker obtains the initial state by calling `init_f(worker_index)`.
+/// Then, `unfold_f(wokrer_index, state)` consumes the state and is called repeatedly.
+/// If `unfold_f` returns `Some((output, state))`, the output is produced as stream element and
+/// the state is updated. The stream finishes `unfold_f` returns `None` on all workers.
+///
+/// The output elements collected from workers can be arbitrary ordered. There is no
+/// ordering guarantee respecting to the order of function callings and worker indexes.
+pub fn par_unfold_unordered<IF, UF, IFut, UFut, State, Item>(
+    config: impl IntoParStreamParams,
+    mut init_f: IF,
+    unfold_f: UF,
+) -> ParUnfoldUnordered<Item>
+where
+    IF: 'static + FnMut(usize) -> IFut,
+    UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
+    IFut: 'static + Future<Output = State> + Send,
+    UFut: 'static + Future<Output = Option<(Item, State)>> + Send,
+    State: Send,
+    Item: 'static + Send,
+{
+    use tokio::sync::mpsc;
 
-//     let ParStreamParams {
-//         num_workers,
-//         buf_size,
-//     } = config.into_par_stream_params();
-//     let (terminate_tx, _terminate_rx) = broadcast::channel(1);
-//     let (job_tx, job_rx) = async_channel::bounded(num_workers);
-//     let (output_tx, output_rx) = mpsc::channel(buf_size);
+    let ParStreamParams {
+        num_workers,
+        buf_size,
+    } = config.into_par_stream_params();
+    let (output_tx, output_rx) = mpsc::channel(buf_size);
 
-//     let unfold_future = rt::spawn(async move {
-//         loop {
-//             let fut = f();
-//             let result = job_tx.send(fut).await;
-//             if result.is_err() {
-//                 break;
-//             }
-//         }
-//     });
+    let worker_futs = (0..num_workers).map(|worker_index| {
+        let init_fut = init_f(worker_index);
+        let mut unfold_f = unfold_f.clone();
+        let output_tx = output_tx.clone();
 
-//     let worker_futures = (0..num_workers).map(move |_| {
-//         let job_rx = job_rx.clone();
-//         let terminate_tx = terminate_tx.clone();
-//         let mut terminate_rx = terminate_tx.subscribe();
-//         let output_tx = output_tx.clone();
+        rt::spawn(async move {
+            let mut state = init_fut.await;
 
-//         rt::spawn(async move {
-//             loop {
-//                 tokio::select! {
-//                     _ = terminate_rx.recv() => {
-//                         break;
-//                     }
-//                     fut = job_rx.recv() => {
-//                         match fut {
-//                             Ok(fut)  => {
-//                                 let item = match fut.await {
-//                                     Some(item) => item,
-//                                     None => {
-//                                         let _ = terminate_tx.send(());
-//                                         break;
-//                                     }
-//                                 };
-//                                 let result = output_tx.send(item).await;
-//                                 if result.is_err() {
-//                                     break;
-//                                 }
-//                             }
-//                             Err(_) => {
-//                                 let _ = terminate_tx.send(());
-//                                 break;
-//                             }
-//                         }
-//                     }
-//                 }
-//             }
-//         })
-//     });
+            loop {
+                match unfold_f(worker_index, state).await {
+                    Some((item, new_state)) => {
+                        let result = output_tx.send(item).await;
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        })
+    });
 
-//     let join_future =
-//         futures::future::join(unfold_future, futures::future::join_all(worker_futures));
+    let join_future = futures::future::try_join_all(worker_futs);
 
-//     let stream = futures::stream::select(
-//         join_future.map(|_| None).into_stream(),
-//         ReceiverStream::new(output_rx).map(|item| Some(item)),
-//     )
-//     .filter_map(|item: Option<Item>| async move { item });
+    let stream = futures::stream::select(
+        ReceiverStream::new(output_rx).map(Some),
+        join_future.into_stream().map(|result| {
+            result.unwrap();
+            None
+        }),
+    )
+    .filter_map(|item| async move { item });
 
-//     ParUnfoldUnordered {
-//         stream: Box::pin(stream),
-//     }
-// }
+    ParUnfoldUnordered {
+        stream: Box::pin(stream),
+    }
+}
+
+/// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to [par_unfold_unordered].
+pub fn par_unfold_blocking_unordered<IF, UF, State, Item>(
+    config: impl IntoParStreamParams,
+    init_f: IF,
+    unfold_f: UF,
+) -> ParUnfoldUnordered<Item>
+where
+    IF: 'static + FnMut(usize) -> State + Send + Clone,
+    UF: 'static + FnMut(usize, State) -> Option<(Item, State)> + Send + Clone,
+    Item: 'static + Send,
+{
+    use tokio::sync::mpsc;
+
+    let ParStreamParams {
+        num_workers,
+        buf_size,
+    } = config.into_par_stream_params();
+    let (output_tx, output_rx) = mpsc::channel(buf_size);
+
+    let worker_futs = (0..num_workers).map(|worker_index| {
+        let mut init_f = init_f.clone();
+        let mut unfold_f = unfold_f.clone();
+        let output_tx = output_tx.clone();
+
+        rt::spawn_blocking(move || {
+            let mut state = init_f(worker_index);
+
+            loop {
+                match unfold_f(worker_index, state) {
+                    Some((item, new_state)) => {
+                        let result = output_tx.blocking_send(item);
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    None => {
+                        break;
+                    }
+                }
+            }
+        })
+    });
+
+    let join_future = futures::future::try_join_all(worker_futs);
+
+    let stream = futures::stream::select(
+        ReceiverStream::new(output_rx).map(Some),
+        join_future.into_stream().map(|result| {
+            result.unwrap();
+            None
+        }),
+    )
+    .filter_map(|item| async move { item });
+
+    ParUnfoldUnordered {
+        stream: Box::pin(stream),
+    }
+}
 
 /// Collect multiple streams into single stream.
 ///
@@ -2271,6 +2331,7 @@ mod par_batching_unordered {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use itertools::{izip, Itertools};
     use rand::prelude::*;
     use std::time::Duration;
 
@@ -2519,22 +2580,111 @@ mod tests {
 
     #[tokio::test]
     async fn unfold_blocking_test() {
-        let mut count = 0;
+        {
+            let numbers: Vec<_> = super::unfold_blocking(
+                None,
+                || 0,
+                move |count| {
+                    let output = count;
+                    if output < 1000 {
+                        Some((output, count + 1))
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect()
+            .await;
 
-        let numbers: Vec<_> = super::unfold_blocking(None, move || {
-            let output = count;
-            if output < 1000 {
-                count += 1;
-                Some(output)
-            } else {
-                None
-            }
-        })
+            let expect: Vec<_> = (0..1000).collect();
+
+            assert_eq!(numbers, expect);
+        }
+
+        {
+            let numbers: Vec<_> = super::unfold_blocking(
+                None,
+                || (0, rand::thread_rng()),
+                move |(acc, mut rng)| {
+                    let val = rng.gen_range(1..=10);
+                    let acc = acc + val;
+                    if acc < 100 {
+                        Some((acc, (acc, rng)))
+                    } else {
+                        None
+                    }
+                },
+            )
+            .collect()
+            .await;
+
+            assert!(numbers.iter().all(|&val| val < 100));
+            assert!(izip!(&numbers, numbers.iter().skip(1)).all(|(&prev, &next)| prev < next));
+        }
+    }
+
+    #[tokio::test]
+    async fn par_unfold_test() {
+        let numbers: Vec<_> = super::par_unfold_unordered(
+            4,
+            |index| async move { (index + 1) * 100 },
+            |index, quota| async move {
+                (quota > 0).then(|| {
+                    let mut rng = rand::thread_rng();
+                    let val = rng.gen_range(0..10) + index * 100;
+                    (val, quota - 1)
+                })
+            },
+        )
         .collect()
         .await;
 
-        let expect: Vec<_> = (0..1000).collect();
+        let counts = numbers
+            .iter()
+            .map(|val| {
+                let worker_index = val / 100;
+                let number = val - worker_index * 100;
+                assert!(number < 10);
+                (worker_index, 1)
+            })
+            .into_grouping_map()
+            .sum();
 
-        assert_eq!(numbers, expect);
+        assert_eq!(counts.len(), 4);
+        assert!((0..4).all(|worker_index| counts[&worker_index] == (worker_index + 1) * 100));
+    }
+
+    #[tokio::test]
+    async fn par_unfold_blocking_test() {
+        let numbers: Vec<_> = super::par_unfold_blocking_unordered(
+            4,
+            |index| {
+                let rng = rand::thread_rng();
+                let quota = (index + 1) * 100;
+                (rng, quota)
+            },
+            |index, (mut rng, quota)| {
+                (quota > 0).then(|| {
+                    let val = rng.gen_range(0..10) + index * 100;
+                    (val, (rng, quota - 1))
+                })
+            },
+        )
+        .collect()
+        .await;
+
+        let counts = numbers
+            .iter()
+            .map(|val| {
+                let worker_index = val / 100;
+                let number = val - worker_index * 100;
+                assert!(number < 10);
+                (worker_index, 1)
+            })
+            .into_grouping_map()
+            .sum();
+
+        assert_eq!(counts.len(), 4);
+        assert!((0..4).all(|worker_index| counts[&worker_index] == (worker_index + 1) * 100));
     }
 }

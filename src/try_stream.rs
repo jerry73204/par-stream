@@ -7,6 +7,211 @@ use crate::{
 use tokio::sync::{Mutex, Notify};
 use tokio_stream::wrappers::ReceiverStream;
 
+pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
+    buf_size: impl Into<Option<usize>>,
+    mut init_f: IF,
+    mut unfold_f: UF,
+) -> TryUnfoldBlocking<Item, Error>
+where
+    IF: 'static + FnMut() -> Result<State, Error> + Send,
+    UF: 'static + FnMut(State) -> Result<Option<(Item, State)>, Error> + Send,
+    Item: 'static + Send,
+    Error: 'static + Send,
+{
+    use tokio::sync::mpsc;
+
+    let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
+    let (data_tx, data_rx) = mpsc::channel(buf_size);
+
+    let producer_fut = rt::spawn_blocking(move || {
+        let mut state = match init_f() {
+            Ok(state) => state,
+            Err(err) => {
+                let _ = data_tx.blocking_send(Err(err));
+                return;
+            }
+        };
+
+        loop {
+            match unfold_f(state) {
+                Ok(Some((item, new_state))) => {
+                    let result = data_tx.blocking_send(Ok(item));
+                    if result.is_err() {
+                        break;
+                    }
+                    state = new_state;
+                }
+                Ok(None) => break,
+                Err(err) => {
+                    let _ = data_tx.blocking_send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = futures::stream::select(
+        producer_fut
+            .into_stream()
+            .map(|result| {
+                if let Err(err) = result {
+                    panic!("unable to spawn a worker: {:?}", err);
+                }
+                None
+            })
+            .fuse(),
+        ReceiverStream::new(data_rx).map(|item: Result<Item, Error>| Some(item)),
+    )
+    .filter_map(|item| async move { item });
+
+    TryUnfoldBlocking {
+        stream: Box::pin(stream),
+    }
+}
+
+pub fn try_par_unfold_unordered<IF, UF, IFut, UFut, State, Item, Error>(
+    config: impl IntoParStreamParams,
+    mut init_f: IF,
+    unfold_f: UF,
+) -> TryParUnfoldUnordered<Item, Error>
+where
+    IF: 'static + FnMut(usize) -> IFut,
+    UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
+    IFut: 'static + Future<Output = Result<State, Error>> + Send,
+    UFut: 'static + Future<Output = Result<Option<(Item, State)>, Error>> + Send,
+    State: Send,
+    Item: 'static + Send,
+    Error: 'static + Send,
+{
+    use tokio::sync::mpsc;
+
+    let ParStreamParams {
+        num_workers,
+        buf_size,
+    } = config.into_par_stream_params();
+    let (output_tx, output_rx) = mpsc::channel(buf_size);
+
+    let worker_futs = (0..num_workers).map(|worker_index| {
+        let init_fut = init_f(worker_index);
+        let mut unfold_f = unfold_f.clone();
+        let output_tx = output_tx.clone();
+
+        rt::spawn(async move {
+            let mut state = match init_fut.await {
+                Ok(state) => state,
+                Err(err) => {
+                    let _ = output_tx.send(Err(err)).await;
+                    return;
+                }
+            };
+
+            loop {
+                match unfold_f(worker_index, state).await {
+                    Ok(Some((item, new_state))) => {
+                        let result = output_tx.send(Ok(item)).await;
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    Ok(None) => {
+                        break;
+                    }
+                    Err(err) => {
+                        let _ = output_tx.send(Err(err)).await;
+                        break;
+                    }
+                }
+            }
+        })
+    });
+
+    let join_future = futures::future::try_join_all(worker_futs);
+
+    let stream = futures::stream::select(
+        ReceiverStream::new(output_rx).map(Some),
+        join_future.into_stream().map(|result| {
+            result.unwrap();
+            None
+        }),
+    )
+    .filter_map(|item| async move { item });
+
+    TryParUnfoldUnordered {
+        stream: Some(Box::pin(stream)),
+    }
+}
+
+pub fn try_par_unfold_blocking_unordered<IF, UF, State, Item, Error>(
+    config: impl IntoParStreamParams,
+    init_f: IF,
+    unfold_f: UF,
+) -> TryParUnfoldUnordered<Item, Error>
+where
+    IF: 'static + FnMut(usize) -> Result<State, Error> + Send + Clone,
+    UF: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
+    Item: 'static + Send,
+    Error: 'static + Send,
+{
+    use tokio::sync::mpsc;
+
+    let ParStreamParams {
+        num_workers,
+        buf_size,
+    } = config.into_par_stream_params();
+    let (output_tx, output_rx) = mpsc::channel(buf_size);
+
+    let worker_futs = (0..num_workers).map(|worker_index| {
+        let mut init_f = init_f.clone();
+        let mut unfold_f = unfold_f.clone();
+        let output_tx = output_tx.clone();
+
+        rt::spawn_blocking(move || {
+            let mut state = match init_f(worker_index) {
+                Ok(state) => state,
+                Err(err) => {
+                    let _ = output_tx.blocking_send(Err(err));
+                    return;
+                }
+            };
+
+            loop {
+                match unfold_f(worker_index, state) {
+                    Ok(Some((item, new_state))) => {
+                        let result = output_tx.blocking_send(Ok(item));
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    Ok(None) => {
+                        break;
+                    }
+                    Err(err) => {
+                        let _ = output_tx.blocking_send(Err(err));
+                        break;
+                    }
+                }
+            }
+        })
+    });
+
+    let join_future = futures::future::try_join_all(worker_futs);
+
+    let stream = futures::stream::select(
+        ReceiverStream::new(output_rx).map(Some),
+        join_future.into_stream().map(|result| {
+            result.unwrap();
+            None
+        }),
+    )
+    .filter_map(|item| async move { item });
+
+    TryParUnfoldUnordered {
+        stream: Some(Box::pin(stream)),
+    }
+}
+
 /// An extension trait for streams providing fallible combinators for parallel processing.
 pub trait TryParStreamExt {
     /// A fallible analogue to [batching](crate::ParStreamExt::batching) that consumes
@@ -1209,6 +1414,61 @@ mod try_par_batching_unordered {
     }
 }
 
+// try_unfold_blocking
+
+pub use try_unfold_blocking::*;
+
+mod try_unfold_blocking {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryUnfoldBlocking<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>,
+    }
+
+    impl<T, E> Stream for TryUnfoldBlocking<T, E> {
+        type Item = Result<T, E>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
+// try_par_unfold_unordered
+
+pub use try_par_unfold_unordered::*;
+
+mod try_par_unfold_unordered {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryParUnfoldUnordered<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Option<Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>>,
+    }
+
+    impl<T, E> Stream for TryParUnfoldUnordered<T, E> {
+        type Item = Result<T, E>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            if let Some(stream) = &mut self.stream {
+                let poll = Pin::new(stream).poll_next(cx);
+
+                if let Poll::Ready(Some(Err(_)) | None) = &poll {
+                    self.stream = None;
+                }
+                poll
+            } else {
+                Poll::Ready(None)
+            }
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -1216,6 +1476,125 @@ mod tests {
     use super::*;
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn try_unfold_blocking_test() {
+        {
+            let mut stream =
+                super::try_unfold_blocking(None, || Err("init error"), |()| Ok(Some(((), ()))));
+            assert_eq!(stream.next().await, Some(Err("init error")));
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = super::try_unfold_blocking(
+                None,
+                || Ok(0),
+                |count| {
+                    if count < 3 {
+                        Ok(Some(((), count + 1)))
+                    } else {
+                        Err("exceed")
+                    }
+                },
+            );
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert_eq!(stream.next().await, Some(Err("exceed")));
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = super::try_unfold_blocking(
+                None,
+                || Result::<_, ()>::Ok(0),
+                |count| {
+                    if count < 3 {
+                        Ok(Some(((), count + 1)))
+                    } else {
+                        Ok(None)
+                    }
+                },
+            );
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert_eq!(stream.next().await, Some(Ok(())));
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn try_par_unfold_test() {
+        let mut stream = super::try_par_unfold_unordered(
+            4,
+            |_index| async move { Ok(5) },
+            |index, quota| async move {
+                if quota > 0 {
+                    Ok(Some((index, quota - 1)))
+                } else {
+                    Err("out of quota")
+                }
+            },
+        );
+
+        let mut counts = HashMap::new();
+
+        loop {
+            let result = stream.next().await;
+
+            match result {
+                Some(Ok(index)) => {
+                    *counts.entry(index).or_insert_with(|| 0) += 1;
+                }
+                Some(Err("out of quota")) => {
+                    break;
+                }
+                Some(Err(_)) | None => {
+                    unreachable!();
+                }
+            }
+        }
+
+        assert!(stream.next().await.is_none());
+        assert!(counts.values().all(|&count| count <= 5));
+    }
+
+    #[tokio::test]
+    async fn try_par_unfold_blocking_test() {
+        let mut stream = super::try_par_unfold_blocking_unordered(
+            4,
+            |_index| Ok(5),
+            |index, quota| {
+                if quota > 0 {
+                    Ok(Some((index, quota - 1)))
+                } else {
+                    Err("out of quota")
+                }
+            },
+        );
+
+        let mut counts = HashMap::new();
+
+        loop {
+            let result = stream.next().await;
+
+            match result {
+                Some(Ok(index)) => {
+                    *counts.entry(index).or_insert_with(|| 0) += 1;
+                }
+                Some(Err("out of quota")) => {
+                    break;
+                }
+                Some(Err(_)) | None => {
+                    unreachable!();
+                }
+            }
+        }
+
+        assert!(stream.next().await.is_none());
+        assert!(counts.values().all(|&count| count <= 5));
+    }
 
     #[tokio::test]
     async fn try_par_batching_unordered_test() {
