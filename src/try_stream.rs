@@ -4,10 +4,116 @@ use crate::{
     config::{IntoParStreamParams, ParStreamParams},
     rt,
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
+use tokio_stream::wrappers::ReceiverStream;
 
 /// An extension trait for streams providing fallible combinators for parallel processing.
 pub trait TryParStreamExt {
+    fn try_batching<T, B, C, E, IF, BF, FF, IFut, BFut, FFut>(
+        mut self,
+        mut init_fn: IF,
+        mut batching_fn: BF,
+        mut finalize_fn: FF,
+    ) -> TryBatching<B, E>
+    where
+        Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
+        Self::Item: Send,
+        IF: 'static + FnMut() -> IFut + Send,
+        BF: 'static + FnMut(T, C) -> BFut + Send,
+        FF: 'static + FnMut(C) -> FFut + Send,
+        IFut: 'static + Future<Output = Result<C, E>> + Send,
+        BFut: 'static + Future<Output = Result<ControlFlow<B, C>, E>> + Send,
+        FFut: 'static + Future<Output = Result<Option<B>, E>> + Send,
+        T: 'static + Send,
+        B: 'static + Send,
+        C: 'static + Send,
+        E: 'static + Send,
+    {
+        let (output_tx, output_rx) = tokio::sync::mpsc::channel(1);
+        let request = Arc::new(Notify::new());
+        let terminate = Arc::new(Notify::new());
+
+        let input_fut = {
+            let request = request.clone();
+            let terminate = terminate.clone();
+
+            async move {
+                'outer: loop {
+                    tokio::select! {
+                        _ = request.notified() => {}
+                        _ = terminate.notified() => {
+                            break 'outer;
+                        }
+                    }
+
+                    let mut state = match init_fn().await {
+                        Ok(state) => state,
+                        Err(err) => {
+                            let _ = output_tx.send(Err(err)).await;
+                            break 'outer;
+                        }
+                    };
+
+                    'inner: loop {
+                        let item = match self.next().await {
+                            Some(Ok(item)) => item,
+                            None => {
+                                let output = finalize_fn(state).await;
+
+                                match output {
+                                    Ok(Some(output)) => {
+                                        let _ = output_tx.send(Ok(output)).await;
+                                    }
+                                    Ok(None) => {}
+                                    Err(err) => {
+                                        let _ = output_tx.send(Err(err)).await;
+                                    }
+                                }
+
+                                break 'outer;
+                            }
+                            Some(Err(err)) => {
+                                let _ = output_tx.send(Err(err)).await;
+                                break 'outer;
+                            }
+                        };
+                        let control = batching_fn(item, state).await;
+
+                        match control {
+                            Ok(ControlFlow::Continue(new_state)) => {
+                                state = new_state;
+                            }
+                            Ok(ControlFlow::Break(output)) => {
+                                let result = output_tx.send(Ok(output)).await;
+                                if result.is_err() {
+                                    break 'outer;
+                                }
+                                break 'inner;
+                            }
+                            Err(err) => {
+                                let _ = output_tx.send(Err(err)).await;
+                                break 'outer;
+                            }
+                        }
+                    }
+                }
+            }
+        };
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(|output| Some(output)),
+            input_fut.into_stream().map(|_| None),
+        )
+        .filter_map(|output| async move { output });
+
+        TryBatching {
+            stream: Box::pin(stream),
+            request,
+            terminate,
+            requested: false,
+        }
+    }
+
     /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
     /// receiving an error.
     fn try_tee<T, E>(mut self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
@@ -885,12 +991,166 @@ mod try_reorder_enumerated {
     }
 }
 
+// try_batching
+
+pub use try_batching::*;
+
+mod try_batching {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryBatching<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>,
+        pub(super) request: Arc<Notify>,
+        pub(super) terminate: Arc<Notify>,
+        pub(super) requested: bool,
+    }
+
+    impl<T, E> Stream for TryBatching<T, E> {
+        type Item = Result<T, E>;
+
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            context: &mut Context<'_>,
+        ) -> Poll<Option<Self::Item>> {
+            if !self.requested {
+                self.requested = true;
+                self.request.notify_one();
+            }
+
+            let poll = Pin::new(&mut self.stream).poll_next(context);
+
+            match poll {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(output) => {
+                    self.requested = false;
+                    Poll::Ready(output)
+                }
+            }
+        }
+    }
+
+    impl<T, E> Drop for TryBatching<T, E> {
+        fn drop(&mut self) {
+            self.terminate.notify_one();
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use rand::prelude::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn try_batching_test() {
+        {
+            let mut stream = futures::stream::iter(0..10).map(Ok).try_batching(
+                || async move { Err("init error") },
+                |val, sum: usize| async move {
+                    let sum = sum + val;
+
+                    if sum >= 10 {
+                        Ok(ControlFlow::Break(sum))
+                    } else {
+                        Ok(ControlFlow::Continue(sum))
+                    }
+                },
+                |_sum| async move { Err("some elements are left behind") },
+            );
+
+            assert_eq!(stream.next().await, Some(Err("init error")));
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = futures::stream::iter(0..10).map(Ok).try_batching(
+                || async move { Ok(0) },
+                |val, sum| async move {
+                    let sum = sum + val;
+
+                    if sum >= 10 {
+                        Ok(ControlFlow::Break(sum))
+                    } else {
+                        Ok(ControlFlow::Continue(sum))
+                    }
+                },
+                |_sum| async move { Err("some elements are left behind") },
+            );
+
+            assert_eq!(stream.next().await, Some(Ok(10)));
+            assert_eq!(stream.next().await, Some(Ok(11)));
+            assert_eq!(stream.next().await, Some(Ok(15)));
+            assert!(matches!(stream.next().await, Some(Err(_))));
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = futures::stream::iter(0..10).map(Ok).try_batching(
+                || async move { Ok(0) },
+                |val, sum| async move {
+                    let sum = sum + val;
+
+                    if sum >= 15 {
+                        Err("too large")
+                    } else if sum >= 10 {
+                        Ok(ControlFlow::Break(sum))
+                    } else {
+                        Ok(ControlFlow::Continue(sum))
+                    }
+                },
+                |_sum| async move { Err("some elements are left behind") },
+            );
+
+            assert_eq!(stream.next().await, Some(Ok(10)));
+            assert_eq!(stream.next().await, Some(Ok(11)));
+            assert_eq!(stream.next().await, Some(Err("too large")));
+            assert!(stream.next().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn try_batching_on_demand_test() {
+        let count = Arc::new(AtomicUsize::new(0));
+
+        let mut stream = {
+            let count = count.clone();
+            futures::stream::iter(0..).map(Ok).try_batching(
+                move || {
+                    let count = count.clone();
+                    async move {
+                        count.fetch_add(1, Release);
+                        Result::<_, ()>::Ok(0)
+                    }
+                },
+                |val, sum| async move {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let sum = sum + val;
+
+                    if sum >= 10 {
+                        Ok(ControlFlow::Break(sum))
+                    } else {
+                        Ok(ControlFlow::Continue(sum))
+                    }
+                },
+                |_sum| async move { Ok(None) },
+            )
+        };
+
+        // request 3 times
+        assert_eq!(stream.next().await, Some(Ok(10)));
+        assert_eq!(stream.next().await, Some(Ok(11)));
+        assert_eq!(stream.next().await, Some(Ok(15)));
+        drop(stream);
+
+        // the init_fn must be called exactly 3 times
+        assert_eq!(count.load(Acquire), 3);
+    }
 
     #[tokio::test]
     async fn try_par_for_each_test() {

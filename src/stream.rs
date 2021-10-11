@@ -7,7 +7,6 @@ use crate::{
     rt,
 };
 use tokio::sync::{Mutex, Notify, Semaphore};
-
 use tokio_stream::wrappers::ReceiverStream;
 
 pub fn unfold_blocking<F, Item>(
@@ -2048,7 +2047,7 @@ mod par_for_each {
     }
 }
 
-// for each
+// batching
 
 pub use batching::*;
 
