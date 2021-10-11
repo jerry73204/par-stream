@@ -232,7 +232,7 @@ pub trait ParStreamExt {
     /// an incoming element arrives. If `ControlFlow::Break(output)` is returned, it produces the next
     /// stream element immediately, and start a new batch for next incoming elements.
     ///
-    /// When the input stream is depleted while a remainig batch is not finished yet, the `finalize_fn` is called to
+    /// When the input stream is depleted while a remaining batch is not finished yet, the `finalize_fn` is called to
     /// finalize the remaining batch. If `finalize_fn` returns `Some(output)`, the output is produced as the
     /// next stream element.
     fn batching<B, IF, BF, FF, IFut, BFut, FFut>(
@@ -313,6 +313,111 @@ pub trait ParStreamExt {
             request,
             terminate,
             requested: false,
+        }
+    }
+
+    /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes, and produces the next stream element.
+    ///
+    /// Input elements are scattered to one of the workers. Each worker runs in a loop.
+    /// For each round, it calls `init_fn` to create an initial state, passes the state to `batching_fn` to consume input as many elements as it likes,
+    /// and finally produces the output element. If `batching_fn` returns `ControlFlow::Continue(state)`, the worker updates the state and goes to
+    /// consume the next item. If `batching_fn` `ControlFlow::Break(output)`, it produces the output element and moves on to the next round.
+    ///
+    /// If the input stream is depleted while there are workers not finishing the batch yet,
+    /// the worker calls `finalize_fn` to finalize the batch. If it returns `Some(output)`, the output is produced as the next stream element.
+    ///
+    /// The outputs of workers can be arbitrary ordered. There is no ordering guarantee respecting to the input element.
+    fn par_batching_unordered<B, IF, BF, FF, IFut, BFut, FFut>(
+        mut self,
+        config: impl IntoParStreamParams,
+        init_fn: IF,
+        batching_fn: BF,
+        finalize_fn: FF,
+    ) -> ParBatchingUnordered<B>
+    where
+        Self: 'static + Stream + Sized + Unpin + Send,
+        Self::Item: Send,
+        IF: 'static + FnMut() -> IFut + Send + Clone,
+        BF: 'static + FnMut(Self::Item, IFut::Output) -> BFut + Send + Clone,
+        FF: 'static + FnMut(IFut::Output) -> FFut + Send + Clone,
+        IFut: 'static + Future + Send,
+        IFut::Output: Send,
+        BFut: 'static + Future<Output = ControlFlow<B, IFut::Output>> + Send,
+        FFut: 'static + Future<Output = Option<B>> + Send,
+        B: 'static + Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+
+        let (input_tx, input_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
+
+        let input_fut = rt::spawn(async move {
+            while let Some(item) = self.next().await {
+                let result = input_tx.send(item).await;
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let mut init_fn = init_fn.clone();
+                let mut batching_fn = batching_fn.clone();
+                let mut finalize_fn = finalize_fn.clone();
+                let input_rx = input_rx.clone();
+                let output_tx = output_tx.clone();
+
+                rt::spawn(async move {
+                    'outer: loop {
+                        let mut state = None;
+
+                        'inner: loop {
+                            let item = match input_rx.recv().await {
+                                Ok(item) => item,
+                                Err(_) => {
+                                    if let Some(state) = state.take() {
+                                        let output = finalize_fn(state).await;
+                                        if let Some(output) = output {
+                                            let _ = output_tx.send(output).await;
+                                        }
+                                    }
+                                    break 'outer;
+                                }
+                            };
+
+                            let state_ = match state.take() {
+                                Some(state) => state,
+                                None => init_fn().await,
+                            };
+                            let control = batching_fn(item, state_).await;
+
+                            match control {
+                                ControlFlow::Continue(state_) => state = Some(state_),
+                                ControlFlow::Break(output) => {
+                                    let result = output_tx.send(output).await;
+                                    if result.is_err() {
+                                        break 'outer;
+                                    }
+                                    break 'inner;
+                                }
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let join_fut =
+            futures::future::try_join(input_fut, futures::future::try_join_all(worker_futs))
+                .map(|result| result.map(|_| ()));
+
+        ParBatchingUnordered {
+            future: Some(Box::pin(join_fut)),
+            output_rx: Some(output_rx),
         }
     }
 
@@ -2106,6 +2211,61 @@ mod batching {
     }
 }
 
+// par_batching_unordered
+
+pub use par_batching_unordered::*;
+
+mod par_batching_unordered {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParBatchingUnordered<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) future: Option<Pin<Box<dyn Future<Output = Result<(), rt::JoinError>> + Send>>>,
+        pub(super) output_rx: Option<async_channel::Receiver<T>>,
+    }
+
+    impl<T> Stream for ParBatchingUnordered<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut should_wake = false;
+
+            if let Some(future) = &mut self.future {
+                if let Poll::Ready(result) = Pin::new(future).poll(cx) {
+                    result.unwrap();
+                    self.future = None;
+                } else {
+                    should_wake = true;
+                }
+            }
+
+            let output = if let Some(output_rx) = &mut self.output_rx {
+                should_wake = true;
+                let poll = Pin::new(&mut output_rx.recv()).poll(cx);
+
+                match poll {
+                    Poll::Ready(Ok(output)) => Poll::Ready(Some(output)),
+                    Poll::Ready(Err(_)) => {
+                        self.output_rx = None;
+                        Poll::Ready(None)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            } else {
+                Poll::Ready(None)
+            };
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            output
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -2113,6 +2273,32 @@ mod tests {
     use super::*;
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn par_batching_unordered_test() {
+        let mut rng = rand::thread_rng();
+        let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
+
+        let sums: Vec<_> = futures::stream::iter(data)
+            .par_batching_unordered(
+                None,
+                || async move { 0 },
+                |val, sum| async move {
+                    let sum = sum + val;
+
+                    if sum >= 1000 {
+                        ControlFlow::Break(sum)
+                    } else {
+                        ControlFlow::Continue(sum)
+                    }
+                },
+                |_sum| async move { None },
+            )
+            .collect()
+            .await;
+
+        assert!(sums.iter().all(|&sum| sum >= 1000));
+    }
 
     #[tokio::test]
     async fn batching_test() {

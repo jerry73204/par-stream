@@ -19,7 +19,6 @@ pub trait TryParStreamExt {
     ) -> TryBatching<B, E>
     where
         Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
-        Self::Item: Send,
         IF: 'static + FnMut() -> IFut + Send,
         BF: 'static + FnMut(T, C) -> BFut + Send,
         FF: 'static + FnMut(C) -> FFut + Send,
@@ -113,6 +112,116 @@ pub trait TryParStreamExt {
             request,
             terminate,
             requested: false,
+        }
+    }
+
+    /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
+    fn try_par_batching_unordered<T, B, C, E, IF, BF, FF, IFut, BFut, FFut>(
+        mut self,
+        config: impl IntoParStreamParams,
+        init_fn: IF,
+        batching_fn: BF,
+        finalize_fn: FF,
+    ) -> TryParBatchingUnordered<B, E>
+    where
+        Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
+        IF: 'static + FnMut() -> IFut + Send + Clone,
+        BF: 'static + FnMut(T, C) -> BFut + Send + Clone,
+        FF: 'static + FnMut(C) -> FFut + Send + Clone,
+        IFut: 'static + Future<Output = Result<C, E>> + Send,
+        BFut: 'static + Future<Output = Result<ControlFlow<B, C>, E>> + Send,
+        FFut: 'static + Future<Output = Result<Option<B>, E>> + Send,
+        T: 'static + Send,
+        B: 'static + Send,
+        C: 'static + Send,
+        E: 'static + Send,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+
+        let (input_tx, input_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = async_channel::bounded(buf_size);
+
+        let input_fut = rt::spawn(async move {
+            while let Some(item) = self.next().await {
+                let result = input_tx.send(item).await;
+                if result.is_err() {
+                    break;
+                }
+            }
+        });
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let mut init_fn = init_fn.clone();
+                let mut batching_fn = batching_fn.clone();
+                let mut finalize_fn = finalize_fn.clone();
+                let input_rx = input_rx.clone();
+                let output_tx = output_tx.clone();
+
+                rt::spawn(async move {
+                    'outer: loop {
+                        let mut state = None;
+
+                        'inner: loop {
+                            let item = match input_rx.recv().await {
+                                Ok(Ok(item)) => item,
+                                Ok(Err(err)) => {
+                                    let _ = output_tx.send(Err(err)).await;
+                                    break 'outer;
+                                }
+                                Err(_) => {
+                                    if let Some(state) = state.take() {
+                                        let result = finalize_fn(state).await.transpose();
+                                        if let Some(result) = result {
+                                            let _ = output_tx.send(result).await;
+                                        }
+                                    }
+                                    break 'outer;
+                                }
+                            };
+
+                            let state_ = match state.take() {
+                                Some(state) => state,
+                                None => match init_fn().await {
+                                    Ok(state) => state,
+                                    Err(err) => {
+                                        let _ = output_tx.send(Err(err)).await;
+                                        break 'outer;
+                                    }
+                                },
+                            };
+                            let control = batching_fn(item, state_).await;
+
+                            match control {
+                                Ok(ControlFlow::Continue(state_)) => state = Some(state_),
+                                Ok(ControlFlow::Break(output)) => {
+                                    let result = output_tx.send(Ok(output)).await;
+                                    if result.is_err() {
+                                        break 'outer;
+                                    }
+                                    break 'inner;
+                                }
+                                Err(err) => {
+                                    let _ = output_tx.send(Err(err)).await;
+                                    break 'outer;
+                                }
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+
+        let join_fut =
+            futures::future::try_join(input_fut, futures::future::try_join_all(worker_futs))
+                .map(|result| result.map(|_| ()));
+
+        TryParBatchingUnordered {
+            future: Some(Box::pin(join_fut)),
+            output_rx: Some(output_rx),
         }
     }
 
@@ -1041,6 +1150,65 @@ mod try_batching {
     }
 }
 
+// try_par_batching_unordered
+
+pub use try_par_batching_unordered::*;
+
+mod try_par_batching_unordered {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryParBatchingUnordered<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) future: Option<Pin<Box<dyn Future<Output = Result<(), rt::JoinError>> + Send>>>,
+        pub(super) output_rx: Option<async_channel::Receiver<Result<T, E>>>,
+    }
+
+    impl<T, E> Stream for TryParBatchingUnordered<T, E> {
+        type Item = Result<T, E>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut should_wake = false;
+
+            if let Some(future) = &mut self.future {
+                if let Poll::Ready(result) = Pin::new(future).poll(cx) {
+                    result.unwrap();
+                    self.future = None;
+                } else {
+                    should_wake = true;
+                }
+            }
+
+            let output = if let Some(output_rx) = &mut self.output_rx {
+                should_wake = true;
+                let poll = Pin::new(&mut output_rx.recv()).poll(cx);
+
+                match poll {
+                    Poll::Ready(Ok(Ok(output))) => Poll::Ready(Some(Ok(output))),
+                    Poll::Ready(Ok(Err(err))) => {
+                        self.output_rx = None;
+                        Poll::Ready(Some(Err(err)))
+                    }
+                    Poll::Ready(Err(_)) => {
+                        self.output_rx = None;
+                        Poll::Ready(None)
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            } else {
+                Poll::Ready(None)
+            };
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            output
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -1048,6 +1216,93 @@ mod tests {
     use super::*;
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn try_par_batching_unordered_test() {
+        {
+            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+                .map(Ok)
+                .try_par_batching_unordered(
+                    None,
+                    || async move { Err("init error") },
+                    |val, sum: usize| async move {
+                        let sum = sum + val;
+
+                        if sum >= 3 {
+                            Ok(ControlFlow::Break(sum))
+                        } else {
+                            Ok(ControlFlow::Continue(sum))
+                        }
+                    },
+                    |sum| async move { Ok(Some(sum)) },
+                );
+
+            assert_eq!(stream.next().await, Some(Err("init error")));
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+                .map(Ok)
+                .try_par_batching_unordered(
+                    None,
+                    || async move { Result::<_, ()>::Ok(0) },
+                    |val, sum| async move {
+                        let sum = sum + val;
+
+                        if sum >= 3 {
+                            Ok(ControlFlow::Break(sum))
+                        } else {
+                            Ok(ControlFlow::Continue(sum))
+                        }
+                    },
+                    |sum| async move { Ok(Some(sum)) },
+                );
+
+            let mut total = 0;
+            while total < 10 {
+                let sum = stream.next().await.unwrap().unwrap();
+                assert!(sum <= 3);
+                total += sum;
+            }
+            assert!(stream.next().await.is_none());
+        }
+
+        {
+            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+                .map(Ok)
+                .try_par_batching_unordered(
+                    None,
+                    || async move { Ok(0) },
+                    |val, sum| async move {
+                        let sum = sum + val;
+
+                        if sum >= 3 {
+                            Ok(ControlFlow::Break(sum))
+                        } else {
+                            Ok(ControlFlow::Continue(sum))
+                        }
+                    },
+                    |sum| async move { Err(sum) },
+                );
+
+            let mut total = 0;
+            while total < 10 {
+                let result = stream.next().await.unwrap();
+                match result {
+                    Ok(sum) => {
+                        assert!(sum == 3);
+                        total += sum;
+                    }
+                    Err(sum) => {
+                        assert!(sum < 3);
+                        break;
+                    }
+                }
+            }
+            assert!(stream.next().await.is_none());
+        }
+    }
 
     #[tokio::test]
     async fn try_batching_test() {
