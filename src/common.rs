@@ -22,5 +22,5 @@ pub use std::{
         atomic::{AtomicUsize, Ordering::*},
         Arc, Weak,
     },
-    task::{Context, Poll},
+    task::{Context, Poll, Poll::*},
 };

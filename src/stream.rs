@@ -6,8 +6,60 @@ use crate::{
     error::{NullError, NullResult},
     rt,
 };
-use tokio::sync::{Mutex, Notify, Semaphore};
+use tokio::sync::{mpsc, Notify, Semaphore};
 use tokio_stream::wrappers::ReceiverStream;
+
+/// Creates a stream with elements produced by an asynchronous function.
+///
+/// The `init_f` function creates an initial state. Then `unfold_f` consumes the state
+/// and is called repeatedly. If `unfold_f` returns `Some(output, state)`, it produces
+/// the output as stream element and updates the state, until it returns `None`.
+pub fn unfold<IF, UF, IFut, UFut, State, Item>(
+    buf_size: impl Into<Option<usize>>,
+    mut init_f: IF,
+    mut unfold_f: UF,
+) -> Unfold<Item>
+where
+    IF: 'static + FnMut() -> IFut + Send,
+    UF: 'static + FnMut(State) -> UFut + Send,
+    IFut: Future<Output = State> + Send,
+    UFut: Future<Output = Option<(Item, State)>> + Send,
+    State: Send,
+    Item: 'static + Send,
+{
+    let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
+    let (data_tx, data_rx) = mpsc::channel(buf_size);
+
+    let producer_fut = rt::spawn(async move {
+        let mut state = init_f().await;
+
+        while let Some((item, new_state)) = unfold_f(state).await {
+            let result = data_tx.send(item).await;
+            if result.is_err() {
+                break;
+            }
+            state = new_state;
+        }
+    });
+
+    let stream = futures::stream::select(
+        producer_fut
+            .into_stream()
+            .map(|result| {
+                if let Err(err) = result {
+                    panic!("unable to spawn a worker: {:?}", err);
+                }
+                None
+            })
+            .fuse(),
+        ReceiverStream::new(data_rx).map(|item: Item| Some(item)),
+    )
+    .filter_map(|item| async move { item });
+
+    Unfold {
+        stream: Box::pin(stream),
+    }
+}
 
 /// Creates a stream with elements produced by a function.
 ///
@@ -18,14 +70,12 @@ pub fn unfold_blocking<IF, UF, State, Item>(
     buf_size: impl Into<Option<usize>>,
     mut init_f: IF,
     mut unfold_f: UF,
-) -> UnfoldBlocking<Item>
+) -> Unfold<Item>
 where
     IF: 'static + FnMut() -> State + Send,
     UF: 'static + FnMut(State) -> Option<(Item, State)> + Send,
     Item: 'static + Send,
 {
-    use tokio::sync::mpsc;
-
     let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
     let (data_tx, data_rx) = mpsc::channel(buf_size);
 
@@ -55,7 +105,7 @@ where
     )
     .filter_map(|item| async move { item });
 
-    UnfoldBlocking {
+    Unfold {
         stream: Box::pin(stream),
     }
 }
@@ -69,8 +119,8 @@ where
 ///
 /// The output elements collected from workers can be arbitrary ordered. There is no
 /// ordering guarantee respecting to the order of function callings and worker indexes.
-pub fn par_unfold_unordered<IF, UF, IFut, UFut, State, Item>(
-    config: impl IntoParStreamParams,
+pub fn par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item>(
+    config: P,
     mut init_f: IF,
     unfold_f: UF,
 ) -> ParUnfoldUnordered<Item>
@@ -81,9 +131,8 @@ where
     UFut: 'static + Future<Output = Option<(Item, State)>> + Send,
     State: Send,
     Item: 'static + Send,
+    P: IntoParStreamParams,
 {
-    use tokio::sync::mpsc;
-
     let ParStreamParams {
         num_workers,
         buf_size,
@@ -133,8 +182,8 @@ where
 
 /// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
 /// [par_unfold_unordered()].
-pub fn par_unfold_blocking_unordered<IF, UF, State, Item>(
-    config: impl IntoParStreamParams,
+pub fn par_unfold_blocking_unordered<P, IF, UF, State, Item>(
+    config: P,
     init_f: IF,
     unfold_f: UF,
 ) -> ParUnfoldUnordered<Item>
@@ -142,9 +191,8 @@ where
     IF: 'static + FnMut(usize) -> State + Send + Clone,
     UF: 'static + FnMut(usize, State) -> Option<(Item, State)> + Send + Clone,
     Item: 'static + Send,
+    P: IntoParStreamParams,
 {
-    use tokio::sync::mpsc;
-
     let ParStreamParams {
         num_workers,
         buf_size,
@@ -260,31 +308,6 @@ where
 
 /// An extension trait for streams providing combinators for parallel processing.
 pub trait ParStreamExt {
-    // fn par_unfold<T, F, Fut>(
-    //     config: impl IntoParStreamParams,
-    //     f: F,
-    // )
-    // where
-    //     T: 'static + Send,
-    //     F: 'static + FnMut(Self::Item) -> Fut + Send,
-    //     Fut: 'static + Future<Output = T> + Send,
-    //     // Self: 'static + StreamExt + Sized + Unpin + Send,
-    //     // Self::Item: Send,
-    // {
-    //     let ParStreamParams {
-    //         num_workers,
-    //         buf_size,
-    //     } = config.into_par_stream_params();
-
-    //     let (map_tx, map_rx) = async_channel::bounded(num_workers);
-
-    //     let map_fut = async move {
-
-    //     };
-
-    //     // (0..num_workers).map(|_| {})
-    // }
-
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
     /// When a new batch is started, the `init_fn` creates an initial state. Then, the state
@@ -296,84 +319,18 @@ pub trait ParStreamExt {
     /// When the input stream is depleted while a remaining batch is not finished yet, the `finalize_fn` is called to
     /// finalize the remaining batch. If `finalize_fn` returns `Some(output)`, the output is produced as the
     /// next stream element.
-    fn batching<B, IF, BF, FF, IFut, BFut, FFut>(
-        mut self,
-        mut init_fn: IF,
-        mut batching_fn: BF,
-        mut finalize_fn: FF,
-    ) -> Batching<B>
+    fn batching<T, F, Fut>(self, f: F) -> Batching<T>
     where
-        Self: 'static + Stream + Sized + Unpin + Send,
-        Self::Item: Send,
-        IF: 'static + FnMut() -> IFut + Send,
-        BF: 'static + FnMut(Self::Item, IFut::Output) -> BFut + Send,
-        FF: 'static + FnMut(IFut::Output) -> FFut + Send,
-        IFut: 'static + Future + Send,
-        IFut::Output: Send,
-        BFut: 'static + Future<Output = ControlFlow<B, IFut::Output>> + Send,
-        FFut: 'static + Future<Output = Option<B>> + Send,
-        B: 'static + Send,
+        Self: Sized + Stream,
+        F: FnOnce(Self, BatchingSender<T>) -> Fut,
+        Fut: 'static + Future<Output = ()> + Send,
     {
-        let (output_tx, output_rx) = tokio::sync::mpsc::channel(1);
-        let request = Arc::new(Notify::new());
-        let terminate = Arc::new(Notify::new());
-
-        let input_fut = {
-            let request = request.clone();
-            let terminate = terminate.clone();
-
-            async move {
-                'outer: loop {
-                    tokio::select! {
-                        _ = request.notified() => {}
-                        _ = terminate.notified() => {
-                            break 'outer;
-                        }
-                    }
-
-                    let mut state = init_fn().await;
-
-                    'inner: loop {
-                        let item = match self.next().await {
-                            Some(item) => item,
-                            None => {
-                                let output = finalize_fn(state).await;
-                                if let Some(output) = output {
-                                    let _ = output_tx.send(output).await;
-                                }
-                                break 'outer;
-                            }
-                        };
-                        let control = batching_fn(item, state).await;
-
-                        match control {
-                            ControlFlow::Continue(new_state) => {
-                                state = new_state;
-                            }
-                            ControlFlow::Break(output) => {
-                                let result = output_tx.send(output).await;
-                                if result.is_err() {
-                                    break 'outer;
-                                }
-                                break 'inner;
-                            }
-                        }
-                    }
-                }
-            }
-        };
-
-        let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(|output| Some(output)),
-            input_fut.into_stream().map(|_| None),
-        )
-        .filter_map(|output| async move { output });
+        let (output_tx, output_rx) = batching_channel();
+        let future = f(self, output_tx);
 
         Batching {
-            stream: Box::pin(stream),
-            request,
-            terminate,
-            requested: false,
+            future: Some(Box::pin(future)),
+            rx: Some(output_rx),
         }
     }
 
@@ -388,24 +345,18 @@ pub trait ParStreamExt {
     /// the worker calls `finalize_fn` to finalize the batch. If it returns `Some(output)`, the output is produced as the next stream element.
     ///
     /// The outputs of workers can be arbitrary ordered. There is no ordering guarantee respecting to the input element.
-    fn par_batching_unordered<B, IF, BF, FF, IFut, BFut, FFut>(
+    fn par_batching_unordered<P, T, F, Fut>(
         mut self,
-        config: impl IntoParStreamParams,
-        init_fn: IF,
-        batching_fn: BF,
-        finalize_fn: FF,
-    ) -> ParBatchingUnordered<B>
+        config: P,
+        mut f: F,
+    ) -> ParBatchingUnordered<T>
     where
         Self: 'static + Stream + Sized + Unpin + Send,
         Self::Item: Send,
-        IF: 'static + FnMut() -> IFut + Send + Clone,
-        BF: 'static + FnMut(Self::Item, IFut::Output) -> BFut + Send + Clone,
-        FF: 'static + FnMut(IFut::Output) -> FFut + Send + Clone,
-        IFut: 'static + Future + Send,
-        IFut::Output: Send,
-        BFut: 'static + Future<Output = ControlFlow<B, IFut::Output>> + Send,
-        FFut: 'static + Future<Output = Option<B>> + Send,
-        B: 'static + Send,
+        F: FnMut(usize, async_channel::Receiver<Self::Item>, async_channel::Sender<T>) -> Fut,
+        Fut: 'static + Future<Output = ()> + Send,
+        T: 'static + Send,
+        P: IntoParStreamParams,
     {
         let ParStreamParams {
             num_workers,
@@ -425,50 +376,9 @@ pub trait ParStreamExt {
         });
 
         let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let mut init_fn = init_fn.clone();
-                let mut batching_fn = batching_fn.clone();
-                let mut finalize_fn = finalize_fn.clone();
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
-
-                rt::spawn(async move {
-                    'outer: loop {
-                        let mut state = None;
-
-                        'inner: loop {
-                            let item = match input_rx.recv().await {
-                                Ok(item) => item,
-                                Err(_) => {
-                                    if let Some(state) = state.take() {
-                                        let output = finalize_fn(state).await;
-                                        if let Some(output) = output {
-                                            let _ = output_tx.send(output).await;
-                                        }
-                                    }
-                                    break 'outer;
-                                }
-                            };
-
-                            let state_ = match state.take() {
-                                Some(state) => state,
-                                None => init_fn().await,
-                            };
-                            let control = batching_fn(item, state_).await;
-
-                            match control {
-                                ControlFlow::Continue(state_) => state = Some(state_),
-                                ControlFlow::Break(output) => {
-                                    let result = output_tx.send(output).await;
-                                    if result.is_err() {
-                                        break 'outer;
-                                    }
-                                    break 'inner;
-                                }
-                            }
-                        }
-                    }
-                })
+            .map(|worker_index| {
+                let fut = f(worker_index, input_rx.clone(), output_tx.clone());
+                rt::spawn(fut)
             })
             .collect();
 
@@ -579,7 +489,7 @@ pub trait ParStreamExt {
                 }
             });
 
-            Arc::new(Mutex::new(Some(future)))
+            Arc::new(tokio::sync::Mutex::new(Some(future)))
         };
 
         Tee {
@@ -714,13 +624,14 @@ pub trait ParStreamExt {
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then<T, F, Fut>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
+    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         let indexed_f = move |(index, item)| {
             let fut = f(item);
@@ -738,9 +649,9 @@ pub trait ParStreamExt {
     }
 
     /// Creates a parallel stream with in-local thread initializer.
-    fn par_then_init<T, B, InitF, MapF, Fut>(
+    fn par_then_init<P, T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMap<T>
@@ -752,6 +663,7 @@ pub trait ParStreamExt {
         Fut: 'static + Future<Output = T> + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
 
@@ -819,26 +731,23 @@ pub trait ParStreamExt {
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then_unordered<T, F, Fut>(
-        self,
-        config: impl IntoParStreamParams,
-        f: F,
-    ) -> ParMapUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParMapUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         ParMapUnordered::new(self, config, f)
     }
 
     /// Creates a stream analogous to [par_then_unordered](ParStreamExt::par_then_unordered) with
     /// in-local thread initializer.
-    fn par_then_init_unordered<T, B, InitF, MapF, Fut>(
+    fn par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> ParMapUnordered<T>
@@ -850,6 +759,7 @@ pub trait ParStreamExt {
         Fut: 'static + Future<Output = T> + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
         ParMapUnordered::new(self, config, move |item| map_f(init.clone(), item))
@@ -906,13 +816,14 @@ pub trait ParStreamExt {
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map<T, F, Func>(self, config: impl IntoParStreamParams, mut f: F) -> ParMap<T>
+    fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         self.par_then(config, move |item| {
             let func = f(item);
@@ -922,9 +833,9 @@ pub trait ParStreamExt {
 
     /// Creates a parallel stream analogous to [par_map](ParStreamExt::par_map) with
     /// in-local thread initializer.
-    fn par_map_init<T, B, InitF, MapF, Func>(
+    fn par_map_init<P, T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMap<T>
@@ -936,6 +847,7 @@ pub trait ParStreamExt {
         Func: 'static + FnOnce() -> T + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
 
@@ -997,17 +909,14 @@ pub trait ParStreamExt {
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map_unordered<T, F, Func>(
-        self,
-        config: impl IntoParStreamParams,
-        mut f: F,
-    ) -> ParMapUnordered<T>
+    fn par_map_unordered<P, T, F, Func>(self, config: P, mut f: F) -> ParMapUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         self.par_then_unordered(config, move |item| {
             let func = f(item);
@@ -1017,9 +926,9 @@ pub trait ParStreamExt {
 
     /// Creates a parallel stream analogous to [par_map_unordered](ParStreamExt::par_map_unordered) with
     /// in-local thread initializer.
-    fn par_map_init_unordered<T, B, InitF, MapF, Func>(
+    fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParMapUnordered<T>
@@ -1031,6 +940,7 @@ pub trait ParStreamExt {
         Func: 'static + FnOnce() -> T + Send,
         Self: 'static + StreamExt + Sized + Unpin + Send,
         Self::Item: Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
 
@@ -1495,27 +1405,28 @@ pub trait ParStreamExt {
         });
 
         Scatter {
-            future: Arc::new(Mutex::new(Some(future))),
+            future: Arc::new(tokio::sync::Mutex::new(Some(future))),
             receiver: rx,
         }
     }
 
     /// Runs an asynchronous task on each element of an stream in parallel.
-    fn par_for_each<F, Fut>(self, config: impl IntoParStreamParams, f: F) -> ParForEach
+    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> ParForEach
     where
         Self: 'static + Stream + Unpin + Sized + Send,
         Self::Item: Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
+        P: IntoParStreamParams,
     {
         ParForEach::new(self, config, f)
     }
 
     /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
     /// in-local thread initializer.
-    fn par_for_each_init<B, InitF, MapF, Fut>(
+    fn par_for_each_init<P, B, InitF, MapF, Fut>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut map_f: MapF,
     ) -> ParForEach
@@ -1526,22 +1437,20 @@ pub trait ParStreamExt {
         InitF: FnMut() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
         ParForEach::new(self, config, move |item| map_f(init.clone(), item))
     }
 
     /// Runs an blocking task on each element of an stream in parallel.
-    fn par_for_each_blocking<F, Func>(
-        self,
-        config: impl IntoParStreamParams,
-        mut f: F,
-    ) -> ParForEach
+    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> ParForEach
     where
         Self: 'static + Stream + Unpin + Sized + Send,
         Self::Item: Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
+        P: IntoParStreamParams,
     {
         self.par_for_each(config, move |item| {
             let func = f(item);
@@ -1551,9 +1460,9 @@ pub trait ParStreamExt {
 
     /// Creates a parallel stream analogous to [par_for_each_blocking](ParStreamExt::par_for_each_blocking) with a
     /// in-local thread initializer.
-    fn par_for_each_blocking_init<B, InitF, MapF, Func>(
+    fn par_for_each_blocking_init<P, B, InitF, MapF, Func>(
         self,
-        config: impl IntoParStreamParams,
+        config: P,
         mut init_f: InitF,
         mut f: MapF,
     ) -> ParForEach
@@ -1564,6 +1473,7 @@ pub trait ParStreamExt {
         InitF: FnMut() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
+        P: IntoParStreamParams,
     {
         let init = init_f();
 
@@ -1576,22 +1486,23 @@ pub trait ParStreamExt {
 
 impl<S> ParStreamExt for S where S: Stream {}
 
-// unfold_blocking
+// unfold
 
-pub use unfold_blocking::*;
+pub use unfold::*;
 
-mod unfold_blocking {
+mod unfold {
     use super::*;
 
-    /// A stream combinator returned from [unfold_blocking()](super::unfold_blocking()).
+    /// A stream combinator returned from [unfold()](super::unfold())
+    /// or [unfold_blocking()](super::unfold_blocking()).
     #[derive(Derivative)]
     #[derivative(Debug)]
-    pub struct UnfoldBlocking<T> {
+    pub struct Unfold<T> {
         #[derivative(Debug = "ignore")]
         pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
     }
 
-    impl<T> Stream for UnfoldBlocking<T> {
+    impl<T> Stream for Unfold<T> {
         type Item = T;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
@@ -1635,7 +1546,7 @@ mod scatter {
     /// A stream combinator returned from [scatter()](ParStreamExt::scatter).
     #[derive(Debug)]
     pub struct Scatter<T> {
-        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
         pub(super) receiver: async_channel::Receiver<T>,
     }
 
@@ -1676,7 +1587,7 @@ mod tee {
     #[derive(Debug)]
     pub struct Tee<T> {
         pub(super) buf_size: Option<usize>,
-        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
         pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<T>>>>>,
         pub(super) receiver: async_channel::Receiver<T>,
     }
@@ -1885,13 +1796,14 @@ mod par_map_unordered {
     }
 
     impl<T> ParMapUnordered<T> {
-        pub fn new<S, F, Fut>(mut stream: S, config: impl IntoParStreamParams, mut f: F) -> Self
+        pub fn new<P, S, F, Fut>(mut stream: S, config: P, mut f: F) -> Self
         where
             T: 'static + Send,
             F: 'static + FnMut(S::Item) -> Fut + Send,
             Fut: 'static + Future<Output = T> + Send,
             S: 'static + StreamExt + Sized + Unpin + Send,
             S::Item: Send,
+            P: IntoParStreamParams,
         {
             let ParStreamParams {
                 num_workers,
@@ -2164,12 +2076,13 @@ mod par_for_each {
     }
 
     impl ParForEach {
-        pub fn new<St, F, Fut>(mut stream: St, config: impl IntoParStreamParams, mut f: F) -> Self
+        pub fn new<P, St, F, Fut>(mut stream: St, config: P, mut f: F) -> Self
         where
             St: 'static + Stream + Unpin + Sized + Send,
             St::Item: Send,
             F: 'static + FnMut(St::Item) -> Fut + Send,
             Fut: 'static + Future<Output = ()> + Send,
+            P: IntoParStreamParams,
         {
             let ParStreamParams {
                 num_workers,
@@ -2234,43 +2147,138 @@ pub use batching::*;
 mod batching {
     use super::*;
 
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct Batching<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: Pin<Box<dyn Stream<Item = T> + Send>>,
-        pub(super) request: Arc<Notify>,
-        pub(super) terminate: Arc<Notify>,
-        pub(super) requested: bool,
+    pub(crate) fn batching_channel<T>() -> (BatchingSender<T>, BatchingReceiver<T>) {
+        let (permit_tx, permit_rx) = mpsc::channel(1);
+        let (output_tx, output_rx) = mpsc::channel(1);
+
+        (
+            BatchingSender {
+                is_closed: false,
+                is_requesting: false,
+                permit_rx,
+                output_tx,
+            },
+            BatchingReceiver {
+                is_closed: false,
+                is_requesting: false,
+                permit_tx,
+                output_rx,
+            },
+        )
     }
 
-    impl<T> Stream for Batching<T> {
-        type Item = T;
+    #[derive(Debug)]
+    pub struct BatchingSender<T> {
+        is_closed: bool,
+        is_requesting: bool,
+        permit_rx: mpsc::Receiver<()>,
+        output_tx: mpsc::Sender<T>,
+    }
 
-        fn poll_next(
-            mut self: Pin<&mut Self>,
-            context: &mut Context<'_>,
-        ) -> Poll<Option<Self::Item>> {
-            if !self.requested {
-                self.requested = true;
-                self.request.notify_one();
+    #[derive(Debug)]
+    pub(crate) struct BatchingReceiver<T> {
+        is_closed: bool,
+        is_requesting: bool,
+        permit_tx: mpsc::Sender<()>,
+        output_rx: mpsc::Receiver<T>,
+    }
+
+    impl<T> BatchingSender<T> {
+        pub async fn send(&mut self, item: T) -> Result<(), T> {
+            if self.is_closed {
+                return Err(item);
             }
 
-            let poll = Pin::new(&mut self.stream).poll_next(context);
+            if !self.is_requesting {
+                let result = self.permit_rx.recv().await;
+                if result.is_none() {
+                    self.is_closed = true;
+                    return Err(item);
+                }
+                self.is_requesting = true;
+            }
 
-            match poll {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(output) => {
-                    self.requested = false;
-                    Poll::Ready(output)
+            let result = self.output_tx.send(item).await;
+            if let Err(err) = result {
+                self.is_closed = true;
+                return Err(err.0);
+            }
+            self.is_requesting = false;
+
+            Ok(())
+        }
+    }
+
+    impl<T> BatchingReceiver<T> {
+        pub async fn recv(&mut self) -> Option<T> {
+            if self.is_closed {
+                return None;
+            }
+
+            if !self.is_requesting {
+                let result = self.permit_tx.send(()).await;
+                if result.is_err() {
+                    self.is_closed = true;
+                    return None;
+                }
+                self.is_requesting = true;
+            }
+
+            match self.output_rx.recv().await {
+                Some(item) => {
+                    self.is_requesting = false;
+                    Some(item)
+                }
+                None => {
+                    self.is_closed = true;
+                    None
                 }
             }
         }
     }
 
-    impl<T> Drop for Batching<T> {
-        fn drop(&mut self) {
-            self.terminate.notify_one();
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct Batching<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) future: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+        pub(super) rx: Option<BatchingReceiver<T>>,
+    }
+
+    impl<T> Stream for Batching<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut should_wake = false;
+
+            if let Some(future) = &mut self.future {
+                let poll = Pin::new(future).poll(cx);
+                if poll.is_ready() {
+                    self.future = None
+                } else {
+                    should_wake = true;
+                }
+            }
+
+            let poll = if let Some(rx) = &mut self.rx {
+                let poll = Pin::new(&mut Box::pin(rx.recv())).poll(cx);
+
+                if let Poll::Ready(None) = poll {
+                    self.rx = None;
+                } else {
+                    should_wake = true;
+                }
+
+                poll
+            } else {
+                Poll::Ready(None)
+            };
+
+            if should_wake {
+                cx.waker().wake_by_ref();
+            }
+
+            poll
         }
     }
 }
@@ -2345,20 +2353,23 @@ mod tests {
         let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
         let sums: Vec<_> = futures::stream::iter(data)
-            .par_batching_unordered(
-                None,
-                || async move { 0 },
-                |val, sum| async move {
-                    let sum = sum + val;
+            .par_batching_unordered(None, |_, input, output| async move {
+                let mut sum = 0;
 
-                    if sum >= 1000 {
-                        ControlFlow::Break(sum)
+                while let Ok(val) = input.recv().await {
+                    let new_sum = sum + val;
+
+                    if new_sum >= 1000 {
+                        sum = 0;
+                        let result = output.send(new_sum).await;
+                        if result.is_err() {
+                            break;
+                        }
                     } else {
-                        ControlFlow::Continue(sum)
+                        sum = new_sum
                     }
-                },
-                |_sum| async move { None },
-            )
+                }
+            })
             .collect()
             .await;
 
@@ -2368,61 +2379,28 @@ mod tests {
     #[tokio::test]
     async fn batching_test() {
         let sums: Vec<_> = futures::stream::iter(0..10)
-            .batching(
-                || async move { 0 },
-                |val, sum| async move {
-                    let sum = sum + val;
+            .batching(|mut stream, mut output| async move {
+                let mut sum = 0;
 
-                    if sum >= 10 {
-                        ControlFlow::Break(sum)
+                while let Some(val) = stream.next().await {
+                    let new_sum = sum + val;
+
+                    if new_sum >= 10 {
+                        sum = 0;
+
+                        let result = output.send(new_sum).await;
+                        if result.is_err() {
+                            break;
+                        }
                     } else {
-                        ControlFlow::Continue(sum)
+                        sum = new_sum;
                     }
-                },
-                |_sum| async move { None },
-            )
+                }
+            })
             .collect()
             .await;
 
         assert_eq!(sums, vec![10, 11, 15]);
-    }
-
-    #[tokio::test]
-    async fn batching_on_demand_test() {
-        let count = Arc::new(AtomicUsize::new(0));
-
-        let mut stream = {
-            let count = count.clone();
-            futures::stream::iter(0..).batching(
-                move || {
-                    let count = count.clone();
-                    async move {
-                        count.fetch_add(1, Release);
-                        0
-                    }
-                },
-                |val, sum| async move {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    let sum = sum + val;
-
-                    if sum >= 10 {
-                        ControlFlow::Break(sum)
-                    } else {
-                        ControlFlow::Continue(sum)
-                    }
-                },
-                |_sum| async move { None },
-            )
-        };
-
-        // request 3 times
-        assert_eq!(stream.next().await, Some(10));
-        assert_eq!(stream.next().await, Some(11));
-        assert_eq!(stream.next().await, Some(15));
-        drop(stream);
-
-        // the init_fn must be called exactly 3 times
-        assert_eq!(count.load(Acquire), 3);
     }
 
     #[tokio::test]
