@@ -158,7 +158,10 @@
 
 /// Commonly used traits.
 pub mod prelude {
-    pub use super::{stream::ParStreamExt, try_stream::TryParStreamExt};
+    pub use super::{
+        stream::{IndexedStreamExt, ParStreamExt},
+        try_stream::{FallibleIndexedStreamExt, FallibleParStreamExt},
+    };
 }
 
 mod common;
@@ -167,6 +170,7 @@ mod error;
 mod rt;
 mod stream;
 mod try_stream;
+mod utils;
 
 pub use config::*;
 pub use stream::*;

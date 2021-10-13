@@ -58,7 +58,6 @@ pub use rt_async_std::*;
     feature = "runtime-smol"
 ))]
 pub use rt_smol::*;
-
 #[cfg(not(any(
     all(
         feature = "runtime-async-std",
@@ -79,7 +78,7 @@ pub use rt_smol::*;
 mod rt_dummy {
     use super::*;
 
-    pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
+    pub fn spawn<F>(_: F) -> JoinHandle<F::Output>
     where
         F: 'static + Future + Send,
         F::Output: 'static + Send,
@@ -87,11 +86,15 @@ mod rt_dummy {
         panic!();
     }
 
-    pub fn spawn_blocking<F, R>(f: F) -> JoinHandle<R>
+    pub fn spawn_blocking<F, R>(_: F) -> JoinHandle<R>
     where
         F: 'static + Send + FnOnce() -> R,
         R: 'static + Send,
     {
+        panic!();
+    }
+
+    pub async fn sleep(duration: Duration) {
         panic!();
     }
 
@@ -104,7 +107,7 @@ mod rt_dummy {
     impl<T> Future for JoinHandle<T> {
         type Output = Result<T, JoinError>;
 
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
             panic!();
         }
     }
@@ -138,6 +141,10 @@ mod rt_tokio {
         R: 'static + Send,
     {
         JoinHandle(tokio::task::spawn_blocking(f))
+    }
+
+    pub async fn sleep(duration: Duration) {
+        tokio::time::sleep(duration).await;
     }
 
     #[derive(Debug)]
@@ -183,6 +190,10 @@ mod rt_async_std {
         JoinHandle(async_std::task::spawn_blocking(f))
     }
 
+    pub async fn sleep(duration: Duration) {
+        async_std::task::sleep(duration).await;
+    }
+
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct JoinHandle<T>(async_std::task::JoinHandle<T>);
@@ -224,6 +235,10 @@ mod rt_smol {
         R: 'static + Send,
     {
         JoinHandle::UnBlock(Box::pin(smol::unblock(f)))
+    }
+
+    pub async fn sleep(duration: Duration) {
+        smol::Timer::after(duration).await;
     }
 
     #[derive(Derivative)]

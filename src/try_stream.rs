@@ -1,238 +1,321 @@
-use super::error::NullResult;
 use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
     rt,
-    stream::{batching_channel, BatchingSender},
+    stream::{batching_channel, BatchingReceiver, BatchingSender},
+    utils::{BoxedFuture, BoxedStream},
 };
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::wrappers::ReceiverStream;
 
-/// A fallible analogue to [unfold_blocking](crate::stream::unfold_blocking).
-pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
-    buf_size: impl Into<Option<usize>>,
-    mut init_f: IF,
-    mut unfold_f: UF,
-) -> TryUnfoldBlocking<Item, Error>
+pub trait FallibleIndexedStreamExt
 where
-    IF: 'static + FnMut() -> Result<State, Error> + Send,
-    UF: 'static + FnMut(State) -> Result<Option<(Item, State)>, Error> + Send,
-    Item: 'static + Send,
-    Error: 'static + Send,
+    Self: TryStream,
 {
-    let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-    let (data_tx, data_rx) = mpsc::channel(buf_size);
+    /// Create a fallible stream that gives the current iteration count.
+    ///
+    /// The count wraps to zero if the count overflows.
+    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
+    where
+        Self: Stream<Item = Result<T, E>>;
 
-    let producer_fut = rt::spawn_blocking(move || {
-        let mut state = match init_f() {
-            Ok(state) => state,
-            Err(err) => {
-                let _ = data_tx.blocking_send(Err(err));
-                return;
-            }
-        };
+    /// Creates a fallible stream that reorders the items according to the iteration count.
+    ///
+    /// It is usually combined with [try_wrapping_enumerate](TryParStreamExt::try_wrapping_enumerate).
+    fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<Self, T, E>
+    where
+        Self: Stream<Item = Result<(usize, T), E>>;
+}
 
-        loop {
-            match unfold_f(state) {
-                Ok(Some((item, new_state))) => {
-                    let result = data_tx.blocking_send(Ok(item));
-                    if result.is_err() {
-                        break;
-                    }
-                    state = new_state;
-                }
-                Ok(None) => break,
-                Err(err) => {
-                    let _ = data_tx.blocking_send(Err(err));
-                    break;
-                }
-            }
+impl<S> FallibleIndexedStreamExt for S
+where
+    S: TryStream,
+{
+    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+    {
+        TryWrappingEnumerate {
+            stream: self,
+            counter: 0,
+            fused: false,
+            _phantom: PhantomData,
         }
-    });
-
-    let stream = futures::stream::select(
-        producer_fut
-            .into_stream()
-            .map(|result| {
-                if let Err(err) = result {
-                    panic!("unable to spawn a worker: {:?}", err);
-                }
-                None
-            })
-            .fuse(),
-        ReceiverStream::new(data_rx).map(|item: Result<Item, Error>| Some(item)),
-    )
-    .filter_map(|item| async move { item });
-
-    TryUnfoldBlocking {
-        stream: Box::pin(stream),
     }
-}
 
-/// A fallible analogue to [par_unfold_unordered](crate::stream::par_unfold_unordered).
-pub fn try_par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item, Error>(
-    config: P,
-    mut init_f: IF,
-    unfold_f: UF,
-) -> TryParUnfoldUnordered<Item, Error>
-where
-    IF: 'static + FnMut(usize) -> IFut,
-    UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
-    IFut: 'static + Future<Output = Result<State, Error>> + Send,
-    UFut: 'static + Future<Output = Result<Option<(Item, State)>, Error>> + Send,
-    State: Send,
-    Item: 'static + Send,
-    Error: 'static + Send,
-    P: IntoParStreamParams,
-{
-    let ParStreamParams {
-        num_workers,
-        buf_size,
-    } = config.into_par_stream_params();
-    let (output_tx, output_rx) = mpsc::channel(buf_size);
-
-    let worker_futs = (0..num_workers).map(|worker_index| {
-        let init_fut = init_f(worker_index);
-        let mut unfold_f = unfold_f.clone();
-        let output_tx = output_tx.clone();
-
-        rt::spawn(async move {
-            let mut state = match init_fut.await {
-                Ok(state) => state,
-                Err(err) => {
-                    let _ = output_tx.send(Err(err)).await;
-                    return;
-                }
-            };
-
-            loop {
-                match unfold_f(worker_index, state).await {
-                    Ok(Some((item, new_state))) => {
-                        let result = output_tx.send(Ok(item)).await;
-                        if result.is_err() {
-                            break;
-                        }
-                        state = new_state;
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(err) => {
-                        let _ = output_tx.send(Err(err)).await;
-                        break;
-                    }
-                }
-            }
-        })
-    });
-
-    let join_future = futures::future::try_join_all(worker_futs);
-
-    let stream = futures::stream::select(
-        ReceiverStream::new(output_rx).map(Some),
-        join_future.into_stream().map(|result| {
-            result.unwrap();
-            None
-        }),
-    )
-    .filter_map(|item| async move { item });
-
-    TryParUnfoldUnordered {
-        stream: Some(Box::pin(stream)),
-    }
-}
-
-/// A fallible analogue to [par_unfold_blocking_unordered](crate::stream::par_unfold_blocking_unordered).
-pub fn try_par_unfold_blocking_unordered<P, IF, UF, State, Item, Error>(
-    config: P,
-    init_f: IF,
-    unfold_f: UF,
-) -> TryParUnfoldUnordered<Item, Error>
-where
-    IF: 'static + FnMut(usize) -> Result<State, Error> + Send + Clone,
-    UF: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
-    Item: 'static + Send,
-    Error: 'static + Send,
-    P: IntoParStreamParams,
-{
-    let ParStreamParams {
-        num_workers,
-        buf_size,
-    } = config.into_par_stream_params();
-    let (output_tx, output_rx) = mpsc::channel(buf_size);
-
-    let worker_futs = (0..num_workers).map(|worker_index| {
-        let mut init_f = init_f.clone();
-        let mut unfold_f = unfold_f.clone();
-        let output_tx = output_tx.clone();
-
-        rt::spawn_blocking(move || {
-            let mut state = match init_f(worker_index) {
-                Ok(state) => state,
-                Err(err) => {
-                    let _ = output_tx.blocking_send(Err(err));
-                    return;
-                }
-            };
-
-            loop {
-                match unfold_f(worker_index, state) {
-                    Ok(Some((item, new_state))) => {
-                        let result = output_tx.blocking_send(Ok(item));
-                        if result.is_err() {
-                            break;
-                        }
-                        state = new_state;
-                    }
-                    Ok(None) => {
-                        break;
-                    }
-                    Err(err) => {
-                        let _ = output_tx.blocking_send(Err(err));
-                        break;
-                    }
-                }
-            }
-        })
-    });
-
-    let join_future = futures::future::try_join_all(worker_futs);
-
-    let stream = futures::stream::select(
-        ReceiverStream::new(output_rx).map(Some),
-        join_future.into_stream().map(|result| {
-            result.unwrap();
-            None
-        }),
-    )
-    .filter_map(|item| async move { item });
-
-    TryParUnfoldUnordered {
-        stream: Some(Box::pin(stream)),
+    fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<Self, T, E>
+    where
+        Self: Stream<Item = Result<(usize, T), E>>,
+    {
+        TryReorderEnumerated {
+            stream: self,
+            commit: 0,
+            fused: false,
+            buffer: HashMap::new(),
+            _phantom: PhantomData,
+        }
     }
 }
 
 /// An extension trait for streams providing fallible combinators for parallel processing.
-pub trait TryParStreamExt {
+pub trait FallibleParStreamExt
+where
+    Self: 'static + Send + TryStream + FallibleIndexedStreamExt,
+{
     /// A fallible analogue to [batching](crate::ParStreamExt::batching) that consumes
     /// as many elements as it likes for each next output element.
     fn try_batching<T, U, E, F, Fut>(self, f: F) -> TryBatching<U, E>
     where
-        Self: Sized + Stream<Item = Result<T, E>>,
-        F: FnOnce(Self, BatchingSender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
+        T: 'static + Send,
         U: 'static + Send,
         E: 'static + Send,
+        Self: Stream<Item = Result<T, E>>,
+        F: FnOnce(BatchingReceiver<T>, BatchingSender<U>) -> Fut,
+        Fut: 'static + Future<Output = Result<(), E>> + Send;
+
+    /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
+    fn try_par_batching_unordered<T, U, E, P, F, Fut>(
+        self,
+        config: P,
+        f: F,
+    ) -> TryParBatchingUnordered<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        F: FnMut(usize, async_channel::Receiver<T>, mpsc::Sender<U>) -> Fut,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        P: IntoParStreamParams;
+
+    /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
+    /// receiving an error.
+    fn try_tee<T, E>(self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        T: 'static + Send + Clone,
+        E: 'static + Send + Clone;
+
+    /// Fallible parallel stream.
+    fn try_par_then<P, T, U, E, F, Fut>(self, config: P, f: F) -> TryParMap<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send;
+
+    /// Fallible parallel stream with in-local thread initializer.
+    fn try_par_then_init<P, T, U, E, B, InitF, MapF, Fut>(
+        self,
+        config: P,
+        init_f: InitF,
+        map_f: MapF,
+    ) -> TryParMap<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send;
+
+    fn try_par_then_unordered<P, T, U, E, F, Fut>(
+        self,
+        config: P,
+        f: F,
+    ) -> TryParMapUnordered<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        U: 'static + Send,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send,
+        P: IntoParStreamParams;
+
+    /// An parallel stream analogous to [try_par_then_unordered](TryParStreamExt::try_par_then_unordered) with
+    /// in-local thread initializer
+    fn try_par_then_init_unordered<P, T, U, E, B, InitF, MapF, Fut>(
+        self,
+        config: P,
+        init_f: InitF,
+        map_f: MapF,
+    ) -> TryParMapUnordered<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send;
+
+    /// Fallible parallel stream that runs blocking workers.
+    fn try_par_map<P, T, U, E, F, Func>(self, config: P, f: F) -> TryParMap<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send;
+
+    /// Fallible parallel stream that runs blocking workers with in-local thread initializer.
+    fn try_par_map_init<P, T, U, E, B, InitF, MapF, Func>(
+        self,
+        config: P,
+        init_f: InitF,
+        map_f: MapF,
+    ) -> TryParMap<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send;
+
+    /// A parallel stream that analogous to [try_par_map](TryParStreamExt::try_par_map) without respecting
+    /// the order of input items.
+    fn try_par_map_unordered<P, T, U, E, F, Func>(
+        self,
+        config: P,
+        f: F,
+    ) -> TryParMapUnordered<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send;
+
+    /// A parallel stream that analogous to [try_par_map_unordered](TryParStreamExt::try_par_map_unordered) with
+    /// in-local thread initializer.
+    fn try_par_map_init_unordered<P, T, U, E, B, InitF, MapF, Func>(
+        self,
+        config: P,
+        init_f: InitF,
+        map_f: MapF,
+    ) -> TryParMapUnordered<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send;
+
+    /// Runs this stream to completion, executing asynchronous closure for each element on the stream
+    /// in parallel.
+    fn try_par_for_each<P, T, E, F, Fut>(self, config: P, f: F) -> TryParForEach<E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), E>> + Send;
+
+    /// Runs an fallible blocking task on each element of an stream in parallel.
+    fn try_par_for_each_init<P, T, E, B, InitF, MapF, Fut>(
+        self,
+        config: P,
+        init_f: InitF,
+        map_f: MapF,
+    ) -> TryParForEach<E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), E>> + Send;
+
+    fn try_par_for_each_blocking<P, T, E, F, Func>(self, config: P, f: F) -> TryParForEach<E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), E> + Send;
+
+    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](TryParStreamExt::try_par_for_each_blocking)
+    /// with a in-local thread initializer.
+    fn try_par_for_each_blocking_init<P, T, E, B, InitF, MapF, Func>(
+        self,
+        config: P,
+        init_f: InitF,
+        f: MapF,
+    ) -> TryParForEach<E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        B: 'static + Send + Clone,
+        InitF: FnMut() -> B,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), E> + Send;
+}
+
+impl<S> FallibleParStreamExt for S
+where
+    S: 'static + Send + TryStream + FallibleIndexedStreamExt,
+{
+    fn try_batching<T, U, E, F, Fut>(self, f: F) -> TryBatching<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        Self: Stream<Item = Result<T, E>>,
+        F: FnOnce(BatchingReceiver<T>, BatchingSender<U>) -> Fut,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
+        let mut stream = self.boxed();
+
+        let (mut input_tx, input_rx) = batching_channel();
         let (output_tx, output_rx) = batching_channel();
-        let future = f(self, output_tx);
+
+        let input_future = async move {
+            while let Some(item) = stream.try_next().await? {
+                let result = input_tx.send(item).await;
+                if result.is_err() {
+                    break;
+                }
+            }
+            Ok(())
+        };
+        let batching_future = f(input_rx, output_tx);
+        let join_future = futures::future::try_join(input_future, batching_future);
 
         let output_stream = futures::stream::unfold(output_rx, move |mut output_rx| async move {
             output_rx.recv().await.map(|output| (output, output_rx))
         });
         let select_stream = futures::stream::select(
             output_stream.map(|item| Ok(Some(item))),
-            future.into_stream().map(|result| result.map(|()| None)),
+            join_future.into_stream().map(|result| result.map(|_| None)),
         )
         .boxed();
 
@@ -261,28 +344,25 @@ pub trait TryParStreamExt {
                 Ok(None)
             },
         )
-        .try_filter_map(|item| async move { Ok(item) });
+        .try_filter_map(|item| async move { Ok(item) })
+        .boxed();
 
-        TryBatching {
-            stream: Box::pin(stream),
-        }
+        TryBatching { stream }
     }
 
-    /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
     fn try_par_batching_unordered<T, U, E, P, F, Fut>(
-        mut self,
+        self,
         config: P,
         mut f: F,
     ) -> TryParBatchingUnordered<U, E>
     where
-        Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
-        Self::Item: Send,
-        F: FnMut(usize, async_channel::Receiver<T>, mpsc::Sender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
         T: 'static + Send,
         U: 'static + Send,
         E: 'static + Send,
-        P: IntoParStreamParams,
+        F: FnMut(usize, async_channel::Receiver<T>, mpsc::Sender<U>) -> Fut,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
         let ParStreamParams {
             num_workers,
@@ -293,7 +373,9 @@ pub trait TryParStreamExt {
         let (output_tx, output_rx) = mpsc::channel(buf_size);
 
         let input_fut = rt::spawn(async move {
-            while let Some(item) = self.next().await {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
                 let result = input_tx.send(item?).await;
                 if result.is_err() {
                     break;
@@ -351,11 +433,9 @@ pub trait TryParStreamExt {
         TryParBatchingUnordered { stream }
     }
 
-    /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
-    /// receiving an error.
-    fn try_tee<T, E>(mut self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
+    fn try_tee<T, E>(self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
     where
-        Self: 'static + Stream<Item = Result<T, E>> + Sized + Unpin + Send,
+        Self: Stream<Item = Result<T, E>>,
         T: 'static + Send + Clone,
         E: 'static + Send + Clone,
     {
@@ -372,7 +452,9 @@ pub trait TryParStreamExt {
             let sender_set = sender_set.clone();
 
             let future = rt::spawn(async move {
-                while let Some(item) = self.next().await {
+                let mut stream = self.boxed();
+
+                while let Some(item) = stream.next().await {
                     let futures: Vec<_> = sender_set
                         .pin()
                         .iter()
@@ -415,161 +497,253 @@ pub trait TryParStreamExt {
         }
     }
 
-    /// Create a fallible stream that gives the current iteration count.
-    ///
-    /// The count wraps to zero if the count overflows.
-    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<T, E, Self>
+    fn try_par_then<P, T, U, E, F, Fut>(self, config: P, mut f: F) -> TryParMap<U, E>
     where
-        Self: Stream<Item = Result<T, E>> + Sized + Unpin + Send,
-    {
-        TryWrappingEnumerate {
-            stream: self,
-            counter: 0,
-            fused: false,
-        }
-    }
-
-    /// Creates a fallible stream that reorders the items according to the iteration count.
-    ///
-    /// It is usually combined with [try_wrapping_enumerate](TryParStreamExt::try_wrapping_enumerate).
-    fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<T, E, Self>
-    where
-        Self: Stream<Item = Result<(usize, T), E>> + Sized + Unpin + Send,
-    {
-        TryReorderEnumerated {
-            stream: self,
-            counter: 0,
-            fused: false,
-            buffer: HashMap::new(),
-        }
-    }
-
-    /// Fallible parallel stream.
-    fn try_par_then<P, T, F, Fut>(mut self, config: P, mut f: F) -> TryParMap<T, Self::Error>
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
         P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
     {
         let ParStreamParams {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_channel::bounded(buf_size);
-        let (reorder_tx, reorder_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_channel::bounded(buf_size);
 
-        let map_fut = {
-            let reorder_tx = reorder_tx.clone();
-            async move {
-                let mut counter = 0u64;
+        let (input_tx, input_rx) = async_channel::bounded(buf_size);
+        let (reorder_tx, mut reorder_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (terminate_tx, terminate_rx) = async_channel::bounded(buf_size);
+
+        let input_future = {
+            let terminate_rx = terminate_rx.clone();
+            let terminate_tx = terminate_tx.clone();
+
+            rt::spawn(async move {
+                let mut stream = self.boxed();
+                let mut index = 0;
 
                 loop {
-                    match self.try_next().await {
-                        Ok(Some(item)) => {
-                            let fut = f(item);
-                            map_tx.send((counter, fut)).await?;
+                    let item = tokio::select! {
+                        item = stream.next() => item,
+                        _ = terminate_rx.recv() => break,
+                    };
+
+                    match item {
+                        Some(Ok(item)) => {
+                            let future = f(item);
+                            if input_tx.send((index, future)).await.is_err() {
+                                break;
+                            }
                         }
-                        Ok(None) => break,
-                        Err(err) => {
-                            reorder_tx.send((counter, Err(err))).await?;
+                        Some(Err(err)) => {
+                            let _ = terminate_tx.send(()).await;
+                            return Err((index, err));
                         }
+                        None => break,
                     }
-                    counter = counter.wrapping_add(1);
+
+                    index += 1;
                 }
 
                 Ok(())
-            }
+            })
+            .map(|result| result.unwrap())
         };
 
-        let reorder_fut = async move {
-            let mut counter = 0u64;
-            let mut pool = HashMap::new();
+        let mut worker_futures: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let input_rx = input_rx.clone();
+                let reorder_tx = reorder_tx.clone();
+                let terminate_rx = terminate_rx.clone();
+                let terminate_tx = terminate_tx.clone();
 
-            while let Ok((index, output)) = reorder_rx.recv().await {
-                if index != counter {
-                    pool.insert(index, output);
-                    continue;
+                rt::spawn(async move {
+                    loop {
+                        let (index, future) = tokio::select! {
+                            item = input_rx.recv() => {
+                                match item {
+                                    Ok(item) => item,
+                                    Err(_) => {
+                                        break;
+                                    }
+                                }
+                            },
+                            _ = terminate_rx.recv() => break,
+                        };
+
+                        match future.await {
+                            Ok(item) => {
+                                if reorder_tx.send((index, item)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(err) => {
+                                let _ = terminate_tx.send(()).await;
+                                return Err((index, err));
+                            }
+                        }
+                    }
+
+                    Ok(())
+                })
+                .map(|result| result.unwrap())
+                .boxed()
+            })
+            .collect();
+
+        let select_worker_future = async move {
+            let mut errors = vec![];
+
+            while !worker_futures.is_empty() {
+                let (result, index, _) = futures::future::select_all(&mut worker_futures).await;
+                worker_futures.remove(index);
+
+                if let Err((index, error)) = result {
+                    errors.push((index, error));
                 }
+            }
 
-                output_tx.send(output).await?;
-                counter = counter.wrapping_add(1);
+            errors
+        };
 
-                while let Some(output) = pool.remove(&counter) {
-                    output_tx.send(output).await?;
-                    counter = counter.wrapping_add(1);
+        let reorder_future = rt::spawn(async move {
+            let mut map = HashMap::new();
+            let mut commit = 0;
+
+            'outer: loop {
+                let (index, item) = match reorder_rx.recv().await {
+                    Some(tuple) => tuple,
+                    None => break,
+                };
+
+                match commit.cmp(&index) {
+                    Less => {
+                        map.insert(index, item);
+                    }
+                    Equal => {
+                        if output_tx.send(item).await.is_err() {
+                            break 'outer;
+                        }
+                        commit += 1;
+
+                        'inner: loop {
+                            match map.remove(&commit) {
+                                Some(item) => {
+                                    if output_tx.send(item).await.is_err() {
+                                        break 'outer;
+                                    };
+                                    commit += 1;
+                                }
+                                None => break 'inner,
+                            }
+                        }
+                    }
+                    Greater => panic!("duplicated index number {}", index),
                 }
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let join_all_future = async move {
+            let (input_result, mut worker_results, ()) =
+                futures::future::join3(input_future, select_worker_future, reorder_future).await;
+
+            if let Err((_, err)) = input_result {
+                return Err(err);
+            }
+
+            worker_results.sort_by_cached_key(|&(index, _)| index);
+            if let Some((_, err)) = worker_results.into_iter().next() {
+                return Err(err);
             }
 
             Ok(())
         };
 
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let reorder_tx = reorder_tx.clone();
+        let select_stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(|item| Ok(Some(item))),
+            join_all_future
+                .map(|result| result.map(|()| None))
+                .into_stream(),
+        )
+        .boxed();
 
-                let worker_fut = async move {
-                    while let Ok((index, fut)) = map_rx.recv().await {
-                        let output = fut.await;
-                        reorder_tx.send((index, output)).await?;
+        let stream = futures::stream::unfold(
+            (Some(select_stream), None),
+            |(mut select_stream, mut error)| async move {
+                if let Some(stream) = &mut select_stream {
+                    match stream.next().await {
+                        Some(Ok(Some(item))) => {
+                            let output = Ok(item);
+                            let state = (select_stream, error);
+                            return Some((Some(output), state));
+                        }
+                        Some(Ok(None)) => {
+                            let state = (select_stream, error);
+                            return Some((None, state));
+                        }
+                        Some(Err(err)) => {
+                            error = Some(err);
+                            let state = (select_stream, error);
+                            return Some((None, state));
+                        }
+                        None => {
+                            // select_stream = None;
+                        }
                     }
-                    Ok(())
-                };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
-            })
-            .collect();
+                }
 
-        let par_then_fut = futures::future::try_join3(
-            map_fut,
-            reorder_fut,
-            futures::future::try_join_all(worker_futs),
-        );
+                if let Some(err) = error {
+                    let output = Err(err);
+                    let state = (None, None);
+                    return Some((Some(output), state));
+                }
 
-        TryParMap {
-            fut: Some(Box::pin(par_then_fut)),
-            output_rx,
-        }
+                None
+            },
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        TryParMap { stream }
     }
 
-    /// Fallible parallel stream with in-local thread initializer.
-    fn try_par_then_init<P, T, B, InitF, MapF, Fut>(
+    fn try_par_then_init<P, T, U, E, B, InitF, MapF, Fut>(
         self,
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMap<T, Self::Error>
+    ) -> TryParMap<U, E>
     where
+        P: IntoParStreamParams,
         T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
     {
         let init = init_f();
         self.try_par_then(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_then_unordered<P, T, F, Fut>(
-        mut self,
+    fn try_par_then_unordered<P, T, U, E, F, Fut>(
+        self,
         config: P,
         mut f: F,
-    ) -> TryParMapUnordered<T, Self::Error>
+    ) -> TryParMapUnordered<U, E>
     where
+        U: 'static + Send,
         T: 'static + Send,
-        F: 'static + FnMut(Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
     {
         let ParStreamParams {
@@ -577,85 +751,91 @@ pub trait TryParStreamExt {
             buf_size,
         } = config.into_par_stream_params();
         let (map_tx, map_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = async_channel::bounded(buf_size);
+        let (output_tx, output_rx) = mpsc::channel(buf_size);
 
         let map_fut = {
             let output_tx = output_tx.clone();
             async move {
+                let mut stream = self.boxed();
+
                 loop {
-                    match self.try_next().await {
+                    match stream.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            map_tx.send(fut).await?;
+                            let result = map_tx.send(fut).await;
+                            if result.is_err() {
+                                break;
+                            }
                         }
                         Ok(None) => break,
                         Err(err) => {
-                            output_tx.send(Err(err)).await?;
+                            let result = output_tx.send(Err(err)).await;
+                            if result.is_err() {
+                                break;
+                            }
                         }
                     }
                 }
-                Ok(())
             }
         };
 
-        let worker_futs = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let output_tx = output_tx.clone();
+        let worker_futs = (0..num_workers).map(|_| {
+            let map_rx = map_rx.clone();
+            let output_tx = output_tx.clone();
 
-                let worker_fut = async move {
-                    while let Ok(fut) = map_rx.recv().await {
-                        let result = fut.await;
-                        output_tx.send(result).await?;
+            let worker_fut = async move {
+                while let Ok(fut) = map_rx.recv().await {
+                    let result = fut.await;
+                    if output_tx.send(result).await.is_err() {
+                        break;
                     }
-                    Ok(())
-                };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
-            })
-            .collect::<Vec<_>>();
+                }
+            };
+            rt::spawn(worker_fut).map(|result| result.unwrap())
+        });
 
-        let par_then_fut =
-            futures::future::try_join(map_fut, futures::future::try_join_all(worker_futs));
+        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
 
-        TryParMapUnordered {
-            fut: Some(Box::pin(par_then_fut)),
-            output_rx,
-        }
+        let stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(Some),
+            join_fut.into_stream().map(|_| None),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        TryParMapUnordered { stream }
     }
 
-    /// An parallel stream analogous to [try_par_then_unordered](TryParStreamExt::try_par_then_unordered) with
-    /// in-local thread initializer
-    fn try_par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
+    fn try_par_then_init_unordered<P, T, U, E, B, InitF, MapF, Fut>(
         self,
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMapUnordered<T, Self::Error>
+    ) -> TryParMapUnordered<U, E>
     where
+        P: IntoParStreamParams,
         T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<T, Self::Error>> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<U, E>> + Send,
+        Self: Stream<Item = Result<T, E>>,
     {
         let init = init_f();
         self.try_par_then_unordered(config, move |item| map_f(init.clone(), item))
     }
 
-    /// Fallible parallel stream that runs blocking workers.
-    fn try_par_map<P, T, F, Func>(self, config: P, mut f: F) -> TryParMap<T, Self::Error>
+    fn try_par_map<P, T, U, E, F, Func>(self, config: P, mut f: F) -> TryParMap<U, E>
     where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
         P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send,
+        Self: Stream<Item = Result<T, E>>,
     {
         self.try_par_then(config, move |item| {
             let func = f(item);
@@ -663,23 +843,22 @@ pub trait TryParStreamExt {
         })
     }
 
-    /// Fallible parallel stream that runs blocking workers with in-local thread initializer.
-    fn try_par_map_init<P, T, B, InitF, MapF, Func>(
+    fn try_par_map_init<P, T, U, E, B, InitF, MapF, Func>(
         self,
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMap<T, Self::Error>
+    ) -> TryParMap<U, E>
     where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
         T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
         let init = init_f();
         self.try_par_then(config, move |item| {
@@ -688,21 +867,19 @@ pub trait TryParStreamExt {
         })
     }
 
-    /// A parallel stream that analogous to [try_par_map](TryParStreamExt::try_par_map) without respecting
-    /// the order of input items.
-    fn try_par_map_unordered<P, T, F, Func>(
+    fn try_par_map_unordered<P, T, U, E, F, Func>(
         self,
         config: P,
         mut f: F,
-    ) -> TryParMapUnordered<T, Self::Error>
+    ) -> TryParMapUnordered<U, E>
     where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
+        Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
         self.try_par_then_unordered(config, move |item| {
             let func = f(item);
@@ -710,24 +887,22 @@ pub trait TryParStreamExt {
         })
     }
 
-    /// A parallel stream that analogous to [try_par_map_unordered](TryParStreamExt::try_par_map_unordered) with
-    /// in-local thread initializer.
-    fn try_par_map_init_unordered<P, T, B, InitF, MapF, Func>(
+    fn try_par_map_init_unordered<P, T, U, E, B, InitF, MapF, Func>(
         self,
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMapUnordered<T, Self::Error>
+    ) -> TryParMapUnordered<U, E>
     where
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
         T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<T, Self::Error> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
         let init = init_f();
         self.try_par_then_unordered(config, move |item| {
@@ -736,16 +911,14 @@ pub trait TryParStreamExt {
         })
     }
 
-    /// Runs this stream to completion, executing asynchronous closure for each element on the stream
-    /// in parallel.
-    fn try_par_for_each<P, F, Fut>(mut self, config: P, mut f: F) -> TryParForEach<Self::Error>
+    fn try_par_for_each<P, T, E, F, Fut>(self, config: P, mut f: F) -> TryParForEach<E>
     where
-        F: 'static + FnMut(Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
+        Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
         let ParStreamParams {
             num_workers,
@@ -758,8 +931,10 @@ pub trait TryParStreamExt {
             let terminate_tx = terminate_tx.clone();
 
             async move {
+                let mut stream = self.boxed();
+
                 loop {
-                    match self.try_next().await {
+                    match stream.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
                             if map_tx.send(fut).await.is_err() {
@@ -814,46 +989,42 @@ pub trait TryParStreamExt {
                     // the order takes the latest error
                     result.and(folded)
                 })
-        };
+        }
+        .boxed();
 
         TryParForEach {
-            fut: Some(Box::pin(output_fut)),
+            future: output_fut.boxed(),
         }
     }
 
-    /// Runs an fallible blocking task on each element of an stream in parallel.
-    fn try_par_for_each_init<P, B, InitF, MapF, Fut>(
+    fn try_par_for_each_init<P, T, E, B, InitF, MapF, Fut>(
         self,
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParForEach<Self::Error>
+    ) -> TryParForEach<E>
     where
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
         let init = init_f();
         self.try_par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_for_each_blocking<P, F, Func>(
-        self,
-        config: P,
-        mut f: F,
-    ) -> TryParForEach<Self::Error>
+    fn try_par_for_each_blocking<P, T, E, F, Func>(self, config: P, mut f: F) -> TryParForEach<E>
     where
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
-        F: 'static + FnMut(Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<(), Self::Error> + Send,
+        Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
         self.try_par_for_each(config, move |item| {
             let func = f(item);
@@ -861,23 +1032,21 @@ pub trait TryParStreamExt {
         })
     }
 
-    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](TryParStreamExt::try_par_for_each_blocking)
-    /// with a in-local thread initializer.
-    fn try_par_for_each_blocking_init<P, B, InitF, MapF, Func>(
+    fn try_par_for_each_blocking_init<P, T, E, B, InitF, MapF, Func>(
         self,
         config: P,
         mut init_f: InitF,
         mut f: MapF,
-    ) -> TryParForEach<Self::Error>
+    ) -> TryParForEach<E>
     where
-        Self: 'static + TryStreamExt + Sized + Unpin + Send,
-        Self::Ok: Send,
-        Self::Error: Send,
+        Self: Stream<Item = Result<T, E>>,
+        P: IntoParStreamParams,
+        T: 'static + Send,
+        E: 'static + Send,
         B: 'static + Send + Clone,
         InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<(), Self::Error> + Send,
-        P: IntoParStreamParams,
+        MapF: 'static + FnMut(B, T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
         let init = init_f();
 
@@ -887,8 +1056,6 @@ pub trait TryParStreamExt {
         })
     }
 }
-
-impl<S> TryParStreamExt for S where S: TryStream {}
 
 // try_tee
 
@@ -963,34 +1130,14 @@ mod try_par_then {
     #[derivative(Debug)]
     pub struct TryParMap<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<((), (), Vec<()>)>> + Send>>>,
-        #[derivative(Debug = "ignore")]
-        pub(super) output_rx: async_channel::Receiver<Result<T, E>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParMap<T, E> {
         type Item = Result<T, E>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let mut should_wake = match self.fut.as_mut() {
-                Some(fut) => match Pin::new(fut).poll(cx) {
-                    Poll::Pending => true,
-                    Poll::Ready(_) => {
-                        self.fut = None;
-                        false
-                    }
-                },
-                None => false,
-            };
-
-            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-            should_wake |= !self.output_rx.is_empty();
-
-            if should_wake {
-                cx.waker().wake_by_ref();
-            }
-
-            poll
+            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
@@ -1007,34 +1154,14 @@ mod try_par_map_unordered {
     #[derivative(Debug)]
     pub struct TryParMapUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) fut: Option<Pin<Box<dyn Future<Output = NullResult<((), Vec<()>)>> + Send>>>,
-        #[derivative(Debug = "ignore")]
-        pub(super) output_rx: async_channel::Receiver<Result<T, E>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParMapUnordered<T, E> {
         type Item = Result<T, E>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let mut should_wake = match self.fut.as_mut() {
-                Some(fut) => match Pin::new(fut).poll(cx) {
-                    Poll::Pending => true,
-                    Poll::Ready(_) => {
-                        self.fut = None;
-                        false
-                    }
-                },
-                None => false,
-            };
-
-            let poll = Pin::new(&mut self.output_rx).poll_next(cx);
-            should_wake |= !self.output_rx.is_empty();
-
-            if should_wake {
-                cx.waker().wake_by_ref();
-            }
-
-            poll
+            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
@@ -1051,26 +1178,14 @@ mod try_par_for_each {
     #[derivative(Debug)]
     pub struct TryParForEach<E> {
         #[derivative(Debug = "ignore")]
-        pub(super) fut: Option<Pin<Box<dyn Future<Output = Result<(), E>> + Send>>>,
+        pub(super) future: BoxedFuture<Result<(), E>>,
     }
 
     impl<E> Future for TryParForEach<E> {
         type Output = Result<(), E>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            match self.fut.as_mut() {
-                Some(fut) => match Pin::new(fut).poll(cx) {
-                    Poll::Pending => {
-                        cx.waker().wake_by_ref();
-                        Poll::Pending
-                    }
-                    Poll::Ready(result) => {
-                        self.fut = None;
-                        Poll::Ready(result)
-                    }
-                },
-                None => unreachable!(),
-            }
+            Pin::new(&mut self.future).poll(cx)
         }
     }
 }
@@ -1083,46 +1198,59 @@ mod try_wrapping_enumerate {
     use super::*;
 
     /// A fallible stream combinator returned from [try_wrapping_enumerate()](TryParStreamExt::try_wrapping_enumerate).
-    #[derive(Debug)]
-    pub struct TryWrappingEnumerate<T, E, S>
+    #[pin_project(project = TryWrappingEnumerateProj)]
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryWrappingEnumerate<S, T, E>
     where
-        S: Stream<Item = Result<T, E>> + Send,
+        S: ?Sized,
     {
-        pub(super) stream: S,
         pub(super) counter: usize,
         pub(super) fused: bool,
+        pub(super) _phantom: PhantomData<(T, E)>,
+        #[pin]
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: S,
     }
 
-    impl<T, E, S> Stream for TryWrappingEnumerate<T, E, S>
+    impl<S, T, E> Stream for TryWrappingEnumerate<S, T, E>
     where
-        S: Stream<Item = Result<T, E>> + Unpin + Send,
+        S: Stream<Item = Result<T, E>>,
     {
         type Item = Result<(usize, T), E>;
 
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            if self.fused {
-                return Poll::Ready(None);
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let TryWrappingEnumerateProj {
+                stream,
+                fused,
+                counter,
+                ..
+            } = self.project();
+
+            if *fused {
+                return Ready(None);
             }
 
-            match Pin::new(&mut self.stream).poll_next(cx) {
-                Poll::Ready(Some(Ok(item))) => {
-                    let index = self.counter;
-                    self.counter = self.counter.wrapping_add(1);
-                    Poll::Ready(Some(Ok((index, item))))
+            let poll = stream.poll_next(cx);
+            match poll {
+                Ready(Some(Ok(item))) => {
+                    let index = *counter;
+                    *counter = counter.wrapping_add(1);
+                    Ready(Some(Ok((index, item))))
                 }
-                Poll::Ready(Some(Err(err))) => {
-                    self.fused = true;
-                    Poll::Ready(Some(Err(err)))
+                Ready(Some(Err(err))) => {
+                    *fused = true;
+                    Ready(Some(Err(err)))
                 }
-                Poll::Ready(None) => Poll::Ready(None),
-                Poll::Pending => Poll::Pending,
+                Ready(None) => Ready(None),
+                Pending => Pending,
             }
         }
     }
 
-    impl<T, E, S> FusedStream for TryWrappingEnumerate<T, E, S>
+    impl<S, T, E> FusedStream for TryWrappingEnumerate<S, T, E>
     where
-        S: Stream<Item = Result<T, E>> + Unpin + Send,
+        S: Stream<Item = Result<T, E>>,
     {
         fn is_terminated(&self) -> bool {
             self.fused
@@ -1139,88 +1267,83 @@ mod try_reorder_enumerated {
 
     /// A fallible stream combinator returned from [try_reorder_enumerated()](TryParStreamExt::try_reorder_enumerated).
     #[pin_project(project = TryReorderEnumeratedProj)]
-    #[derive(Debug)]
-    pub struct TryReorderEnumerated<T, E, S>
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryReorderEnumerated<S, T, E>
     where
-        S: Stream<Item = Result<(usize, T), E>> + Send,
+        S: ?Sized,
     {
-        #[pin]
-        pub(super) stream: S,
-        pub(super) counter: usize,
+        pub(super) commit: usize,
         pub(super) fused: bool,
         pub(super) buffer: HashMap<usize, T>,
+        pub(super) _phantom: PhantomData<E>,
+        #[pin]
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: S,
     }
 
-    impl<T, E, S> Stream for TryReorderEnumerated<T, E, S>
+    impl<S, T, E> Stream for TryReorderEnumerated<S, T, E>
     where
-        S: Stream<Item = Result<(usize, T), E>> + Unpin + Send,
+        S: Stream<Item = Result<(usize, T), E>>,
     {
         type Item = Result<T, E>;
 
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
             let TryReorderEnumeratedProj {
-                stream,
-                counter,
                 fused,
+                stream,
+                commit,
                 buffer,
+                ..
             } = self.project();
 
             if *fused {
-                return Poll::Ready(None);
+                return Ready(None);
             }
 
-            // get item from buffer
-            let buffered_item_opt = buffer.remove(counter);
-
-            if buffered_item_opt.is_some() {
-                *counter = counter.wrapping_add(1);
+            if let Some(item) = buffer.remove(commit) {
+                *commit += 1;
+                cx.waker().clone().wake();
+                return Ready(Some(Ok(item)));
             }
 
-            match (stream.poll_next(cx), buffered_item_opt) {
-                (Poll::Ready(Some(Ok((index, item)))), Some(buffered_item)) => {
-                    assert!(
-                        *counter <= index,
-                        "the enumerated index {} appears more than once",
-                        index
-                    );
-
-                    buffer.insert(index, item);
-                    Poll::Ready(Some(Ok(buffered_item)))
-                }
-                (Poll::Ready(Some(Ok((index, item)))), None) => match (*counter).cmp(&index) {
-                    Ordering::Less => {
-                        buffer.insert(index, item);
-                        Poll::Pending
+            match stream.poll_next(cx) {
+                Ready(Some(Ok((index, item)))) => match (*commit).cmp(&index) {
+                    Less => match buffer.entry(index) {
+                        hash_map::Entry::Occupied(_) => {
+                            panic!("the index number {} appears more than once", index);
+                        }
+                        hash_map::Entry::Vacant(entry) => {
+                            entry.insert(item);
+                            cx.waker().clone().wake();
+                            Pending
+                        }
+                    },
+                    Equal => {
+                        *commit += 1;
+                        cx.waker().clone().wake();
+                        Ready(Some(Ok(item)))
                     }
-                    Ordering::Equal => {
-                        *counter = counter.wrapping_add(1);
-                        Poll::Ready(Some(Ok(item)))
-                    }
-                    Ordering::Greater => {
-                        panic!("the enumerated index {} appears more than once", index)
+                    Greater => {
+                        panic!("the index number {} appears more than once", index);
                     }
                 },
-                (Poll::Ready(Some(Err(err))), _) => {
+                Ready(Some(Err(err))) => {
                     *fused = true;
-                    Poll::Ready(Some(Err(err)))
+                    Ready(Some(Err(err)))
                 }
-                (_, Some(buffered_item)) => Poll::Ready(Some(Ok(buffered_item))),
-                (Poll::Ready(None), None) => {
-                    if buffer.is_empty() {
-                        Poll::Ready(None)
-                    } else {
-                        Poll::Pending
-                    }
+                Ready(None) => {
+                    assert!(buffer.is_empty(), "the index numbers are not contiguous");
+                    Ready(None)
                 }
-                (Poll::Pending, None) => Poll::Pending,
+                Pending => Pending,
             }
         }
     }
 
-    impl<T, E, S> FusedStream for TryReorderEnumerated<T, E, S>
+    impl<S, T, E> FusedStream for TryReorderEnumerated<S, T, E>
     where
-        S: Stream<Item = Result<(usize, T), E>> + Unpin + Send,
-        T: Unpin,
+        Self: Stream,
     {
         fn is_terminated(&self) -> bool {
             self.fused
@@ -1240,7 +1363,7 @@ mod try_batching {
     #[derivative(Debug)]
     pub struct TryBatching<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryBatching<T, E> {
@@ -1264,7 +1387,7 @@ mod try_par_batching_unordered {
     #[derivative(Debug)]
     pub struct TryParBatchingUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParBatchingUnordered<T, E> {
@@ -1283,12 +1406,72 @@ pub use try_unfold_blocking::*;
 mod try_unfold_blocking {
     use super::*;
 
+    /// A fallible analogue to [unfold_blocking](crate::stream::unfold_blocking).
+    pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
+        buf_size: impl Into<Option<usize>>,
+        mut init_f: IF,
+        mut unfold_f: UF,
+    ) -> TryUnfoldBlocking<Item, Error>
+    where
+        IF: 'static + FnMut() -> Result<State, Error> + Send,
+        UF: 'static + FnMut(State) -> Result<Option<(Item, State)>, Error> + Send,
+        Item: 'static + Send,
+        Error: 'static + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
+        let (data_tx, data_rx) = mpsc::channel(buf_size);
+
+        let producer_fut = rt::spawn_blocking(move || {
+            let mut state = match init_f() {
+                Ok(state) => state,
+                Err(err) => {
+                    let _ = data_tx.blocking_send(Err(err));
+                    return;
+                }
+            };
+
+            loop {
+                match unfold_f(state) {
+                    Ok(Some((item, new_state))) => {
+                        let result = data_tx.blocking_send(Ok(item));
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    Ok(None) => break,
+                    Err(err) => {
+                        let _ = data_tx.blocking_send(Err(err));
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = futures::stream::select(
+            producer_fut
+                .into_stream()
+                .map(|result| {
+                    if let Err(err) = result {
+                        panic!("unable to spawn a worker: {:?}", err);
+                    }
+                    None
+                })
+                .fuse(),
+            ReceiverStream::new(data_rx).map(|item: Result<Item, Error>| Some(item)),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        TryUnfoldBlocking { stream }
+    }
+
     /// A fallible stream combinator returned from [try_unfold_blocking()](super::try_unfold_blocking()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryUnfoldBlocking<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryUnfoldBlocking<T, E> {
@@ -1307,29 +1490,200 @@ pub use try_par_unfold_unordered::*;
 mod try_par_unfold_unordered {
     use super::*;
 
+    /// A fallible analogue to [par_unfold_unordered](crate::stream::par_unfold_unordered).
+    pub fn try_par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item, Error>(
+        config: P,
+        mut init_f: IF,
+        unfold_f: UF,
+    ) -> TryParUnfoldUnordered<Item, Error>
+    where
+        IF: 'static + FnMut(usize) -> IFut,
+        UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
+        IFut: 'static + Future<Output = Result<State, Error>> + Send,
+        UFut: 'static + Future<Output = Result<Option<(Item, State)>, Error>> + Send,
+        State: Send,
+        Item: 'static + Send,
+        Error: 'static + Send,
+        P: IntoParStreamParams,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let terminate = Arc::new(AtomicBool::new(false));
+
+        let worker_futs = (0..num_workers).map(move |worker_index| {
+            let init_fut = init_f(worker_index);
+            let mut unfold_f = unfold_f.clone();
+            let output_tx = output_tx.clone();
+            let terminate = terminate.clone();
+
+            rt::spawn(async move {
+                let mut state = match init_fut.await {
+                    Ok(state) => state,
+                    Err(err) => {
+                        let _ = output_tx.send(Err(err)).await;
+                        terminate.store(true, Release);
+                        return;
+                    }
+                };
+
+                loop {
+                    if terminate.load(Acquire) {
+                        break;
+                    }
+
+                    match unfold_f(worker_index, state).await {
+                        Ok(Some((item, new_state))) => {
+                            let result = output_tx.send(Ok(item)).await;
+                            if result.is_err() {
+                                break;
+                            }
+                            state = new_state;
+                        }
+                        Ok(None) => {
+                            break;
+                        }
+                        Err(err) => {
+                            let _ = output_tx.send(Err(err)).await;
+                            terminate.store(true, Release);
+                            break;
+                        }
+                    }
+                }
+            })
+            .map(|result| result.unwrap())
+        });
+
+        let join_future = futures::future::join_all(worker_futs);
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(Some),
+            join_future.map(|_| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .scan(false, |terminated, result| {
+            let output = if *terminated {
+                None
+            } else {
+                if result.is_err() {
+                    *terminated = true;
+                }
+                Some(result)
+            };
+
+            async move { output }
+        })
+        .fuse()
+        .boxed();
+
+        TryParUnfoldUnordered { stream }
+    }
+
+    /// A fallible analogue to [par_unfold_blocking_unordered](crate::stream::par_unfold_blocking_unordered).
+    pub fn try_par_unfold_blocking_unordered<P, IF, UF, State, Item, Error>(
+        config: P,
+        init_f: IF,
+        unfold_f: UF,
+    ) -> TryParUnfoldUnordered<Item, Error>
+    where
+        IF: 'static + FnMut(usize) -> Result<State, Error> + Send + Clone,
+        UF: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
+        Item: 'static + Send,
+        Error: 'static + Send,
+        P: IntoParStreamParams,
+    {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let terminate = Arc::new(AtomicBool::new(false));
+
+        let worker_futs = (0..num_workers).map(|worker_index| {
+            let mut init_f = init_f.clone();
+            let mut unfold_f = unfold_f.clone();
+            let output_tx = output_tx.clone();
+            let terminate = terminate.clone();
+
+            rt::spawn_blocking(move || {
+                let mut state = match init_f(worker_index) {
+                    Ok(state) => state,
+                    Err(err) => {
+                        let _ = output_tx.blocking_send(Err(err));
+                        terminate.store(true, Release);
+                        return;
+                    }
+                };
+
+                loop {
+                    if terminate.load(Acquire) {
+                        break;
+                    }
+
+                    match unfold_f(worker_index, state) {
+                        Ok(Some((item, new_state))) => {
+                            let result = output_tx.blocking_send(Ok(item));
+                            if result.is_err() {
+                                break;
+                            }
+                            state = new_state;
+                        }
+                        Ok(None) => {
+                            break;
+                        }
+                        Err(err) => {
+                            let _ = output_tx.blocking_send(Err(err));
+                            terminate.store(true, Release);
+                            break;
+                        }
+                    }
+                }
+            })
+        });
+
+        let join_future = futures::future::try_join_all(worker_futs);
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(output_rx).map(Some),
+            join_future.into_stream().map(|result| {
+                result.unwrap();
+                None
+            }),
+        )
+        .filter_map(|item| async move { item })
+        .scan(false, |terminated, result| {
+            let output = if *terminated {
+                None
+            } else {
+                if result.is_err() {
+                    *terminated = true;
+                }
+                Some(result)
+            };
+
+            async move { output }
+        })
+        .boxed();
+
+        TryParUnfoldUnordered { stream }
+    }
+
     /// A stream combinator returned from [try_par_unfold_unordered()](super::try_par_unfold_unordered())
     /// and  [try_par_unfold_blocking_unordered()](super::try_par_unfold_blocking_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParUnfoldUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: Option<Pin<Box<dyn Stream<Item = Result<T, E>> + Send>>>,
+        pub(super) stream: BoxedStream<Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParUnfoldUnordered<T, E> {
         type Item = Result<T, E>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Some(stream) = &mut self.stream {
-                let poll = Pin::new(stream).poll_next(cx);
-
-                if let Poll::Ready(Some(Err(_)) | None) = &poll {
-                    self.stream = None;
-                }
-                poll
-            } else {
-                Poll::Ready(None)
-            }
+            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
@@ -1568,8 +1922,8 @@ mod tests {
                 |mut input, mut output| async move {
                     let mut sum = 0;
 
-                    while let Some(val) = input.next().await {
-                        let new_sum = val? + sum;
+                    while let Some(val) = input.recv().await {
+                        let new_sum = val + sum;
 
                         if new_sum >= 10 {
                             sum = 0;
@@ -1603,8 +1957,8 @@ mod tests {
                 |mut input, mut output| async move {
                     let mut sum = 0;
 
-                    while let Some(val) = input.next().await {
-                        let new_sum = val? + sum;
+                    while let Some(val) = input.recv().await {
+                        let new_sum = val + sum;
 
                         if new_sum >= 15 {
                             return Err("too large");
@@ -1619,7 +1973,7 @@ mod tests {
                         }
                     }
 
-                    if input.next().await.is_none() {
+                    if input.recv().await.is_none() {
                         Ok(())
                     } else {
                         Err("some elements are left behind")
@@ -1656,15 +2010,43 @@ mod tests {
 
     #[tokio::test]
     async fn try_par_then_test() {
-        let mut stream =
-            futures::stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                .try_par_then(None, |value| async move { Ok(value) });
+        {
+            let mut stream =
+                futures::stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                    .try_par_then(None, |value| async move { Ok(value) });
 
-        assert_eq!(stream.try_next().await, Ok(Some(1usize)));
-        assert_eq!(stream.try_next().await, Ok(Some(2usize)));
-        assert_eq!(stream.try_next().await, Err(-3isize));
-        assert_eq!(stream.try_next().await, Ok(Some(4usize)));
-        assert_eq!(stream.try_next().await, Ok(None));
+            assert_eq!(stream.try_next().await, Ok(Some(1usize)));
+            assert_eq!(stream.try_next().await, Ok(Some(2usize)));
+            assert_eq!(stream.try_next().await, Err(-3isize));
+            assert_eq!(stream.try_next().await, Ok(None));
+        }
+
+        {
+            let vec: Result<Vec<()>, ()> = futures::stream::iter(vec![])
+                .try_par_then(None, |()| async move { Ok(()) })
+                .try_collect()
+                .await;
+
+            assert!(matches!(vec, Ok(vec) if vec.is_empty()));
+        }
+
+        {
+            let mut stream = futures::stream::repeat(())
+                .enumerate()
+                .map(Ok)
+                .try_par_then(3, |(index, ())| async move {
+                    match index {
+                        3 | 6 => Err(index),
+                        index => Ok(index),
+                    }
+                });
+
+            assert_eq!(stream.next().await, Some(Ok(0)));
+            assert_eq!(stream.next().await, Some(Ok(1)));
+            assert_eq!(stream.next().await, Some(Ok(2)));
+            assert_eq!(stream.next().await, Some(Err(3)));
+            assert!(stream.next().await.is_none());
+        }
     }
 
     #[tokio::test]
@@ -1677,7 +2059,7 @@ mod tests {
             let err_index_2 = rng.gen_range(0..len);
             let min_err_index = err_index_1.min(err_index_2);
 
-            let results = futures::stream::iter(0..len)
+            let results: Vec<_> = futures::stream::iter(0..len)
                 .map(move |value| {
                     if value == err_index_1 || value == err_index_2 {
                         Err(-(value as isize))
@@ -1687,12 +2069,11 @@ mod tests {
                 })
                 .try_wrapping_enumerate()
                 .try_par_then_unordered(None, |(index, value)| async move {
-                    async_std::task::sleep(std::time::Duration::from_millis(value as u64 % 20))
-                        .await;
+                    rt::sleep(Duration::from_millis(value as u64 % 10)).await;
                     Ok((index, value))
                 })
                 .try_reorder_enumerated()
-                .collect::<Vec<_>>()
+                .collect()
                 .await;
             assert!(results.len() <= min_err_index + 1);
 

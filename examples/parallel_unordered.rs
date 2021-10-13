@@ -1,12 +1,12 @@
 use futures::stream::StreamExt;
-use par_stream::ParStreamExt;
+use par_stream::prelude::*;
 
 async fn main_async() {
     // the variable will be captured by parallel workers
     let scale = Box::new(2usize);
     let addition = Box::new(1usize);
 
-    let doubled = futures::stream::iter(0..1000)
+    let doubled: Vec<_> = futures::stream::iter(0..1000)
         // add indexes that does not panic on overflow
         .wrapping_enumerate()
         // unordered parallel tasks on futures
@@ -28,7 +28,7 @@ async fn main_async() {
         // reorder the values back by indexes
         .reorder_enumerated()
         // call `collect()` from futures crate
-        .collect::<Vec<_>>()
+        .collect()
         .await;
 
     // the output will be ordered
