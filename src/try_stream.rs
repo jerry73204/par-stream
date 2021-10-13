@@ -21,7 +21,7 @@ where
 
     /// Creates a fallible stream that reorders the items according to the iteration count.
     ///
-    /// It is usually combined with [try_wrapping_enumerate](TryParStreamExt::try_wrapping_enumerate).
+    /// It is usually combined with [try_wrapping_enumerate](FallibleIndexedStreamExt::try_wrapping_enumerate).
     fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<Self, T, E>
     where
         Self: Stream<Item = Result<(usize, T), E>>;
@@ -167,7 +167,7 @@ where
         Fut: 'static + Future<Output = Result<U, E>> + Send,
         P: IntoParStreamParams;
 
-    /// An parallel stream analogous to [try_par_then_unordered](TryParStreamExt::try_par_then_unordered) with
+    /// An parallel stream analogous to [try_par_then_unordered](FallibleParStreamExt::try_par_then_unordered) with
     /// in-local thread initializer
     fn try_par_then_init_unordered<P, T, U, E, B, InitF, MapF, Fut>(
         self,
@@ -215,7 +215,7 @@ where
         MapF: 'static + FnMut(B, T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send;
 
-    /// A parallel stream that analogous to [try_par_map](TryParStreamExt::try_par_map) without respecting
+    /// A parallel stream that analogous to [try_par_map](FallibleParStreamExt::try_par_map) without respecting
     /// the order of input items.
     fn try_par_map_unordered<P, T, U, E, F, Func>(
         self,
@@ -231,7 +231,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send;
 
-    /// A parallel stream that analogous to [try_par_map_unordered](TryParStreamExt::try_par_map_unordered) with
+    /// A parallel stream that analogous to [try_par_map_unordered](FallibleParStreamExt::try_par_map_unordered) with
     /// in-local thread initializer.
     fn try_par_map_init_unordered<P, T, U, E, B, InitF, MapF, Func>(
         self,
@@ -287,7 +287,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), E> + Send;
 
-    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](TryParStreamExt::try_par_for_each_blocking)
+    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](FallibleParStreamExt::try_par_for_each_blocking)
     /// with a in-local thread initializer.
     fn try_par_for_each_blocking_init<P, T, E, B, InitF, MapF, Func>(
         self,
@@ -1194,7 +1194,7 @@ pub use try_tee::*;
 mod try_tee {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_tee()](TryParStreamExt::try_tee).
+    /// A fallible stream combinator returned from [try_tee()](FallibleParStreamExt::try_tee).
     #[derive(Debug)]
     pub struct TryTee<T, E> {
         pub(super) buf_size: Option<usize>,
@@ -1255,7 +1255,7 @@ pub use try_par_then::*;
 mod try_par_then {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_par_map()](TryParStreamExt::try_par_map) and its siblings.
+    /// A fallible stream combinator returned from [try_par_map()](FallibleParStreamExt::try_par_map) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParMap<T, E> {
@@ -1279,7 +1279,7 @@ pub use try_par_map_unordered::*;
 mod try_par_map_unordered {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_par_map_unordered()](TryParStreamExt::try_par_map_unordered) and its siblings.
+    /// A fallible stream combinator returned from [try_par_map_unordered()](FallibleParStreamExt::try_par_map_unordered) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParMapUnordered<T, E> {
@@ -1303,7 +1303,7 @@ pub use try_par_for_each::*;
 mod try_par_for_each {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_par_for_each()](TryParStreamExt::try_par_for_each) and its siblings.
+    /// A fallible stream combinator returned from [try_par_for_each()](FallibleParStreamExt::try_par_for_each) and its siblings.
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParForEach<E> {
@@ -1327,7 +1327,7 @@ pub use try_wrapping_enumerate::*;
 mod try_wrapping_enumerate {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_wrapping_enumerate()](TryParStreamExt::try_wrapping_enumerate).
+    /// A fallible stream combinator returned from [try_wrapping_enumerate()](FallibleIndexedStreamExt::try_wrapping_enumerate).
     #[pin_project(project = TryWrappingEnumerateProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
@@ -1395,7 +1395,7 @@ pub use try_reorder_enumerated::*;
 mod try_reorder_enumerated {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_reorder_enumerated()](TryParStreamExt::try_reorder_enumerated).
+    /// A fallible stream combinator returned from [try_reorder_enumerated()](FallibleIndexedStreamExt::try_reorder_enumerated).
     #[pin_project(project = TryReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
@@ -1488,7 +1488,7 @@ pub use try_batching::*;
 mod try_batching {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_batching()](TryParStreamExt::try_batching()).
+    /// A fallible stream combinator returned from [try_batching()](FallibleParStreamExt::try_batching()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryBatching<T, E> {
@@ -1512,7 +1512,7 @@ pub use try_par_batching_unordered::*;
 mod try_par_batching_unordered {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_par_batching_unordered()](TryParStreamExt::try_par_batching_unordered()).
+    /// A fallible stream combinator returned from [try_par_batching_unordered()](FallibleParStreamExt::try_par_batching_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParBatchingUnordered<T, E> {

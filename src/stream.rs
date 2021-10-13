@@ -1,5 +1,3 @@
-//! futures-compatible parallel stream extension.
-
 use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
@@ -21,7 +19,7 @@ where
     /// The combinator asserts the input item has tuple type `(usize, T)`.
     /// It reorders the items according to the first value of input tuple.
     ///
-    /// It is usually combined with [ParStream::wrapping_enumerate], then
+    /// It is usually combined with [IndexedStreamExt::wrapping_enumerate], then
     /// applies a series of unordered parallel mapping, and finally reorders the values
     /// back by this method. It avoids reordering the values after each parallel mapping step.
     ///
@@ -324,7 +322,7 @@ where
         Fut: 'static + Future<Output = T> + Send,
         P: IntoParStreamParams;
 
-    /// Creates a stream analogous to [par_then_unordered](ParStream::par_then_unordered) with
+    /// Creates a stream analogous to [par_then_unordered](ParStreamExt::par_then_unordered) with
     /// in-local thread initializer.
     fn par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
         self,
@@ -393,7 +391,7 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams;
 
-    /// Creates a parallel stream analogous to [par_map](ParStream::par_map) with
+    /// Creates a parallel stream analogous to [par_map](ParStreamExt::par_map) with
     /// in-local thread initializer.
     fn par_map_init<P, T, B, InitF, MapF, Func>(
         self,
@@ -464,7 +462,7 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams;
 
-    /// Creates a parallel stream analogous to [par_map_unordered](ParStream::par_map_unordered) with
+    /// Creates a parallel stream analogous to [par_map_unordered](ParStreamExt::par_map_unordered) with
     /// in-local thread initializer.
     fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(
         self,
@@ -488,7 +486,7 @@ where
     /// The `buf_size` is the size of buffer that stores the temporary reduced values.
     /// If it is `0` or `None`, it defaults the number of cores on system.
     ///
-    /// Unlike [Stream::fold], the method does not combine the values sequentially.
+    /// Unlike [fold()](futures::StreamExt::fold), the method does not combine the values sequentially.
     /// Instead, the parallel workers greedly take two values from the buffer, reduce to
     /// one value, and push back to the buffer.
     ///
@@ -691,7 +689,7 @@ where;
         Fut: 'static + Future<Output = ()> + Send,
         P: IntoParStreamParams;
 
-    /// Creates a parallel stream analogous to [par_for_each](ParStream::par_for_each) with a
+    /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
     /// in-local thread initializer.
     fn par_for_each_init<P, B, InitF, MapF, Fut>(
         self,
@@ -713,7 +711,7 @@ where;
         Func: 'static + FnOnce() + Send,
         P: IntoParStreamParams;
 
-    /// Creates a parallel stream analogous to [par_for_each_blocking](ParStream::par_for_each_blocking) with a
+    /// Creates a parallel stream analogous to [par_for_each_blocking](ParStreamExt::par_for_each_blocking) with a
     /// in-local thread initializer.
     fn par_for_each_blocking_init<P, B, InitF, MapF, Func>(
         self,
@@ -1965,7 +1963,7 @@ pub use wrapping_enumerate::*;
 mod wrapping_enumerate {
     use super::*;
 
-    /// A stream combinator returned from [wrapping_enumerate()](ParStreamExt::wrapping_enumerate).
+    /// A stream combinator returned from [wrapping_enumerate()](IndexedStreamExt::wrapping_enumerate).
     #[pin_project(project = WrappingEnumerateProj)]
     #[derive(Debug)]
     pub struct WrappingEnumerate<S>
@@ -2006,7 +2004,7 @@ pub use reorder_enumerated::*;
 mod reorder_enumerated {
     use super::*;
 
-    /// A stream combinator returned from [reorder_enumerated()](ParStreamExt::reorder_enumerated).
+    /// A stream combinator returned from [reorder_enumerated()](IndexedStreamExt::reorder_enumerated).
     #[pin_project(project = ReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
