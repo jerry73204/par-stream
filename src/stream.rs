@@ -6,7 +6,7 @@ use crate::{
     rt,
     utils::{BoxedFuture, BoxedStream},
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 pub trait IndexedStreamExt
@@ -186,6 +186,11 @@ where
     /// # }
     /// ```
     fn tee(self, buf_size: impl Into<Option<usize>>) -> Tee<Self::Item>
+    where
+        Self::Item: Clone;
+
+    /// Converts to a guard that can create receivers, each receiving cloned elements from this stream.
+    fn broadcast(self, buf_size: impl Into<Option<usize>>) -> BroadcastGuard<Self::Item>
     where
         Self::Item: Clone;
 
@@ -850,6 +855,55 @@ where
             sender_set: Arc::downgrade(&sender_set),
             receiver: rx,
             buf_size,
+        }
+    }
+
+    fn broadcast(self, buf_size: impl Into<Option<usize>>) -> BroadcastGuard<Self::Item>
+    where
+        Self::Item: Clone,
+    {
+        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
+        let (init_tx, init_rx) = oneshot::channel();
+        let ready = Arc::new(AtomicBool::new(false));
+
+        let future = rt::spawn(async move {
+            let mut senders: Vec<mpsc::Sender<_>> = match init_rx.await {
+                Ok(senders) => senders,
+                Err(_) => return,
+            };
+
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let sending_futures = senders.into_iter().map(move |tx| {
+                    let item = item.clone();
+                    async move {
+                        tx.send(item).await.ok()?;
+                        Some(tx)
+                    }
+                });
+                let senders_: Option<Vec<_>> = futures::future::join_all(sending_futures)
+                    .await
+                    .into_iter()
+                    .collect();
+
+                match senders_ {
+                    Some(senders_) => {
+                        senders = senders_;
+                    }
+                    None => break,
+                }
+            }
+        })
+        .map(|result| result.unwrap())
+        .boxed();
+
+        BroadcastGuard {
+            buf_size,
+            ready,
+            init_tx: Some(init_tx),
+            future: Arc::new(tokio::sync::Mutex::new(future)),
+            senders: Some(vec![]),
         }
     }
 
@@ -1736,6 +1790,102 @@ mod tee {
     }
 }
 
+// broadcast
+
+pub use broadcast::*;
+
+mod broadcast {
+    use super::*;
+
+    /// The guard type returned from [broadcast()](ParStreamExt::broadcast).
+    ///
+    /// The guard is used to register new broadcast receivers, each consuming elements
+    /// from the stream. The guard must be dropped, either by `guard.finish()` or
+    /// `drop(guard)` before the receivers start consuming data. Otherwise, the
+    /// receivers will receive panic.
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct BroadcastGuard<T> {
+        pub(super) buf_size: usize,
+        pub(super) ready: Arc<AtomicBool>,
+        pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) future: Arc<tokio::sync::Mutex<BoxedFuture<()>>>,
+        pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
+    }
+
+    impl<T> BroadcastGuard<T>
+    where
+        T: 'static + Send,
+    {
+        /// Creates a new receiver.
+        pub fn register(&mut self) -> BroadcastStream<T> {
+            let Self {
+                buf_size,
+                ref future,
+                ref ready,
+                ref mut senders,
+                ..
+            } = *self;
+            let senders = senders.as_mut().unwrap();
+
+            let (tx, rx) = mpsc::channel(buf_size);
+            senders.push(tx);
+
+            let future = future.clone();
+            let ready = ready.clone();
+
+            let stream = futures::stream::select(
+                ReceiverStream::new(rx).map(Some),
+                async move {
+                    assert!(
+                        ready.load(Acquire),
+                        "please call guard.finish() before consuming this stream"
+                    );
+
+                    (&mut *future.lock().await).await;
+                    None
+                }
+                .into_stream(),
+            )
+            .filter_map(|item| async move { item })
+            .boxed();
+
+            BroadcastStream { stream }
+        }
+
+        /// Drops the guard, so that created receivers can consume data without panic.
+        pub fn finish(self) {
+            drop(self)
+        }
+    }
+
+    impl<T> Drop for BroadcastGuard<T> {
+        fn drop(&mut self) {
+            let init_tx = self.init_tx.take().unwrap();
+            let senders = self.senders.take().unwrap();
+            let _ = init_tx.send(senders);
+            self.ready.store(true, Release);
+        }
+    }
+
+    /// The receiver that consumes broadcasted messages from the stream.
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct BroadcastStream<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for BroadcastStream<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // wrapping_enumerate
 
 pub use wrapping_enumerate::*;
@@ -2374,6 +2524,21 @@ mod tests {
     use itertools::{izip, Itertools};
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn broadcast_test() {
+        let mut guard = futures::stream::iter(0..).broadcast(None);
+        let rx1 = guard.register();
+        let rx2 = guard.register();
+        guard.finish();
+
+        let (ret1, ret2): (Vec<_>, Vec<_>) =
+            futures::join!(rx1.take(100).collect(), rx2.take(100).collect());
+        let expect: Vec<_> = (0..100).collect();
+
+        assert_eq!(ret1, expect);
+        assert_eq!(ret2, expect);
+    }
 
     #[tokio::test]
     async fn par_batching_unordered_test() {
