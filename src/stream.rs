@@ -103,6 +103,19 @@ where
     Self: 'static + Send + Stream + IndexedStreamExt,
     Self::Item: 'static + Send,
 {
+    /// Maps the stream element to a different type on a spawned worker.
+    fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
+        Fut: Future<Output = T> + Send;
+
+    /// Maps the stream element to a different type on a parallel thread.
+    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> MapSpawned<T>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Item) -> T + Send;
+
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
     /// When a new batch is started, the `init_fn` creates an initial state. Then, the state
@@ -721,6 +734,65 @@ where
     S: 'static + Send + Stream + IndexedStreamExt,
     S::Item: 'static + Send,
 {
+    fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
+        Fut: Future<Output = T> + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or(2);
+        let (tx, rx) = mpsc::channel(buf_size);
+
+        let future = rt::spawn(async move {
+            let mut stream = self.then(f).boxed();
+
+            while let Some(output) = stream.next().await {
+                if tx.send(output).await.is_err() {
+                    break;
+                }
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(rx).map(Some),
+            future.map(|()| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        ThenSpawned { stream }
+    }
+
+    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> MapSpawned<T>
+    where
+        T: 'static + Send,
+        F: 'static + FnMut(Self::Item) -> T + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or(2);
+        let (tx, rx) = mpsc::channel(buf_size);
+
+        let future = rt::spawn_blocking(move || {
+            let mut stream = self.map(f).boxed();
+
+            while let Some(output) = rt::block_on(stream.next()) {
+                if tx.blocking_send(output).is_err() {
+                    break;
+                }
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let stream = futures::stream::select(
+            ReceiverStream::new(rx).map(Some),
+            future.map(|()| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        MapSpawned { stream }
+    }
+
     fn batching<T, F, Fut>(self, f: F) -> Batching<T>
     where
         F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
@@ -2516,6 +2588,52 @@ mod par_batching_unordered {
     }
 }
 
+// then_spawned
+
+pub use then_spawned::*;
+
+mod then_spawned {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ThenSpawned<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for ThenSpawned<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
+// map_spawned
+
+pub use map_spawned::*;
+
+mod map_spawned {
+    use super::*;
+
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct MapSpawned<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for MapSpawned<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // tests
 
 #[cfg(test)]
@@ -2524,6 +2642,32 @@ mod tests {
     use itertools::{izip, Itertools};
     use rand::prelude::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn then_spawned_test() {
+        {
+            let values: Vec<_> = futures::stream::iter(0..1000)
+                .then_spawned(None, |val| async move { val * 2 })
+                .collect()
+                .await;
+
+            let expect: Vec<_> = (0..1000).map(|val| val * 2).collect();
+            assert_eq!(values, expect);
+        }
+    }
+
+    #[tokio::test]
+    async fn map_spawned_test() {
+        {
+            let values: Vec<_> = futures::stream::iter(0..1000)
+                .map_spawned(None, |val| val * 2)
+                .collect()
+                .await;
+
+            let expect: Vec<_> = (0..1000).map(|val| val * 2).collect();
+            assert_eq!(values, expect);
+        }
+    }
 
     #[tokio::test]
     async fn broadcast_test() {

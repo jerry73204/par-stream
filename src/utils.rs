@@ -45,8 +45,8 @@ use crate::common::*;
 // pub(crate) use declare_boxed_future;
 // pub(crate) use declare_boxed_stream;
 
-pub(crate) type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-pub(crate) type BoxedStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
+pub(crate) type BoxedFuture<T> = BoxFuture<'static, T>;
+pub(crate) type BoxedStream<T> = BoxStream<'static, T>;
 
 #[derive(Derivative)]
 #[derivative(Debug)]

@@ -98,6 +98,13 @@ mod rt_dummy {
         panic!();
     }
 
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        panic!();
+    }
+
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct JoinHandle<T> {
@@ -126,6 +133,7 @@ mod rt_dummy {
 ))]
 mod rt_tokio {
     use super::*;
+    use tokio::runtime::Handle;
 
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
@@ -145,6 +153,13 @@ mod rt_tokio {
 
     pub async fn sleep(duration: Duration) {
         tokio::time::sleep(duration).await;
+    }
+
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        Handle::new().block_on(future)
     }
 
     #[derive(Debug)]
@@ -192,6 +207,13 @@ mod rt_async_std {
 
     pub async fn sleep(duration: Duration) {
         async_std::task::sleep(duration).await;
+    }
+
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        async_std::task::block_on(future)
     }
 
     #[derive(Debug)]

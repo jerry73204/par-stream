@@ -1,7 +1,8 @@
 pub use by_address::ByAddress;
 pub use derivative::Derivative;
 pub use futures::{
-    stream::{FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
+    future::BoxFuture,
+    stream::{BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
     FutureExt,
 };
 pub use owning_ref::ArcRef;
