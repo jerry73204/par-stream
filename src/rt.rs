@@ -159,7 +159,7 @@ mod rt_tokio {
     where
         F: Future,
     {
-        Handle::new().block_on(future)
+        Handle::current().block_on(future)
     }
 
     #[derive(Debug)]
@@ -268,6 +268,13 @@ mod rt_smol {
     pub enum JoinHandle<T> {
         Task(smol::Task<T>),
         UnBlock(#[derivative(Debug = "ignore")] Pin<Box<dyn Future<Output = T> + Send>>),
+    }
+
+    pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        smol::block_on(future)
     }
 
     impl<T> Future for JoinHandle<T> {
