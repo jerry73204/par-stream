@@ -14,6 +14,13 @@ where
     /// Create a fallible stream that gives the current iteration count.
     ///
     /// The count wraps to zero if the count overflows.
+    fn try_enumerate<T, E>(self) -> TryEnumerate<Self, T, E>
+    where
+        Self: Stream<Item = Result<T, E>>;
+
+    /// Create a fallible stream that gives the current iteration count.
+    ///
+    /// The count wraps to zero if the count overflows.
     fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
     where
         Self: Stream<Item = Result<T, E>>;
@@ -30,6 +37,18 @@ impl<S> FallibleIndexedStreamExt for S
 where
     S: TryStream,
 {
+    fn try_enumerate<T, E>(self) -> TryEnumerate<Self, T, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+    {
+        TryEnumerate {
+            stream: self,
+            counter: 0,
+            fused: false,
+            _phantom: PhantomData,
+        }
+    }
+
     fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
     where
         Self: Stream<Item = Result<T, E>>,
@@ -1324,6 +1343,74 @@ mod try_par_for_each {
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
             Pin::new(&mut self.future).poll(cx)
+        }
+    }
+}
+
+// try_enumerate
+
+pub use try_enumerate::*;
+
+mod try_enumerate {
+    use super::*;
+
+    /// A fallible stream combinator returned from [try_wrapping_enumerate()](FallibleIndexedStreamExt::try_wrapping_enumerate).
+    #[pin_project(project = TryEnumerateProj)]
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryEnumerate<S, T, E>
+    where
+        S: ?Sized,
+    {
+        pub(super) counter: usize,
+        pub(super) fused: bool,
+        pub(super) _phantom: PhantomData<(T, E)>,
+        #[pin]
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: S,
+    }
+
+    impl<S, T, E> Stream for TryEnumerate<S, T, E>
+    where
+        S: Stream<Item = Result<T, E>>,
+    {
+        type Item = Result<(usize, T), E>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            let TryEnumerateProj {
+                stream,
+                fused,
+                counter,
+                ..
+            } = self.project();
+
+            if *fused {
+                return Ready(None);
+            }
+
+            let poll = stream.poll_next(cx);
+            match poll {
+                Ready(Some(Ok(item))) => {
+                    let index = *counter;
+                    *counter += 1;
+                    Ready(Some(Ok((index, item))))
+                }
+                Ready(Some(Err(err))) => {
+                    *fused = true;
+                    Ready(Some(Err(err)))
+                }
+                Ready(None) => Ready(None),
+                Pending => Pending,
+            }
+        }
+    }
+
+    impl<S, T, E> FusedStream for TryEnumerate<S, T, E>
+    where
+        S: Stream<Item = Result<T, E>>,
+    {
+        fn is_terminated(&self) -> bool {
+            self.fused
         }
     }
 }
