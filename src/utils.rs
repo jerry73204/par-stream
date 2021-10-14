@@ -48,50 +48,100 @@ use crate::common::*;
 pub(crate) type BoxedFuture<T> = BoxFuture<'static, T>;
 pub(crate) type BoxedStream<T> = BoxStream<'static, T>;
 
-#[derive(Derivative)]
-#[derivative(Debug)]
-pub struct AsyncChannelReceiverStream<T> {
-    #[derivative(Debug = "ignore")]
-    stream: Pin<Box<dyn Stream<Item = T> + Send>>,
-    // rx: Arc<async_channel::Receiver<T>>,
-}
+pub use flume_receiver_ext::*;
 
-impl<T> AsyncChannelReceiverStream<T>
-where
-    T: 'static + Send,
-{
-    pub fn new(rx: async_channel::Receiver<T>) -> Self {
-        let rx = Arc::new(rx);
+mod flume_receiver_ext {
+    use super::*;
 
-        let stream = {
-            let rx = rx.clone();
+    pub trait FlumeReceiverExt<T> {
+        fn into_stream(self) -> FlumeReceiverStream<T>;
+    }
 
-            futures::stream::unfold(rx, |rx| async move {
-                rx.recv().await.ok().map(|item| (item, rx))
-            })
-        };
+    impl<T> FlumeReceiverExt<T> for flume::Receiver<T>
+    where
+        T: 'static + Send,
+    {
+        fn into_stream(self) -> FlumeReceiverStream<T> {
+            FlumeReceiverStream::new(self)
+        }
+    }
 
-        Self {
-            stream: Box::pin(stream),
-            // rx,
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct FlumeReceiverStream<T> {
+        #[derivative(Debug = "ignore")]
+        stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    }
+
+    impl<T> FlumeReceiverStream<T>
+    where
+        T: 'static + Send,
+    {
+        pub fn new(rx: flume::Receiver<T>) -> Self {
+            let stream = futures::stream::unfold(rx, |rx| async move {
+                rx.recv_async().await.ok().map(|item| (item, rx))
+            });
+
+            Self {
+                stream: Box::pin(stream),
+            }
+        }
+    }
+
+    impl<T> Stream for FlumeReceiverStream<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
 
-impl<T> Stream for AsyncChannelReceiverStream<T> {
-    type Item = T;
+// pub use async_channel_receiver_ext::*;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-        Pin::new(&mut self.stream).poll_next(cx)
-    }
-}
+// mod async_channel_receiver_ext {
+//     use super::*;
 
-// impl<T> Clone for AsyncChannelReceiverStream<T>
-// where
-//     T: 'static + Send,
-// {
-//     fn clone(&self) -> Self {
-//         let rx = (*self.rx).clone();
-//         Self::new(rx)
+//     pub trait AsyncChannelReceiverExt<T> {
+//         fn into_stream(self) -> AsyncChannelReceiverStream<T>;
+//     }
+
+//     impl<T> AsyncChannelReceiverExt<T> for async_channel::Receiver<T>
+//     where
+//         T: 'static + Send
+//     {
+//         fn into_stream(self) -> AsyncChannelReceiverStream<T> {
+//             AsyncChannelReceiverStream::new(self)
+//         }
+//     }
+
+//     #[derive(Derivative)]
+//     #[derivative(Debug)]
+//     pub struct AsyncChannelReceiverStream<T> {
+//         #[derivative(Debug = "ignore")]
+//         stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+//     }
+
+//     impl<T> AsyncChannelReceiverStream<T>
+//     where
+//         T: 'static + Send,
+//     {
+//         pub fn new(rx: async_channel::Receiver<T>) -> Self {
+//             let stream = futures::stream::unfold(rx, |rx| async move {
+//                 rx.recv().await.ok().map(|item| (item, rx))
+//             });
+
+//             Self {
+//                 stream: Box::pin(stream),
+//             }
+//         }
+//     }
+
+//     impl<T> Stream for AsyncChannelReceiverStream<T> {
+//         type Item = T;
+
+//         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+//             Pin::new(&mut self.stream).poll_next(cx)
+//         }
 //     }
 // }

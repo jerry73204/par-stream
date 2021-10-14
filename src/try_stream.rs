@@ -5,8 +5,7 @@ use crate::{
     stream::{batching_channel, BatchingReceiver, BatchingSender},
     utils::{BoxedFuture, BoxedStream},
 };
-use tokio::sync::{mpsc, Mutex};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::Mutex;
 
 pub trait FallibleIndexedStreamExt
 where
@@ -109,7 +108,7 @@ where
     ) -> TryParBatchingUnordered<U, E>
     where
         Self: Stream<Item = Result<T, E>>,
-        F: FnMut(usize, async_channel::Receiver<T>, mpsc::Sender<U>) -> Fut,
+        F: FnMut(usize, flume::Receiver<T>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
         T: 'static + Send,
         U: 'static + Send,
@@ -324,7 +323,7 @@ where
         Fut: Future<Output = Result<U, E>> + Send,
     {
         let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = mpsc::channel(buf_size);
+        let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn(async move {
             let mut stream = self.boxed();
@@ -335,7 +334,7 @@ where
                         let output = f(input).await;
                         let is_err = output.is_err();
 
-                        if tx.send(output).await.is_err() {
+                        if tx.send_async(output).await.is_err() {
                             break;
                         }
                         if is_err {
@@ -343,7 +342,7 @@ where
                         }
                     }
                     Some(Err(err)) => {
-                        let _ = tx.send(Err(err)).await;
+                        let _ = tx.send_async(Err(err)).await;
                         break;
                     }
                     None => break,
@@ -353,7 +352,7 @@ where
         .map(|result| result.unwrap());
 
         let stream = futures::stream::select(
-            ReceiverStream::new(rx).map(Some),
+            rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -375,7 +374,7 @@ where
         F: 'static + FnMut(T) -> Result<U, E> + Send,
     {
         let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = mpsc::channel(buf_size);
+        let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn_blocking(move || {
             let mut stream = self.boxed();
@@ -386,7 +385,7 @@ where
                         let output = f(input);
                         let is_err = output.is_err();
 
-                        if tx.blocking_send(output).is_err() {
+                        if tx.send(output).is_err() {
                             break;
                         }
                         if is_err {
@@ -394,7 +393,7 @@ where
                         }
                     }
                     Some(Err(err)) => {
-                        let _ = tx.blocking_send(Err(err));
+                        let _ = tx.send(Err(err));
                         break;
                     }
                     None => break,
@@ -404,7 +403,7 @@ where
         .map(|result| result.unwrap());
 
         let stream = futures::stream::select(
-            ReceiverStream::new(rx).map(Some),
+            rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -491,7 +490,7 @@ where
         T: 'static + Send,
         U: 'static + Send,
         E: 'static + Send,
-        F: FnMut(usize, async_channel::Receiver<T>, mpsc::Sender<U>) -> Fut,
+        F: FnMut(usize, flume::Receiver<T>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
         let ParStreamParams {
@@ -499,14 +498,14 @@ where
             buf_size,
         } = config.into_par_stream_params();
 
-        let (input_tx, input_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let input_fut = rt::spawn(async move {
             let mut stream = self.boxed();
 
             while let Some(item) = stream.next().await {
-                let result = input_tx.send(item?).await;
+                let result = input_tx.send_async(item?).await;
                 if result.is_err() {
                     break;
                 }
@@ -527,7 +526,7 @@ where
                 .map(|result| result.map(|_| ()));
 
         let select_stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(|item| Ok(Some(item))),
+            output_rx.into_stream().map(|item| Ok(Some(item))),
             join_fut.into_stream().map(|result| result.map(|()| None)),
         )
         .boxed();
@@ -571,8 +570,8 @@ where
     {
         let buf_size = buf_size.into();
         let (tx, rx) = match buf_size {
-            Some(buf_size) => async_channel::bounded(buf_size),
-            None => async_channel::unbounded(),
+            Some(buf_size) => flume::bounded(buf_size),
+            None => flume::unbounded(),
         };
         let sender_set = Arc::new(flurry::HashSet::new());
         let guard = sender_set.guard();
@@ -592,7 +591,7 @@ where
                             let tx = tx.clone();
                             let item = item.clone();
                             async move {
-                                let result = tx.send(item).await;
+                                let result = tx.send_async(item).await;
                                 (result, tx)
                             }
                         })
@@ -642,10 +641,10 @@ where
             buf_size,
         } = config.into_par_stream_params();
 
-        let (input_tx, input_rx) = async_channel::bounded(buf_size);
-        let (reorder_tx, mut reorder_rx) = mpsc::channel(buf_size);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
-        let (terminate_tx, terminate_rx) = async_channel::bounded(buf_size);
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (terminate_tx, terminate_rx) = flume::bounded(buf_size);
 
         let input_future = {
             let terminate_rx = terminate_rx.clone();
@@ -658,18 +657,18 @@ where
                 loop {
                     let item = tokio::select! {
                         item = stream.next() => item,
-                        _ = terminate_rx.recv() => break,
+                        _ = terminate_rx.recv_async() => break,
                     };
 
                     match item {
                         Some(Ok(item)) => {
                             let future = f(item);
-                            if input_tx.send((index, future)).await.is_err() {
+                            if input_tx.send_async((index, future)).await.is_err() {
                                 break;
                             }
                         }
                         Some(Err(err)) => {
-                            let _ = terminate_tx.send(()).await;
+                            let _ = terminate_tx.send_async(()).await;
                             return Err((index, err));
                         }
                         None => break,
@@ -693,7 +692,7 @@ where
                 rt::spawn(async move {
                     loop {
                         let (index, future) = tokio::select! {
-                            item = input_rx.recv() => {
+                            item = input_rx.recv_async() => {
                                 match item {
                                     Ok(item) => item,
                                     Err(_) => {
@@ -701,17 +700,17 @@ where
                                     }
                                 }
                             },
-                            _ = terminate_rx.recv() => break,
+                            _ = terminate_rx.recv_async() => break,
                         };
 
                         match future.await {
                             Ok(item) => {
-                                if reorder_tx.send((index, item)).await.is_err() {
+                                if reorder_tx.send_async((index, item)).await.is_err() {
                                     break;
                                 }
                             }
                             Err(err) => {
-                                let _ = terminate_tx.send(()).await;
+                                let _ = terminate_tx.send_async(()).await;
                                 return Err((index, err));
                             }
                         }
@@ -744,9 +743,9 @@ where
             let mut commit = 0;
 
             'outer: loop {
-                let (index, item) = match reorder_rx.recv().await {
-                    Some(tuple) => tuple,
-                    None => break,
+                let (index, item) = match reorder_rx.recv_async().await {
+                    Ok(tuple) => tuple,
+                    Err(_) => break,
                 };
 
                 match commit.cmp(&index) {
@@ -754,7 +753,7 @@ where
                         map.insert(index, item);
                     }
                     Equal => {
-                        if output_tx.send(item).await.is_err() {
+                        if output_tx.send_async(item).await.is_err() {
                             break 'outer;
                         }
                         commit += 1;
@@ -762,7 +761,7 @@ where
                         'inner: loop {
                             match map.remove(&commit) {
                                 Some(item) => {
-                                    if output_tx.send(item).await.is_err() {
+                                    if output_tx.send_async(item).await.is_err() {
                                         break 'outer;
                                     };
                                     commit += 1;
@@ -794,7 +793,7 @@ where
         };
 
         let select_stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(|item| Ok(Some(item))),
+            output_rx.into_stream().map(|item| Ok(Some(item))),
             join_all_future
                 .map(|result| result.map(|()| None))
                 .into_stream(),
@@ -880,8 +879,8 @@ where
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (map_tx, map_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let map_fut = {
             let output_tx = output_tx.clone();
@@ -892,14 +891,14 @@ where
                     match stream.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            let result = map_tx.send(fut).await;
+                            let result = map_tx.send_async(fut).await;
                             if result.is_err() {
                                 break;
                             }
                         }
                         Ok(None) => break,
                         Err(err) => {
-                            let result = output_tx.send(Err(err)).await;
+                            let result = output_tx.send_async(Err(err)).await;
                             if result.is_err() {
                                 break;
                             }
@@ -914,9 +913,9 @@ where
             let output_tx = output_tx.clone();
 
             let worker_fut = async move {
-                while let Ok(fut) = map_rx.recv().await {
+                while let Ok(fut) = map_rx.recv_async().await {
                     let result = fut.await;
-                    if output_tx.send(result).await.is_err() {
+                    if output_tx.send_async(result).await.is_err() {
                         break;
                     }
                 }
@@ -927,7 +926,7 @@ where
         let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_fut.into_stream().map(|_| None),
         )
         .filter_map(|item| async move { item })
@@ -1054,7 +1053,7 @@ where
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (map_tx, map_rx) = async_channel::bounded(buf_size);
+        let (map_tx, map_rx) = flume::bounded(buf_size);
         let (terminate_tx, _terminate_rx22) = tokio::sync::broadcast::channel(1);
 
         let map_fut = {
@@ -1067,7 +1066,7 @@ where
                     match stream.try_next().await {
                         Ok(Some(item)) => {
                             let fut = f(item);
-                            if map_tx.send(fut).await.is_err() {
+                            if map_tx.send_async(fut).await.is_err() {
                                 break Ok(());
                             }
                         }
@@ -1090,7 +1089,7 @@ where
                 let worker_fut = async move {
                     loop {
                         tokio::select! {
-                            result = map_rx.recv() => {
+                            result = map_rx.recv_async() => {
                                 let fut = match result {
                                     Ok(fut) => fut,
                                     Err(_) => break Ok(()),
@@ -1199,9 +1198,8 @@ mod try_tee {
     pub struct TryTee<T, E> {
         pub(super) buf_size: Option<usize>,
         pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set:
-            Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<Result<T, E>>>>>>,
-        pub(super) receiver: async_channel::Receiver<Result<T, E>>,
+        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<Result<T, E>>>>>>,
+        pub(super) receiver: flume::Receiver<Result<T, E>>,
     }
 
     impl<T, E> Clone for TryTee<T, E>
@@ -1212,8 +1210,8 @@ mod try_tee {
         fn clone(&self) -> Self {
             let buf_size = self.buf_size;
             let (tx, rx) = match buf_size {
-                Some(buf_size) => async_channel::bounded(buf_size),
-                None => async_channel::unbounded(),
+                Some(buf_size) => flume::bounded(buf_size),
+                None => flume::unbounded(),
             };
             let sender_set = self.sender_set.clone();
 
@@ -1234,7 +1232,7 @@ mod try_tee {
     impl<T, E> Stream for TryTee<T, E> {
         type Item = Result<T, E>;
 
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Ok(mut future_opt) = self.future.try_lock() {
                 if let Some(future) = &mut *future_opt {
                     if Pin::new(future).poll(cx).is_ready() {
@@ -1243,7 +1241,17 @@ mod try_tee {
                 }
             }
 
-            Pin::new(&mut self.receiver).poll_next(cx)
+            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
+                Ready(Ok(output)) => {
+                    cx.waker().clone().wake();
+                    Ready(Some(output))
+                }
+                Ready(Err(_)) => Ready(None),
+                Pending => {
+                    cx.waker().clone().wake();
+                    Pending
+                }
+            }
         }
     }
 }
@@ -1549,13 +1557,13 @@ mod try_unfold_blocking {
         Error: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = mpsc::channel(buf_size);
+        let (data_tx, data_rx) = flume::bounded(buf_size);
 
         let producer_fut = rt::spawn_blocking(move || {
             let mut state = match init_f() {
                 Ok(state) => state,
                 Err(err) => {
-                    let _ = data_tx.blocking_send(Err(err));
+                    let _ = data_tx.send(Err(err));
                     return;
                 }
             };
@@ -1563,7 +1571,7 @@ mod try_unfold_blocking {
             loop {
                 match unfold_f(state) {
                     Ok(Some((item, new_state))) => {
-                        let result = data_tx.blocking_send(Ok(item));
+                        let result = data_tx.send(Ok(item));
                         if result.is_err() {
                             break;
                         }
@@ -1571,7 +1579,7 @@ mod try_unfold_blocking {
                     }
                     Ok(None) => break,
                     Err(err) => {
-                        let _ = data_tx.blocking_send(Err(err));
+                        let _ = data_tx.send(Err(err));
                         break;
                     }
                 }
@@ -1588,7 +1596,9 @@ mod try_unfold_blocking {
                     None
                 })
                 .fuse(),
-            ReceiverStream::new(data_rx).map(|item: Result<Item, Error>| Some(item)),
+            data_rx
+                .into_stream()
+                .map(|item: Result<Item, Error>| Some(item)),
         )
         .filter_map(|item| async move { item })
         .boxed();
@@ -1640,7 +1650,7 @@ mod try_par_unfold_unordered {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
 
         let worker_futs = (0..num_workers).map(move |worker_index| {
@@ -1653,7 +1663,7 @@ mod try_par_unfold_unordered {
                 let mut state = match init_fut.await {
                     Ok(state) => state,
                     Err(err) => {
-                        let _ = output_tx.send(Err(err)).await;
+                        let _ = output_tx.send_async(Err(err)).await;
                         terminate.store(true, Release);
                         return;
                     }
@@ -1666,7 +1676,7 @@ mod try_par_unfold_unordered {
 
                     match unfold_f(worker_index, state).await {
                         Ok(Some((item, new_state))) => {
-                            let result = output_tx.send(Ok(item)).await;
+                            let result = output_tx.send_async(Ok(item)).await;
                             if result.is_err() {
                                 break;
                             }
@@ -1676,7 +1686,7 @@ mod try_par_unfold_unordered {
                             break;
                         }
                         Err(err) => {
-                            let _ = output_tx.send(Err(err)).await;
+                            let _ = output_tx.send_async(Err(err)).await;
                             terminate.store(true, Release);
                             break;
                         }
@@ -1689,7 +1699,7 @@ mod try_par_unfold_unordered {
         let join_future = futures::future::join_all(worker_futs);
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_future.map(|_| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -1728,7 +1738,7 @@ mod try_par_unfold_unordered {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
 
         let worker_futs = (0..num_workers).map(|worker_index| {
@@ -1741,7 +1751,7 @@ mod try_par_unfold_unordered {
                 let mut state = match init_f(worker_index) {
                     Ok(state) => state,
                     Err(err) => {
-                        let _ = output_tx.blocking_send(Err(err));
+                        let _ = output_tx.send(Err(err));
                         terminate.store(true, Release);
                         return;
                     }
@@ -1754,7 +1764,7 @@ mod try_par_unfold_unordered {
 
                     match unfold_f(worker_index, state) {
                         Ok(Some((item, new_state))) => {
-                            let result = output_tx.blocking_send(Ok(item));
+                            let result = output_tx.send(Ok(item));
                             if result.is_err() {
                                 break;
                             }
@@ -1764,7 +1774,7 @@ mod try_par_unfold_unordered {
                             break;
                         }
                         Err(err) => {
-                            let _ = output_tx.blocking_send(Err(err));
+                            let _ = output_tx.send(Err(err));
                             terminate.store(true, Release);
                             break;
                         }
@@ -1776,7 +1786,7 @@ mod try_par_unfold_unordered {
         let join_future = futures::future::try_join_all(worker_futs);
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
                 None
@@ -2068,11 +2078,11 @@ mod tests {
                 .try_par_batching_unordered(None, |_, input, output| async move {
                     let mut sum = 0;
 
-                    while let Ok(val) = input.recv().await {
+                    while let Ok(val) = input.recv_async().await {
                         let new_sum = sum + val;
                         if new_sum >= 3 {
                             sum = 0;
-                            let result = output.send(new_sum).await;
+                            let result = output.send_async(new_sum).await;
                             if result.is_err() {
                                 break;
                             }
@@ -2082,7 +2092,7 @@ mod tests {
                     }
 
                     if sum > 0 {
-                        let _ = output.send(sum).await;
+                        let _ = output.send_async(sum).await;
                     }
 
                     Result::<_, ()>::Ok(())
@@ -2103,11 +2113,11 @@ mod tests {
                 .try_par_batching_unordered(None, |_, input, output| async move {
                     let mut sum = 0;
 
-                    while let Ok(val) = input.recv().await {
+                    while let Ok(val) = input.recv_async().await {
                         let new_sum = sum + val;
                         if new_sum >= 3 {
                             sum = 0;
-                            let result = output.send(new_sum).await;
+                            let result = output.send_async(new_sum).await;
                             if result.is_err() {
                                 break;
                             }

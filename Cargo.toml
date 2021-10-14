@@ -22,12 +22,11 @@ async-std = { version = "1.10.0", features = ["unstable"], optional = true }
 tokio = { version = "1.12.0", features = ["sync", "macros"] }
 pin-project = "1.0.8"
 derivative = "2.2.0"
-async-channel = "1.6.1"
 flurry = "0.3.1"
-owning_ref = "0.4.1"
 by_address = "1.0.4"
 smol = { version = "1.2.5", optional = true }
 tokio-stream = "0.1.7"
+flume = "0.10.9"
 
 [dev-dependencies]
 tokio = { version = "1.12.0", features = ["sync", "macros", "rt-multi-thread", "time"] }

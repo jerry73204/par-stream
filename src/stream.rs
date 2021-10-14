@@ -4,8 +4,7 @@ use crate::{
     rt,
     utils::{BoxedFuture, BoxedStream},
 };
-use tokio::sync::{mpsc, oneshot};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::oneshot;
 
 pub trait IndexedStreamExt
 where
@@ -144,7 +143,7 @@ where
     /// The outputs of workers can be arbitrary ordered. There is no ordering guarantee respecting to the input element.
     fn par_batching_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParBatchingUnordered<T>
     where
-        F: FnMut(usize, async_channel::Receiver<Self::Item>, mpsc::Sender<T>) -> Fut,
+        F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
         P: IntoParStreamParams;
@@ -247,10 +246,10 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then<P, T, F, Fut>(self, config: P, f: F) -> ParMap<T>
+    fn par_then<P, T, F, Fut>(self, config: P, f: F) -> ParThen<T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut + Send,
+        F: 'static + FnMut(Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = T> + Send,
         P: IntoParStreamParams;
 
@@ -259,15 +258,15 @@ where
         self,
         config: P,
         init_f: InitF,
-        f: MapF,
-    ) -> ParMap<T>
+        map_f: MapF,
+    ) -> ParThen<T>
     where
+        P: IntoParStreamParams,
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
-        Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams;
+        Fut: 'static + Future<Output = T> + Send;
 
     /// Computes new items from the stream asynchronously in parallel without respecting the input order.
     ///
@@ -315,7 +314,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParMapUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParThenUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -329,11 +328,11 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> ParMapUnordered<T>
+    ) -> ParThenUnordered<T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         P: IntoParStreamParams;
@@ -402,7 +401,7 @@ where
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams;
@@ -473,7 +472,7 @@ where
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams;
@@ -699,7 +698,7 @@ where;
     ) -> ParForEach
     where
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
         P: IntoParStreamParams;
@@ -721,7 +720,7 @@ where;
     ) -> ParForEach
     where
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
         P: IntoParStreamParams;
@@ -739,13 +738,13 @@ where
         Fut: Future<Output = T> + Send,
     {
         let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = mpsc::channel(buf_size);
+        let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn(async move {
             let mut stream = self.then(f).boxed();
 
             while let Some(output) = stream.next().await {
-                if tx.send(output).await.is_err() {
+                if tx.send_async(output).await.is_err() {
                     break;
                 }
             }
@@ -753,7 +752,7 @@ where
         .map(|result| result.unwrap());
 
         let stream = futures::stream::select(
-            ReceiverStream::new(rx).map(Some),
+            rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -768,13 +767,13 @@ where
         F: 'static + FnMut(Self::Item) -> T + Send,
     {
         let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = mpsc::channel(buf_size);
+        let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn_blocking(move || {
             let mut stream = self.map(f).boxed();
 
             while let Some(output) = rt::block_on(stream.next()) {
-                if tx.blocking_send(output).is_err() {
+                if tx.send(output).is_err() {
                     break;
                 }
             }
@@ -782,7 +781,7 @@ where
         .map(|result| result.unwrap());
 
         let stream = futures::stream::select(
-            ReceiverStream::new(rx).map(Some),
+            rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -825,7 +824,7 @@ where
 
     fn par_batching_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> ParBatchingUnordered<T>
     where
-        F: FnMut(usize, async_channel::Receiver<Self::Item>, mpsc::Sender<T>) -> Fut,
+        F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
         P: IntoParStreamParams,
@@ -835,13 +834,13 @@ where
             buf_size,
         } = config.into_par_stream_params();
 
-        let (input_tx, input_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
         let mut stream = self.boxed();
 
         let input_fut = rt::spawn(async move {
             while let Some(item) = stream.next().await {
-                let result = input_tx.send(item).await;
+                let result = input_tx.send_async(item).await;
                 if result.is_err() {
                     break;
                 }
@@ -858,7 +857,7 @@ where
         let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_fut.into_stream().map(|_| None),
         )
         .filter_map(|item| async move { item })
@@ -873,8 +872,8 @@ where
     {
         let buf_size = buf_size.into();
         let (tx, rx) = match buf_size {
-            Some(buf_size) => async_channel::bounded(buf_size),
-            None => async_channel::unbounded(),
+            Some(buf_size) => flume::bounded(buf_size),
+            None => flume::unbounded(),
         };
         let sender_set = Arc::new(flurry::HashSet::new());
         let guard = sender_set.guard();
@@ -893,7 +892,7 @@ where
                             let tx = tx.clone();
                             let item = item.clone();
                             async move {
-                                let result = tx.send(item).await;
+                                let result = tx.send_async(item).await;
                                 (result, tx)
                             }
                         })
@@ -937,7 +936,7 @@ where
         let ready = Arc::new(AtomicBool::new(false));
 
         let future = rt::spawn(async move {
-            let mut senders: Vec<mpsc::Sender<_>> = match init_rx.await {
+            let mut senders: Vec<flume::Sender<_>> = match init_rx.await {
                 Ok(senders) => senders,
                 Err(_) => return,
             };
@@ -948,7 +947,7 @@ where
                 let sending_futures = senders.into_iter().map(move |tx| {
                     let item = item.clone();
                     async move {
-                        tx.send(item).await.ok()?;
+                        tx.send_async(item).await.ok()?;
                         Some(tx)
                     }
                 });
@@ -977,7 +976,7 @@ where
         }
     }
 
-    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> ParMap<T>
+    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> ParThen<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -995,63 +994,149 @@ where
             .reorder_enumerated()
             .boxed();
 
-        ParMap { stream }
+        ParThen { stream }
     }
 
     fn par_then_init<P, T, B, InitF, MapF, Fut>(
         self,
         config: P,
-        mut init_f: InitF,
-        mut f: MapF,
-    ) -> ParMap<T>
+        init_f: InitF,
+        mut map_f: MapF,
+    ) -> ParThen<T>
     where
+        P: IntoParStreamParams,
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams,
     {
-        let init = init_f();
-
         let stream = self
-            .wrapping_enumerate()
-            .par_then_unordered(config, move |(index, item)| {
-                let fut = f(init.clone(), item);
-                fut.map(move |output| (index, output))
+            .enumerate()
+            .par_then_init_unordered(config, init_f, move |init, (index, item)| {
+                let fut = map_f(init, item);
+                async move { (index, fut.await) }
             })
             .reorder_enumerated()
             .boxed();
 
-        ParMap { stream }
+        ParThen { stream }
     }
 
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParMapUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> ParThenUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         P: IntoParStreamParams,
     {
-        ParMapUnordered::new(self, config, f)
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
+
+        let input_fut = async move {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                if input_tx.send_async(fut).await.is_err() {
+                    break;
+                };
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let input_rx = input_rx.clone();
+                let output_tx = output_tx.clone();
+
+                rt::spawn(async move {
+                    while let Ok(fut) = input_rx.recv_async().await {
+                        let output = fut.await;
+                        if output_tx.send_async(output).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map(|result| result.unwrap())
+            })
+            .collect();
+
+        let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
+
+        let stream = futures::stream::select(
+            output_rx.into_stream().map(Some),
+            join_fut.map(|_| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        ParThenUnordered { stream }
     }
 
     fn par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
         self,
         config: P,
-        mut init_f: InitF,
+        init_f: InitF,
         mut map_f: MapF,
-    ) -> ParMapUnordered<T>
+    ) -> ParThenUnordered<T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         P: IntoParStreamParams,
     {
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
         let init = init_f();
-        ParMapUnordered::new(self, config, move |item| map_f(init.clone(), item))
+
+        let input_fut = async move {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let job = map_f(init.clone(), item);
+                if input_tx.send_async(job).await.is_err() {
+                    break;
+                };
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let input_rx = input_rx.clone();
+                let output_tx = output_tx.clone();
+
+                rt::spawn(async move {
+                    while let Ok(job) = input_rx.recv_async().await {
+                        let output = job.await;
+                        if output_tx.send_async(output).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map(|result| result.unwrap())
+            })
+            .collect();
+
+        let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
+
+        let stream = futures::stream::select(
+            output_rx.into_stream().map(Some),
+            join_fut.map(|_| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        ParThenUnordered { stream }
     }
 
     fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> ParMap<T>
@@ -1061,32 +1146,42 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
-        self.par_then(config, move |item| {
-            let func = f(item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        let stream = self
+            .enumerate()
+            .par_map_unordered(config, move |(index, item)| {
+                let job = f(item);
+                move || (index, job())
+            })
+            .reorder_enumerated()
+            .boxed();
+
+        ParMap { stream }
     }
 
     fn par_map_init<P, T, B, InitF, MapF, Func>(
         self,
         config: P,
-        mut init_f: InitF,
-        mut f: MapF,
+        init_f: InitF,
+        mut map_f: MapF,
     ) -> ParMap<T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
-        let init = init_f();
+        let stream = self
+            .enumerate()
+            .par_map_init_unordered(config, init_f, move |init, (index, item)| {
+                let job = map_f(init, item);
+                move || (index, job())
+            })
+            .reorder_enumerated()
+            .boxed();
 
-        self.par_then(config, move |item| {
-            let func = f(init.clone(), item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        ParMap { stream }
     }
 
     fn par_map_unordered<P, T, F, Func>(self, config: P, mut f: F) -> ParMapUnordered<T>
@@ -1096,32 +1191,83 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
-        self.par_then_unordered(config, move |item| {
-            let func = f(item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
+
+        let input_future = rt::spawn(async move {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let job = f(item);
+                let result = input_tx.send_async(job).await;
+                if result.is_err() {
+                    break;
+                };
+            }
         })
+        .map(|result| result.unwrap());
+
+        let worker_futures: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let input_rx = input_rx.clone();
+                let output_tx = output_tx.clone();
+
+                rt::spawn_blocking(move || {
+                    while let Ok(job) = input_rx.recv() {
+                        let output = job();
+                        let result = output_tx.send(output);
+                        if result.is_err() {
+                            break;
+                        }
+                    }
+                })
+                .map(|result| result.unwrap())
+            })
+            .collect();
+
+        let join_future =
+            futures::future::join(input_future, futures::future::join_all(worker_futures));
+
+        let stream = futures::stream::select(
+            output_rx.into_stream().map(Some),
+            join_future.map(|_| None).into_stream(),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        ParMapUnordered { stream }
     }
 
     fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(
         self,
         config: P,
-        mut init_f: InitF,
+        init_f: InitF,
         mut f: MapF,
     ) -> ParMapUnordered<T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
         let init = init_f();
 
-        self.par_then_unordered(config, move |item| {
-            let func = f(init.clone(), item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        let stream = self
+            .enumerate()
+            .par_map_unordered(config, move |(index, item)| {
+                let job = f(init.clone(), item);
+                move || (index, job())
+            })
+            .reorder_enumerated()
+            .boxed();
+
+        ParMapUnordered { stream }
     }
 
     fn par_reduce<P, F, Fut>(self, config: P, reduce_fn: F) -> ParReduce<Self::Item>
@@ -1137,13 +1283,13 @@ where
 
         // phase 1
         let phase_1_future = async move {
-            let (input_tx, input_rx) = async_channel::bounded(buf_size);
+            let (input_tx, input_rx) = flume::bounded(buf_size);
 
             let input_future = rt::spawn(async move {
                 let mut stream = self.boxed();
 
                 while let Some(item) = stream.next().await {
-                    if input_tx.send(item).await.is_err() {
+                    if input_tx.send_async(item).await.is_err() {
                         break;
                     }
                 }
@@ -1158,9 +1304,9 @@ where
                     let mut reduce_fn = reduce_fn.clone();
 
                     rt::spawn(async move {
-                        let mut reduced = input_rx.recv().await.ok()?;
+                        let mut reduced = input_rx.recv_async().await.ok()?;
 
-                        while let Ok(item) = input_rx.recv().await {
+                        while let Ok(item) = input_rx.recv_async().await {
                             reduced = reduce_fn(reduced, item).await;
                         }
 
@@ -1180,14 +1326,14 @@ where
         let phase_2_future = async move {
             let (values, reduce_fn) = phase_1_future.await;
 
-            let (pair_tx, pair_rx) = async_channel::bounded(buf_size);
-            let (feedback_tx, mut feedback_rx) = mpsc::channel(num_workers);
+            let (pair_tx, pair_rx) = flume::bounded(buf_size);
+            let (feedback_tx, feedback_rx) = flume::bounded(num_workers);
 
             let mut count = 0;
 
             for value in values {
                 if let Some(value) = value {
-                    feedback_tx.send(value).await.map_err(|_| ()).unwrap();
+                    feedback_tx.send_async(value).await.map_err(|_| ()).unwrap();
                     count += 1;
                 }
             }
@@ -1195,16 +1341,16 @@ where
             let pairing_future = {
                 rt::spawn(async move {
                     while count >= 2 {
-                        let first = feedback_rx.recv().await.unwrap();
-                        let second = feedback_rx.recv().await.unwrap();
-                        pair_tx.send((first, second)).await.unwrap();
+                        let first = feedback_rx.recv_async().await.unwrap();
+                        let second = feedback_rx.recv_async().await.unwrap();
+                        pair_tx.send_async((first, second)).await.unwrap();
                         count -= 1;
                     }
 
                     match count {
                         0 => None,
                         1 => {
-                            let output = feedback_rx.recv().await.unwrap();
+                            let output = feedback_rx.recv_async().await.unwrap();
                             Some(output)
                         }
                         _ => unreachable!(),
@@ -1219,9 +1365,13 @@ where
                 let mut reduce_fn = reduce_fn.clone();
 
                 rt::spawn(async move {
-                    while let Ok((first, second)) = pair_rx.recv().await {
+                    while let Ok((first, second)) = pair_rx.recv_async().await {
                         let reduced = reduce_fn(first, second).await;
-                        feedback_tx.send(reduced).await.map_err(|_| ()).unwrap();
+                        feedback_tx
+                            .send_async(reduced)
+                            .await
+                            .map_err(|_| ())
+                            .unwrap();
                     }
                 })
                 .map(|result| result.unwrap())
@@ -1255,19 +1405,19 @@ where
             Some(size) => size,
         };
 
-        let (reorder_tx, reorder_rx) = async_channel::bounded(buf_size);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let (mut map_txs, map_futs): (Vec<_>, Vec<_>) = map_fns
             .iter()
             .map(|_| {
-                let (map_tx, map_rx) = async_channel::bounded(buf_size);
+                let (map_tx, map_rx) = flume::bounded(buf_size);
                 let reorder_tx = reorder_tx.clone();
 
                 let map_fut = rt::spawn(async move {
-                    while let Ok((counter, fut)) = map_rx.recv().await {
+                    while let Ok((counter, fut)) = map_rx.recv_async().await {
                         let output = fut.await;
-                        if reorder_tx.send((counter, output)).await.is_err() {
+                        if reorder_tx.send_async((counter, output)).await.is_err() {
                             break;
                         };
                     }
@@ -1289,7 +1439,7 @@ where
                     .expect("the routing function returns an invalid index");
                 let map_tx = map_txs.get_mut(index).unwrap();
                 let fut = map_fn(item);
-                if map_tx.send((counter, fut)).await.is_err() {
+                if map_tx.send_async((counter, fut)).await.is_err() {
                     break;
                 };
 
@@ -1301,19 +1451,19 @@ where
             let mut counter = 0u64;
             let mut pool = HashMap::new();
 
-            while let Ok((index, output)) = reorder_rx.recv().await {
+            while let Ok((index, output)) = reorder_rx.recv_async().await {
                 if index != counter {
                     pool.insert(index, output);
                     continue;
                 }
 
-                if output_tx.send(output).await.is_err() {
+                if output_tx.send_async(output).await.is_err() {
                     break;
                 };
                 counter = counter.wrapping_add(1);
 
                 while let Some(output) = pool.remove(&counter) {
-                    if output_tx.send(output).await.is_err() {
+                    if output_tx.send_async(output).await.is_err() {
                         break;
                     };
                     counter = counter.wrapping_add(1);
@@ -1329,7 +1479,7 @@ where
         .boxed();
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -1355,18 +1505,18 @@ where
             Some(size) => size,
         };
 
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let (mut map_txs, map_futs): (Vec<_>, Vec<_>) = map_fns
             .iter()
             .map(|_| {
-                let (map_tx, map_rx) = async_channel::bounded(buf_size);
+                let (map_tx, map_rx) = flume::bounded(buf_size);
                 let output_tx = output_tx.clone();
 
                 let map_fut = rt::spawn(async move {
-                    while let Ok(fut) = map_rx.recv().await {
+                    while let Ok(fut) = map_rx.recv_async().await {
                         let output = fut.await;
-                        if output_tx.send(output).await.is_err() {
+                        if output_tx.send_async(output).await.is_err() {
                             break;
                         };
                     }
@@ -1387,7 +1537,7 @@ where
                     .expect("the routing function returns an invalid index");
                 let map_tx = map_txs.get_mut(index).unwrap();
                 let fut = map_fn(item);
-                if map_tx.send(fut).await.is_err() {
+                if map_tx.send_async(fut).await.is_err() {
                     break;
                 };
             }
@@ -1396,7 +1546,7 @@ where
         let join_fut = futures::future::join(routing_fut, futures::future::join_all(map_futs));
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
         .filter_map(|item| async move { item })
@@ -1407,12 +1557,12 @@ where
 
     fn scatter(self, buf_size: impl Into<Option<usize>>) -> Scatter<Self::Item> {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (tx, rx) = async_channel::bounded(buf_size);
+        let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn(async move {
             let mut stream = self.boxed();
             while let Some(item) = stream.next().await {
-                if tx.send(item).await.is_err() {
+                if tx.send_async(item).await.is_err() {
                     break;
                 }
             }
@@ -1436,12 +1586,12 @@ where
     fn par_for_each_init<P, B, InitF, MapF, Fut>(
         self,
         config: P,
-        mut init_f: InitF,
+        init_f: InitF,
         mut map_f: MapF,
     ) -> ParForEach
     where
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
         P: IntoParStreamParams,
@@ -1465,12 +1615,12 @@ where
     fn par_for_each_blocking_init<P, B, InitF, MapF, Func>(
         self,
         config: P,
-        mut init_f: InitF,
+        init_f: InitF,
         mut f: MapF,
     ) -> ParForEach
     where
         B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
+        InitF: FnOnce() -> B,
         MapF: 'static + FnMut(B, Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
         P: IntoParStreamParams,
@@ -1510,13 +1660,13 @@ mod unfold {
         Item: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = mpsc::channel(buf_size);
+        let (data_tx, data_rx) = flume::bounded(buf_size);
 
         let producer_fut = rt::spawn(async move {
             let mut state = init_f().await;
 
             while let Some((item, new_state)) = unfold_f(state).await {
-                let result = data_tx.send(item).await;
+                let result = data_tx.send_async(item).await;
                 if result.is_err() {
                     break;
                 }
@@ -1534,7 +1684,7 @@ mod unfold {
                     None
                 })
                 .fuse(),
-            ReceiverStream::new(data_rx).map(|item: Item| Some(item)),
+            data_rx.into_stream().map(Some),
         )
         .filter_map(|item| async move { item })
         .boxed();
@@ -1558,13 +1708,13 @@ mod unfold {
         Item: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = mpsc::channel(buf_size);
+        let (data_tx, data_rx) = flume::bounded(buf_size);
 
         let producer_fut = rt::spawn_blocking(move || {
             let mut state = init_f();
 
             while let Some((item, new_state)) = unfold_f(state) {
-                let result = data_tx.blocking_send(item);
+                let result = data_tx.send(item);
                 if result.is_err() {
                     break;
                 }
@@ -1582,7 +1732,7 @@ mod unfold {
                     None
                 })
                 .fuse(),
-            ReceiverStream::new(data_rx).map(|item: Item| Some(item)),
+            data_rx.into_stream().map(Some),
         )
         .filter_map(|item| async move { item })
         .boxed();
@@ -1642,7 +1792,7 @@ mod par_unfold_unordered {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let worker_futs = (0..num_workers).map(|worker_index| {
             let init_fut = init_f(worker_index);
@@ -1655,7 +1805,7 @@ mod par_unfold_unordered {
                 loop {
                     match unfold_f(worker_index, state).await {
                         Some((item, new_state)) => {
-                            let result = output_tx.send(item).await;
+                            let result = output_tx.send_async(item).await;
                             if result.is_err() {
                                 break;
                             }
@@ -1672,7 +1822,7 @@ mod par_unfold_unordered {
         let join_future = futures::future::try_join_all(worker_futs);
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
                 None
@@ -1701,7 +1851,7 @@ mod par_unfold_unordered {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let worker_futs = (0..num_workers).map(|worker_index| {
             let mut init_f = init_f.clone();
@@ -1714,7 +1864,7 @@ mod par_unfold_unordered {
                 loop {
                     match unfold_f(worker_index, state) {
                         Some((item, new_state)) => {
-                            let result = output_tx.blocking_send(item);
+                            let result = output_tx.send(item);
                             if result.is_err() {
                                 break;
                             }
@@ -1731,7 +1881,7 @@ mod par_unfold_unordered {
         let join_future = futures::future::try_join_all(worker_futs);
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
                 None
@@ -1772,13 +1922,13 @@ mod scatter {
     #[derive(Debug)]
     pub struct Scatter<T> {
         pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) receiver: async_channel::Receiver<T>,
+        pub(super) receiver: flume::Receiver<T>,
     }
 
     impl<T> Stream for Scatter<T> {
         type Item = T;
 
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Ok(mut future_opt) = self.future.try_lock() {
                 if let Some(future) = &mut *future_opt {
                     if Pin::new(future).poll(cx).is_ready() {
@@ -1787,7 +1937,17 @@ mod scatter {
                 }
             }
 
-            Pin::new(&mut self.receiver).poll_next(cx)
+            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
+                Ready(Ok(output)) => {
+                    cx.waker().clone().wake();
+                    Ready(Some(output))
+                }
+                Ready(Err(_)) => Ready(None),
+                Pending => {
+                    cx.waker().clone().wake();
+                    Pending
+                }
+            }
         }
     }
 
@@ -1813,8 +1973,8 @@ mod tee {
     pub struct Tee<T> {
         pub(super) buf_size: Option<usize>,
         pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<async_channel::Sender<T>>>>>,
-        pub(super) receiver: async_channel::Receiver<T>,
+        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<T>>>>>,
+        pub(super) receiver: flume::Receiver<T>,
     }
 
     impl<T> Clone for Tee<T>
@@ -1824,8 +1984,8 @@ mod tee {
         fn clone(&self) -> Self {
             let buf_size = self.buf_size;
             let (tx, rx) = match buf_size {
-                Some(buf_size) => async_channel::bounded(buf_size),
-                None => async_channel::unbounded(),
+                Some(buf_size) => flume::bounded(buf_size),
+                None => flume::unbounded(),
             };
             let sender_set = self.sender_set.clone();
 
@@ -1846,7 +2006,7 @@ mod tee {
     impl<T> Stream for Tee<T> {
         type Item = T;
 
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Ok(mut future_opt) = self.future.try_lock() {
                 if let Some(future) = &mut *future_opt {
                     if Pin::new(future).poll(cx).is_ready() {
@@ -1855,7 +2015,17 @@ mod tee {
                 }
             }
 
-            Pin::new(&mut self.receiver).poll_next(cx)
+            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
+                Ready(Ok(output)) => {
+                    cx.waker().clone().wake();
+                    Ready(Some(output))
+                }
+                Ready(Err(_)) => Ready(None),
+                Pending => {
+                    cx.waker().clone().wake();
+                    Pending
+                }
+            }
         }
     }
 }
@@ -1878,10 +2048,10 @@ mod broadcast {
     pub struct BroadcastGuard<T> {
         pub(super) buf_size: usize,
         pub(super) ready: Arc<AtomicBool>,
-        pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
+        pub(super) init_tx: Option<oneshot::Sender<Vec<flume::Sender<T>>>>,
         #[derivative(Debug = "ignore")]
         pub(super) future: Arc<tokio::sync::Mutex<BoxedFuture<()>>>,
-        pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
+        pub(super) senders: Option<Vec<flume::Sender<T>>>,
     }
 
     impl<T> BroadcastGuard<T>
@@ -1899,14 +2069,14 @@ mod broadcast {
             } = *self;
             let senders = senders.as_mut().unwrap();
 
-            let (tx, rx) = mpsc::channel(buf_size);
+            let (tx, rx) = flume::bounded(buf_size);
             senders.push(tx);
 
             let future = future.clone();
             let ready = ready.clone();
 
             let stream = futures::stream::select(
-                ReceiverStream::new(rx).map(Some),
+                rx.into_stream().map(Some),
                 async move {
                     assert!(
                         ready.load(Acquire),
@@ -2106,68 +2276,60 @@ mod par_map_unordered {
     #[derivative(Debug)]
     pub struct ParMapUnordered<T> {
         #[derivative(Debug = "ignore")]
-        stream: BoxedStream<T>,
-    }
-
-    impl<T> ParMapUnordered<T> {
-        pub fn new<P, S, F, Fut>(stream: S, config: P, mut f: F) -> Self
-        where
-            T: 'static + Send,
-            F: 'static + FnMut(S::Item) -> Fut + Send,
-            Fut: 'static + Future<Output = T> + Send,
-            S: 'static + IndexedStreamExt + Send,
-            S::Item: Send,
-            P: IntoParStreamParams,
-        {
-            let ParStreamParams {
-                num_workers,
-                buf_size,
-            } = config.into_par_stream_params();
-            let (map_tx, map_rx) = async_channel::bounded(buf_size);
-            let (output_tx, output_rx) = mpsc::channel(buf_size);
-
-            let map_fut = async move {
-                let mut stream = stream.boxed();
-
-                while let Some(item) = stream.next().await {
-                    let fut = f(item);
-                    if map_tx.send(fut).await.is_err() {
-                        break;
-                    };
-                }
-            };
-
-            let worker_futs: Vec<_> = (0..num_workers)
-                .map(|_| {
-                    let map_rx = map_rx.clone();
-                    let output_tx = output_tx.clone();
-
-                    let worker_fut = async move {
-                        while let Ok(fut) = map_rx.recv().await {
-                            let output = fut.await;
-                            if output_tx.send(output).await.is_err() {
-                                break;
-                            }
-                        }
-                    };
-                    rt::spawn(worker_fut).map(|result| result.unwrap())
-                })
-                .collect();
-
-            let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs));
-
-            let stream = futures::stream::select(
-                ReceiverStream::new(output_rx).map(Some),
-                join_fut.map(|_| None).into_stream(),
-            )
-            .filter_map(|item| async move { item })
-            .boxed();
-
-            Self { stream }
-        }
+        pub(super) stream: BoxedStream<T>,
     }
 
     impl<T> Stream for ParMapUnordered<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
+// par_then
+
+pub use par_then::*;
+
+mod par_then {
+    use super::*;
+
+    /// A stream combinator returned from [par_then()](ParStreamExt::par_then) and its siblings.
+    #[pin_project]
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParThen<T> {
+        #[pin]
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for ParThen<T> {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+            self.project().stream.poll_next(cx)
+        }
+    }
+}
+
+// par_then_unordered
+
+pub use par_then_unordered::*;
+
+mod par_then_unordered {
+    use super::*;
+
+    /// A stream combinator returned from [par_then_unordered()](ParStreamExt::par_then_unordered) and its siblings.
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParThenUnordered<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for ParThenUnordered<T> {
         type Item = T;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
@@ -2302,7 +2464,7 @@ mod gather {
         S::Item: Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (output_tx, output_rx) = mpsc::channel(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let worker_futures = streams.into_iter().map(|stream| {
             let output_tx = output_tx.clone();
@@ -2310,7 +2472,7 @@ mod gather {
 
             async move {
                 while let Some(item) = stream.next().await {
-                    let result = output_tx.send(item).await;
+                    let result = output_tx.send_async(item).await;
                     if result.is_err() {
                         break;
                     }
@@ -2320,7 +2482,7 @@ mod gather {
         let gather_future = futures::future::join_all(worker_futures);
 
         let stream = futures::stream::select(
-            ReceiverStream::new(output_rx).map(Some),
+            output_rx.into_stream().map(Some),
             gather_future.into_stream().map(|_| None),
         )
         .filter_map(|item| async move { item })
@@ -2380,14 +2542,14 @@ mod par_for_each {
                 num_workers,
                 buf_size,
             } = config.into_par_stream_params();
-            let (map_tx, map_rx) = async_channel::bounded(buf_size);
+            let (map_tx, map_rx) = flume::bounded(buf_size);
 
             let map_fut = async move {
                 let mut stream = stream.boxed();
 
                 while let Some(item) = stream.next().await {
                     let fut = f(item);
-                    if map_tx.send(fut).await.is_err() {
+                    if map_tx.send_async(fut).await.is_err() {
                         break;
                     }
                 }
@@ -2398,7 +2560,7 @@ mod par_for_each {
                     let map_rx = map_rx.clone();
 
                     let worker_fut = async move {
-                        while let Ok(fut) = map_rx.recv().await {
+                        while let Ok(fut) = map_rx.recv_async().await {
                             fut.await;
                         }
                     };
@@ -2431,8 +2593,8 @@ mod batching {
     use super::*;
 
     pub(crate) fn batching_channel<T>() -> (BatchingSender<T>, BatchingReceiver<T>) {
-        let (permit_tx, permit_rx) = mpsc::channel(1);
-        let (output_tx, output_rx) = mpsc::channel(1);
+        let (permit_tx, permit_rx) = flume::bounded(1);
+        let (output_tx, output_rx) = flume::bounded(1);
 
         (
             BatchingSender {
@@ -2454,16 +2616,16 @@ mod batching {
     pub struct BatchingSender<T> {
         is_closed: bool,
         is_requesting: bool,
-        permit_rx: mpsc::Receiver<()>,
-        output_tx: mpsc::Sender<T>,
+        permit_rx: flume::Receiver<()>,
+        output_tx: flume::Sender<T>,
     }
 
     #[derive(Debug)]
     pub struct BatchingReceiver<T> {
         is_closed: bool,
         is_requesting: bool,
-        permit_tx: mpsc::Sender<()>,
-        output_rx: mpsc::Receiver<T>,
+        permit_tx: flume::Sender<()>,
+        output_rx: flume::Receiver<T>,
     }
 
     #[derive(Derivative)]
@@ -2480,15 +2642,15 @@ mod batching {
             }
 
             if !self.is_requesting {
-                let result = self.permit_rx.recv().await;
-                if result.is_none() {
+                let result = self.permit_rx.recv_async().await;
+                if result.is_err() {
                     self.is_closed = true;
                     return Err(item);
                 }
                 self.is_requesting = true;
             }
 
-            let result = self.output_tx.send(item).await;
+            let result = self.output_tx.send_async(item).await;
             if let Err(err) = result {
                 self.is_closed = true;
                 return Err(err.0);
@@ -2509,7 +2671,7 @@ mod batching {
             }
 
             if !self.is_requesting {
-                let result = self.permit_tx.send(()).await;
+                let result = self.permit_tx.send_async(()).await;
                 if result.is_err() {
                     self.is_closed = true;
                     return None;
@@ -2517,12 +2679,12 @@ mod batching {
                 self.is_requesting = true;
             }
 
-            match self.output_rx.recv().await {
-                Some(item) => {
+            match self.output_rx.recv_async().await {
+                Ok(item) => {
                     self.is_requesting = false;
                     Some(item)
                 }
-                None => {
+                Err(_) => {
                     self.is_closed = true;
                     None
                 }
@@ -2691,12 +2853,12 @@ mod tests {
             .par_batching_unordered(None, |_, input, output| async move {
                 let mut sum = 0;
 
-                while let Ok(val) = input.recv().await {
+                while let Ok(val) = input.recv_async().await {
                     let new_sum = sum + val;
 
                     if new_sum >= 1000 {
                         sum = 0;
-                        let result = output.send(new_sum).await;
+                        let result = output.send_async(new_sum).await;
                         if result.is_err() {
                             break;
                         }
@@ -2867,18 +3029,18 @@ mod tests {
         let mut rx1 = futures::stream::iter(0..).tee(1);
         let mut rx2 = rx1.clone();
 
-        assert_eq!(rx1.next().await, Some(0));
-        assert_eq!(rx2.next().await, Some(0));
+        assert!(rx1.next().await.is_some());
+        assert!(rx2.next().await.is_some());
 
         // drop rx1
         drop(rx1);
 
         // the following should not block
-        assert_eq!(rx2.next().await, Some(1));
-        assert_eq!(rx2.next().await, Some(2));
-        assert_eq!(rx2.next().await, Some(3));
-        assert_eq!(rx2.next().await, Some(4));
-        assert_eq!(rx2.next().await, Some(5));
+        assert!(rx2.next().await.is_some());
+        assert!(rx2.next().await.is_some());
+        assert!(rx2.next().await.is_some());
+        assert!(rx2.next().await.is_some());
+        assert!(rx2.next().await.is_some());
     }
 
     #[tokio::test]

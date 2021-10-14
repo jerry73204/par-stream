@@ -5,7 +5,6 @@ pub use futures::{
     stream::{BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
     FutureExt,
 };
-pub use owning_ref::ArcRef;
 pub use pin_project::pin_project;
 pub use std::{
     cmp::{self, Ordering::*},
