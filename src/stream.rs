@@ -1744,6 +1744,139 @@ where
     }
 }
 
+// join
+
+pub use join::*;
+
+mod join {
+    use super::*;
+
+    pub fn join<S1, S2>(stream1: S1, stream2: S2) -> Join<S1, S2>
+    where
+        S1: Stream,
+        S2: Stream,
+    {
+        Join {
+            stream1,
+            stream2,
+            elem1: None,
+            elem2: None,
+            closed: false,
+            flip: false,
+        }
+    }
+
+    #[pin_project(project = JoinProj)]
+    pub struct Join<S1, S2>
+    where
+        S1: Stream,
+        S2: Stream,
+    {
+        #[pin]
+        stream1: S1,
+        #[pin]
+        stream2: S2,
+        elem1: Option<S1::Item>,
+        elem2: Option<S2::Item>,
+        closed: bool,
+        flip: bool,
+    }
+
+    impl<S1, S2> Stream for Join<S1, S2>
+    where
+        S1: Stream,
+        S2: Stream,
+    {
+        type Item = (S1::Item, S2::Item);
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let JoinProj {
+                stream1,
+                stream2,
+                elem1,
+                elem2,
+                closed,
+                flip,
+            } = self.project();
+
+            if !*closed {
+                match (elem1.take(), elem2.take()) {
+                    (Some(_), Some(_)) => {
+                        unreachable!();
+                    }
+                    (Some(elem1_), None) => {
+                        let poll = stream2.poll_next(cx);
+
+                        match poll {
+                            Ready(Some(elem2_)) => {
+                                cx.waker().clone().wake();
+                                Ready(Some((elem1_, elem2_)))
+                            }
+                            Ready(None) => {
+                                *closed = true;
+                                Ready(None)
+                            }
+                            Pending => {
+                                *elem1 = Some(elem1_);
+                                cx.waker().clone().wake();
+                                Pending
+                            }
+                        }
+                    }
+                    (None, Some(elem2_)) => {
+                        let poll = stream1.poll_next(cx);
+
+                        match poll {
+                            Ready(Some(elem1_)) => {
+                                cx.waker().clone().wake();
+                                Ready(Some((elem1_, elem2_)))
+                            }
+                            Ready(None) => {
+                                *closed = true;
+                                Ready(None)
+                            }
+                            Pending => {
+                                *elem2 = Some(elem2_);
+                                cx.waker().clone().wake();
+                                Pending
+                            }
+                        }
+                    }
+                    (None, None) => {
+                        if *flip {
+                            let poll = stream2.poll_next(cx);
+                            match poll {
+                                Ready(Some(elem)) => *elem2 = Some(elem),
+                                Ready(None) => {
+                                    *closed = true;
+                                    return Ready(None);
+                                }
+                                Pending => {}
+                            }
+                        } else {
+                            let poll = stream1.poll_next(cx);
+                            match poll {
+                                Ready(Some(elem)) => *elem1 = Some(elem),
+                                Ready(None) => {
+                                    *closed = true;
+                                    return Ready(None);
+                                }
+                                Pending => {}
+                            }
+                        }
+                        *flip = !*flip;
+
+                        cx.waker().clone().wake();
+                        Pending
+                    }
+                }
+            } else {
+                Ready(None)
+            }
+        }
+    }
+}
+
 // unfold
 
 pub use unfold::*;
@@ -2913,7 +3046,70 @@ mod tests {
     use super::*;
     use itertools::{izip, Itertools};
     use rand::prelude::*;
-    use std::time::Duration;
+    use std::{ops::Neg, time::Duration};
+
+    #[tokio::test]
+    async fn join_test() {
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::empty::<()>(),
+                futures::stream::empty::<()>(),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![]);
+        }
+
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::empty::<()>(),
+                futures::stream::iter(0..).map(Neg::neg).take(3),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![]);
+        }
+
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::iter(0..).map(Neg::neg).take(3),
+                futures::stream::empty::<()>(),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![]);
+        }
+
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::iter(0..).take(3),
+                futures::stream::iter(0..).map(Neg::neg).take(3),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![(0, 0), (1, -1), (2, -2)]);
+        }
+
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::iter(0..).take(5),
+                futures::stream::iter(0..).map(Neg::neg).take(3),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![(0, 0), (1, -1), (2, -2)]);
+        }
+
+        {
+            let collected: Vec<_> = super::join(
+                futures::stream::iter(0..).take(3),
+                futures::stream::iter(0..).map(Neg::neg).take(5),
+            )
+            .collect()
+            .await;
+            assert_eq!(collected, vec![(0, 0), (1, -1), (2, -2)]);
+        }
+    }
 
     #[tokio::test]
     async fn then_spawned_test() {

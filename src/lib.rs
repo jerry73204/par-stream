@@ -173,6 +173,7 @@ pub mod prelude {
 
 mod common;
 mod config;
+mod macros;
 mod rt;
 mod stream;
 mod try_stream;
