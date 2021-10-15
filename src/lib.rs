@@ -24,7 +24,7 @@
 //!
 //! ## Parallel Processing
 //!
-//! - [`stream.par_map(config, fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
+//! - [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
 //! - [`stream.par_then(config, fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
 //! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered)
 //!   are unordered variances.
@@ -33,8 +33,10 @@
 //!
 //! ## Distributing Patterns
 //!
-//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates a copy of a stream.
-//! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) forks a stream into parts.
+//! - [`stream.broadcast(buf_size)`](ParStreamExt::broadcast) broadcasts copies of elements to multiple receivers.
+//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates copies the stream at any time.
+//!   Unlike [`broadcast()`](ParStreamExt::broadcast), receivers can start consuming at different points.
+//! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) sends each element to one of existing receivers.
 //! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
 //!
 //! ### Scatter-Gather Pattern
@@ -79,27 +81,32 @@
 //! # }
 //! ```
 //!
-//! ### Tee-Zip Pattern
+//! ### Broadcast-Join Pattern
 //!
 //! Another example is to construct a tee-zip pattern that clones each element to
 //! several concurrent workers, and pairs up outputs from each worker.
 //!
 //! ```rust
-//! # use futures::stream::StreamExt;
-//! # use par_stream::ParStreamExt;
+//! # use futures::prelude::*;
+//! # use par_stream::prelude::*;
+//! use par_stream::join;
 //!
 //! async fn main_async() {
-//!     let orig: Vec<_> = (0..1000).collect();
+//!     let data = vec![2, -1, 3, 5];
 //!
-//!     let rx1 = futures::stream::iter(orig.clone()).tee(1);
-//!     let rx2 = rx1.clone();
-//!     let rx3 = rx1.clone();
+//!     let mut guard = futures::stream::iter(data.clone()).broadcast(None);
+//!     let rx1 = guard.register();
+//!     let rx2 = guard.register();
+//!     let rx3 = guard.register();
+//!     guard.finish();
 //!
-//!     let fut1 = rx1.map(|val| val).collect();
-//!     let fut2 = rx2.map(|val| val * 2).collect();
-//!     let fut3 = rx3.map(|val| val * 3).collect();
+//!     let join = par_stream::join!(rx1.map(|v| v * 2), rx2.map(|v| v * 3), rx3.map(|v| v * 5));
 //!
-//!     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+//!     let collected: Vec<_> = join.collect().await;
+//!     assert_eq!(
+//!         collected,
+//!         vec![((4, 6), 10), ((-2, -3), -5), ((6, 9), 15), ((10, 16), 25)]
+//!     );
 //! }
 //!
 //! # #[cfg(feature = "runtime-async-std")]
@@ -135,18 +142,18 @@
 //! ```ignore
 //! stream
 //!     // mark items with index numbers
-//!     .wrapping_enumerate()
+//!     .enumerate()
 //!     // a series of unordered maps
-//!     .par_then_unordered(config, fn)
-//!     .par_then_unordered(config, fn)
-//!     .par_then_unordered(config, fn)
+//!     .par_then_unordered(config, map_fn)
+//!     .par_then_unordered(config, map_fn)
+//!     .par_then_unordered(config, map_fn)
 //!     // reorder the items back by indexes
 //!     .reorder_enumerated()
 //! ```
 //!
 //! ## Configure Number of Workers
 //!
-//! The `config` parameter of [`stream.par_map(config, fn)`](ParStreamExt::par_map) controls
+//! The `config` parameter of [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) controls
 //! the number of concurrent workers and internal buffer size. It accepts the following values.
 //!
 //! - `None`: The number of workers defaults to the number of system processors.
@@ -166,7 +173,6 @@ pub mod prelude {
 
 mod common;
 mod config;
-mod error;
 mod rt;
 mod stream;
 mod try_stream;

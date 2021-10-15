@@ -115,32 +115,102 @@ where
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
-    /// When a new batch is started, the `init_fn` creates an initial state. Then, the state
-    /// is passed to `batching_fn` as many times as it likes, indicated by the returned [`ControlFlow`](ControlFlow).
-    /// If `ControlFlow::Continue(state)` is returned, the new state is passed to the next round when
-    /// an incoming element arrives. If `ControlFlow::Break(output)` is returned, it produces the next
-    /// stream element immediately, and start a new batch for next incoming elements.
+    /// The function f([receiver](BatchingReceiver), [sender](BatchingSender)) takes one or more elements
+    /// by calling `receiver.recv().await`,
+    /// It returns `Some(item)` if an input element is available, otherwise it returns `None`.
+    /// Calling `sender.send(item).await` will produce an output element. It returns `Ok(())` when success,
+    /// or returns `Err(item)` if the output stream is closed.
     ///
-    /// When the input stream is depleted while a remaining batch is not finished yet, the `finalize_fn` is called to
-    /// finalize the remaining batch. If `finalize_fn` returns `Some(output)`, the output is produced as the
-    /// next stream element.
+    /// ```rust
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::mem;
+    ///
+    /// async fn main_async() {
+    ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
+    ///     let mut stream = futures::stream::iter(data).batching(|mut rx, mut tx| async move {
+    ///         let mut buffer = vec![];
+    ///         while let Some(value) = rx.recv().await {
+    ///             buffer.push(value);
+    ///             if value < 0 {
+    ///                 let result = tx.send(mem::take(&mut buffer)).await;
+    ///                 if result.is_err() {
+    ///                     return;
+    ///                 }
+    ///             }
+    ///         }
+    ///
+    ///         let _ = tx.send(mem::take(&mut buffer)).await;
+    ///     });
+    ///
+    ///     assert_eq!(stream.next().await, Some(vec![1, 2, -3]));
+    ///     assert_eq!(stream.next().await, Some(vec![4, 5, -6]));
+    ///     assert_eq!(stream.next().await, Some(vec![7, 8]));
+    ///     assert!(stream.next().await.is_none());
+    /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
+    /// ```
     fn batching<T, F, Fut>(self, f: F) -> Batching<T>
     where
         F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send;
 
-    /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes, and produces the next stream element.
+    /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
+    /// and produces the next stream element.
     ///
-    /// Input elements are scattered to one of the workers. Each worker runs in a loop.
-    /// For each round, it calls `init_fn` to create an initial state, passes the state to `batching_fn` to consume input as many elements as it likes,
-    /// and finally produces the output element. If `batching_fn` returns `ControlFlow::Continue(state)`, the worker updates the state and goes to
-    /// consume the next item. If `batching_fn` `ControlFlow::Break(output)`, it produces the output element and moves on to the next round.
+    /// ```rust
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::mem;
     ///
-    /// If the input stream is depleted while there are workers not finishing the batch yet,
-    /// the worker calls `finalize_fn` to finalize the batch. If it returns `Some(output)`, the output is produced as the next stream element.
+    /// async fn main_async() {
+    ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
+    ///     futures::stream::iter(data).batching(|mut rx, mut tx| async move {
+    ///         while let Some(value) = rx.recv().await {
+    ///             if value > 0 {
+    ///                 let result = tx.send(value).await;
+    ///                 if result.is_err() {
+    ///                     return;
+    ///                 }
+    ///             }
+    ///         }
+    ///     });
+    /// }
     ///
-    /// The outputs of workers can be arbitrary ordered. There is no ordering guarantee respecting to the input element.
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
+    /// ```
     fn par_batching_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParBatchingUnordered<T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
@@ -199,7 +269,47 @@ where
     where
         Self::Item: Clone;
 
-    /// Converts to a guard that can create receivers, each receiving cloned elements from this stream.
+    /// Converts to a [guard](BroadcastGuard) that can create receivers,
+    /// each receiving cloned elements from this stream.
+    ///
+    /// The generated receivers can produce elements only after the guard is dropped.
+    /// It ensures the receivers start receiving elements at the mean time.
+    ///
+    /// ```rust
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    ///
+    /// async fn main_async() {
+    ///     let mut guard = futures::stream::iter(0..).broadcast(None);
+    ///     let rx1 = guard.register();
+    ///     let rx2 = guard.register();
+    ///     guard.finish(); // drop the guard
+    ///
+    ///     let (ret1, ret2): (Vec<_>, Vec<_>) =
+    ///         futures::join!(rx1.take(100).collect(), rx2.take(100).collect());
+    ///     let expect: Vec<_> = (0..100).collect();
+    ///
+    ///     assert_eq!(ret1, expect);
+    ///     assert_eq!(ret2, expect);
+    /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
+    /// ```
     fn broadcast(self, buf_size: impl Into<Option<usize>>) -> BroadcastGuard<Self::Item>
     where
         Self::Item: Clone;
@@ -2612,6 +2722,7 @@ mod batching {
         )
     }
 
+    /// The sender type for batching function in [`batching()`](ParStreamExt::batching).
     #[derive(Debug)]
     pub struct BatchingSender<T> {
         is_closed: bool,
@@ -2620,6 +2731,7 @@ mod batching {
         output_tx: flume::Sender<T>,
     }
 
+    /// The receiver type for batching function in [`batching()`](ParStreamExt::batching).
     #[derive(Debug)]
     pub struct BatchingReceiver<T> {
         is_closed: bool,

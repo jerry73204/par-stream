@@ -142,7 +142,7 @@ where
         T: 'static + Send + Clone,
         E: 'static + Send + Clone;
 
-    /// Fallible parallel stream.
+    /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
     fn try_par_then<P, T, U, E, F, Fut>(self, config: P, f: F) -> TryParThen<U, E>
     where
         Self: Stream<Item = Result<T, E>>,
@@ -153,7 +153,7 @@ where
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send;
 
-    /// Fallible parallel stream with in-local thread initializer.
+    /// A fallible analogue to [par_then_init](crate::ParStreamExt::par_then_init).
     fn try_par_then_init<P, T, U, E, B, InitF, ThenF, Fut>(
         self,
         config: P,
@@ -171,6 +171,7 @@ where
         ThenF: 'static + FnMut(B, T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send;
 
+    /// A fallible analogue to [par_then_unordered](crate::ParStreamExt::par_then_unordered).
     fn try_par_then_unordered<P, T, U, E, F, Fut>(
         self,
         config: P,
@@ -185,8 +186,7 @@ where
         Fut: 'static + Future<Output = Result<U, E>> + Send,
         P: IntoParStreamParams;
 
-    /// An parallel stream analogous to [try_par_then_unordered](FallibleParStreamExt::try_par_then_unordered) with
-    /// in-local thread initializer
+    /// A fallible analogue to [par_then_init_unordered](crate::ParStreamExt::par_then_init_unordered).
     fn try_par_then_init_unordered<P, T, U, E, B, InitF, ThenF, Fut>(
         self,
         config: P,
@@ -204,7 +204,7 @@ where
         ThenF: 'static + FnMut(B, T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send;
 
-    /// Fallible parallel stream that runs blocking workers.
+    /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
     fn try_par_map<P, T, U, E, F, Func>(self, config: P, f: F) -> TryParMap<U, E>
     where
         Self: Stream<Item = Result<T, E>>,
@@ -215,7 +215,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send;
 
-    /// Fallible parallel stream that runs blocking workers with in-local thread initializer.
+    /// A fallible analogue to [par_map_init](crate::ParStreamExt::par_map_init).
     fn try_par_map_init<P, T, U, E, B, InitF, MapF, Func>(
         self,
         config: P,
@@ -233,8 +233,7 @@ where
         MapF: 'static + FnMut(B, T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send;
 
-    /// A parallel stream that analogous to [try_par_map](FallibleParStreamExt::try_par_map) without respecting
-    /// the order of input items.
+    /// A fallible analogue to [par_map_unordered](crate::ParStreamExt::par_map_unordered).
     fn try_par_map_unordered<P, T, U, E, F, Func>(
         self,
         config: P,
@@ -249,8 +248,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send;
 
-    /// A parallel stream that analogous to [try_par_map_unordered](FallibleParStreamExt::try_par_map_unordered) with
-    /// in-local thread initializer.
+    /// A fallible analogue to [par_map_init_unordered](crate::ParStreamExt::par_map_init_unordered).
     fn try_par_map_init_unordered<P, T, U, E, B, InitF, MapF, Func>(
         self,
         config: P,
@@ -279,7 +277,7 @@ where
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), E>> + Send;
 
-    /// Runs an fallible blocking task on each element of an stream in parallel.
+    /// A fallible analogue to [par_for_each_init](crate::ParStreamExt::par_for_each_init).
     fn try_par_for_each_init<P, T, E, B, InitF, MapF, Fut>(
         self,
         config: P,
@@ -296,6 +294,7 @@ where
         MapF: 'static + FnMut(B, T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), E>> + Send;
 
+    /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
     fn try_par_for_each_blocking<P, T, E, F, Func>(self, config: P, f: F) -> TryParForEach<E>
     where
         Self: Stream<Item = Result<T, E>>,
@@ -305,8 +304,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), E> + Send;
 
-    /// Creates a fallible parallel stream analogous to [try_par_for_each_blocking](FallibleParStreamExt::try_par_for_each_blocking)
-    /// with a in-local thread initializer.
+    /// A fallible analogue to [par_for_each_blocking_init](crate::ParStreamExt::par_for_each_blocking_init).
     fn try_par_for_each_blocking_init<P, T, E, B, InitF, MapF, Func>(
         self,
         config: P,
