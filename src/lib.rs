@@ -81,7 +81,7 @@
 //! # }
 //! ```
 //!
-//! ### Broadcast-Join Pattern
+//! ### Broadcast-Zip Pattern
 //!
 //! Another example is to construct a tee-zip pattern that clones each element to
 //! several concurrent workers, and pairs up outputs from each worker.
@@ -89,7 +89,6 @@
 //! ```rust
 //! # use futures::prelude::*;
 //! # use par_stream::prelude::*;
-//! use par_stream::join;
 //!
 //! async fn main_async() {
 //!     let data = vec![2, -1, 3, 5];
@@ -98,14 +97,17 @@
 //!     let rx1 = guard.register();
 //!     let rx2 = guard.register();
 //!     let rx3 = guard.register();
-//!     guard.finish();
+//!     guard.finish(); // the guard is dropped so that registered streams can start
 //!
-//!     let join = par_stream::join!(rx1.map(|v| v * 2), rx2.map(|v| v * 3), rx3.map(|v| v * 5));
+//!     let join = rx1
+//!         .map(|v| v * 2)
+//!         .zip(rx2.map(|v| v * 3))
+//!         .zip(rx3.map(|v| v * 5));
 //!
 //!     let collected: Vec<_> = join.collect().await;
 //!     assert_eq!(
 //!         collected,
-//!         vec![((4, 6), 10), ((-2, -3), -5), ((6, 9), 15), ((10, 16), 25)]
+//!         vec![((4, 6), 10), ((-2, -3), -5), ((6, 9), 15), ((10, 15), 25)]
 //!     );
 //! }
 //!
