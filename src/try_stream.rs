@@ -295,7 +295,11 @@ where
         Fut: 'static + Future<Output = Result<(), E>> + Send;
 
     /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
-    fn try_par_for_each_blocking<P, T, E, F, Func>(self, config: P, f: F) -> TryParForEach<E>
+    fn try_par_for_each_blocking<P, T, E, F, Func>(
+        self,
+        config: P,
+        f: F,
+    ) -> TryParForEachBlocking<E>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -310,7 +314,7 @@ where
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> TryParForEach<E>
+    ) -> TryParForEachBlocking<E>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1447,7 +1451,7 @@ where
             buf_size,
         } = config.into_par_stream_params();
         let (map_tx, map_rx) = flume::bounded(buf_size);
-        let (terminate_tx, _terminate_rx22) = broadcast::channel(1);
+        let (terminate_tx, _terminate_rx) = broadcast::channel(1);
 
         let map_fut = {
             let terminate_tx = terminate_tx.clone();
@@ -1539,7 +1543,11 @@ where
         self.try_par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_for_each_blocking<P, T, E, F, Func>(self, config: P, mut f: F) -> TryParForEach<E>
+    fn try_par_for_each_blocking<P, T, E, F, Func>(
+        self,
+        config: P,
+        mut f: F,
+    ) -> TryParForEachBlocking<E>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1548,10 +1556,87 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
-        self.try_par_for_each(config, move |item| {
-            let func = f(item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = flume::bounded(buf_size);
+        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+
+        let input_fut = {
+            let terminate_tx = terminate_tx.clone();
+
+            async move {
+                let mut stream = self.boxed();
+
+                loop {
+                    tokio::select! {
+                        item = stream.try_next() => {
+                            match item {
+                                Ok(Some(item)) => {
+                                    let fut = f(item);
+                                    if map_tx.send_async(fut).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(err) => {
+                                    let _ = terminate_tx.send(()); // shutdown workers
+                                    return Err(err); // output error
+                                }
+                            }
+                        }
+                        _ = terminate_rx.recv() => {
+                            break
+                        }
+                    }
+                }
+
+                Ok(())
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+                let terminate_tx = terminate_tx.clone();
+
+                rt::spawn_blocking(move || {
+                    loop {
+                        match map_rx.recv() {
+                            Ok(job) => {
+                                let result = job();
+                                if let Err(err) = result {
+                                    let _result = terminate_tx.send(()); // shutdown workers
+                                    return Err(err); // return error
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    Ok(())
+                })
+                .map(|result| result.unwrap())
+            })
+            .collect();
+
+        let output_fut = async move {
+            let (input_result, worker_results) =
+                futures::join!(input_fut, futures::future::join_all(worker_futs));
+
+            worker_results
+                .into_iter()
+                .fold(input_result, |folded, result| {
+                    // the order takes the latest error
+                    result.and(folded)
+                })
+        }
+        .boxed();
+
+        TryParForEachBlocking {
+            future: output_fut.boxed(),
+        }
     }
 
     fn try_par_for_each_blocking_init<P, T, E, B, InitF, MapF, Func>(
@@ -1559,7 +1644,7 @@ where
         config: P,
         mut init_f: InitF,
         mut f: MapF,
-    ) -> TryParForEach<E>
+    ) -> TryParForEachBlocking<E>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1571,11 +1656,7 @@ where
         Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
         let init = init_f();
-
-        self.try_par_for_each(config, move |item| {
-            let func = f(init.clone(), item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        self.try_par_for_each_blocking(config, move |item| f(init.clone(), item))
     }
 }
 
@@ -1761,6 +1842,30 @@ mod try_par_for_each {
     }
 
     impl<E> Future for TryParForEach<E> {
+        type Output = Result<(), E>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
+            Pin::new(&mut self.future).poll(cx)
+        }
+    }
+}
+
+// try_par_for_each
+
+pub use try_par_for_each_blocking::*;
+
+mod try_par_for_each_blocking {
+    use super::*;
+
+    /// A fallible stream combinator returned from [try_par_for_each()](FallibleParStreamExt::try_par_for_each) and its siblings.
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryParForEachBlocking<E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) future: BoxedFuture<Result<(), E>>,
+    }
+
+    impl<E> Future for TryParForEachBlocking<E> {
         type Output = Result<(), E>;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
@@ -2759,6 +2864,50 @@ mod tests {
                     .await;
 
             assert_eq!(result, Err(-3));
+        }
+    }
+
+    #[tokio::test]
+    async fn try_par_for_each_blocking_test() {
+        {
+            let result = futures::stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)])
+                .try_par_for_each_blocking(None, |_| || Result::<_, ()>::Ok(()))
+                .await;
+
+            assert_eq!(result, Ok(()));
+        }
+
+        {
+            let result = futures::stream::iter(0..)
+                .then(|val| async move {
+                    if val == 3 {
+                        Err(val)
+                    } else {
+                        Ok(val)
+                    }
+                })
+                .try_par_for_each_blocking(8, |_| || Ok(()))
+                .await;
+
+            assert_eq!(result, Err(3));
+        }
+
+        {
+            let result = futures::stream::iter(0..)
+                .map(Ok)
+                .try_par_for_each_blocking(None, |val| {
+                    move || {
+                        if val == 3 {
+                            std::thread::sleep(Duration::from_millis(100));
+                            Err(val)
+                        } else {
+                            Ok(())
+                        }
+                    }
+                })
+                .await;
+
+            assert_eq!(result, Err(3));
         }
     }
 

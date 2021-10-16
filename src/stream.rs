@@ -814,7 +814,7 @@ where;
         P: IntoParStreamParams;
 
     /// Runs an blocking task on each element of an stream in parallel.
-    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> ParForEach
+    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> ParForEachBlocking
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -827,7 +827,7 @@ where;
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> ParForEach
+    ) -> ParForEachBlocking
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -1684,13 +1684,47 @@ where
         }
     }
 
-    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> ParForEach
+    fn par_for_each<P, F, Fut>(self, config: P, mut f: F) -> ParForEach
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
         P: IntoParStreamParams,
     {
-        ParForEach::new(self, config, f)
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = flume::bounded(buf_size);
+
+        let map_fut = async move {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                if map_tx.send_async(fut).await.is_err() {
+                    break;
+                }
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+
+                let worker_fut = async move {
+                    while let Ok(fut) = map_rx.recv_async().await {
+                        fut.await;
+                    }
+                };
+                rt::spawn(worker_fut).map(|result| result.unwrap())
+            })
+            .collect();
+
+        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs))
+            .map(|_| ())
+            .boxed();
+
+        ParForEach { future: join_fut }
     }
 
     fn par_for_each_init<P, B, InitF, MapF, Fut>(
@@ -1707,27 +1741,57 @@ where
         P: IntoParStreamParams,
     {
         let init = init_f();
-        ParForEach::new(self, config, move |item| map_f(init.clone(), item))
+        self.par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
-    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> ParForEach
+    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> ParForEachBlocking
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
         P: IntoParStreamParams,
     {
-        self.par_for_each(config, move |item| {
-            let func = f(item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        let ParStreamParams {
+            num_workers,
+            buf_size,
+        } = config.into_par_stream_params();
+        let (map_tx, map_rx) = flume::bounded(buf_size);
+
+        let map_fut = async move {
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                let fut = f(item);
+                if map_tx.send_async(fut).await.is_err() {
+                    break;
+                }
+            }
+        };
+
+        let worker_futs: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let map_rx = map_rx.clone();
+                rt::spawn_blocking(move || {
+                    while let Ok(job) = map_rx.recv() {
+                        job();
+                    }
+                })
+                .map(|result| result.unwrap())
+            })
+            .collect();
+
+        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs))
+            .map(|_| ())
+            .boxed();
+
+        ParForEachBlocking { future: join_fut }
     }
 
     fn par_for_each_blocking_init<P, B, InitF, MapF, Func>(
         self,
         config: P,
         init_f: InitF,
-        mut f: MapF,
-    ) -> ParForEach
+        mut map_f: MapF,
+    ) -> ParForEachBlocking
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -1736,11 +1800,7 @@ where
         P: IntoParStreamParams,
     {
         let init = init_f();
-
-        self.par_for_each(config, move |item| {
-            let func = f(init.clone(), item);
-            rt::spawn_blocking(func).map(|result| result.unwrap())
-        })
+        self.par_for_each_blocking(config, move |item| map_f(init.clone(), item))
     }
 }
 
@@ -2629,7 +2689,7 @@ mod gather {
     }
 }
 
-// for each
+// par_for each
 
 pub use par_for_each::*;
 
@@ -2641,57 +2701,34 @@ mod par_for_each {
     #[derivative(Debug)]
     pub struct ParForEach {
         #[derivative(Debug = "ignore")]
-        future: BoxedFuture<()>,
-    }
-
-    impl ParForEach {
-        pub fn new<P, St, F, Fut>(stream: St, config: P, mut f: F) -> Self
-        where
-            St: 'static + Stream + Send,
-            St::Item: Send,
-            F: 'static + FnMut(St::Item) -> Fut + Send,
-            Fut: 'static + Future<Output = ()> + Send,
-            P: IntoParStreamParams,
-        {
-            let ParStreamParams {
-                num_workers,
-                buf_size,
-            } = config.into_par_stream_params();
-            let (map_tx, map_rx) = flume::bounded(buf_size);
-
-            let map_fut = async move {
-                let mut stream = stream.boxed();
-
-                while let Some(item) = stream.next().await {
-                    let fut = f(item);
-                    if map_tx.send_async(fut).await.is_err() {
-                        break;
-                    }
-                }
-            };
-
-            let worker_futs: Vec<_> = (0..num_workers)
-                .map(|_| {
-                    let map_rx = map_rx.clone();
-
-                    let worker_fut = async move {
-                        while let Ok(fut) = map_rx.recv_async().await {
-                            fut.await;
-                        }
-                    };
-                    rt::spawn(worker_fut).map(|result| result.unwrap())
-                })
-                .collect();
-
-            let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs))
-                .map(|_| ())
-                .boxed();
-
-            Self { future: join_fut }
-        }
+        pub(super) future: BoxedFuture<()>,
     }
 
     impl Future for ParForEach {
+        type Output = ();
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Pin::new(&mut self.future).poll(cx)
+        }
+    }
+}
+
+// par_for each_blocking
+
+pub use par_for_each_blocking::*;
+
+mod par_for_each_blocking {
+    use super::*;
+
+    /// A stream combinator returned from [par_for_each_blocking()](ParStreamExt::par_for_each_blocking) and its siblings.
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ParForEachBlocking {
+        #[derivative(Debug = "ignore")]
+        pub(super) future: BoxedFuture<()>,
+    }
+
+    impl Future for ParForEachBlocking {
         type Output = ();
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
