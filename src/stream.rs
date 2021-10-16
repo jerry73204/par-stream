@@ -1081,7 +1081,7 @@ where
             buf_size,
             ready,
             init_tx: Some(init_tx),
-            future: Arc::new(tokio::sync::Mutex::new(future)),
+            future: Arc::new(tokio::sync::Mutex::new(Some(future))),
             senders: Some(vec![]),
         }
     }
@@ -2160,7 +2160,7 @@ mod broadcast {
         pub(super) ready: Arc<AtomicBool>,
         pub(super) init_tx: Option<oneshot::Sender<Vec<flume::Sender<T>>>>,
         #[derivative(Debug = "ignore")]
-        pub(super) future: Arc<tokio::sync::Mutex<BoxedFuture<()>>>,
+        pub(super) future: Arc<tokio::sync::Mutex<Option<BoxedFuture<()>>>>,
         pub(super) senders: Option<Vec<flume::Sender<T>>>,
     }
 
@@ -2193,7 +2193,12 @@ mod broadcast {
                         "please call guard.finish() before consuming this stream"
                     );
 
-                    (&mut *future.lock().await).await;
+                    let future = &mut *future.lock().await;
+                    if let Some(future_) = future {
+                        future_.await;
+                        *future = None;
+                    }
+
                     None
                 }
                 .into_stream(),
