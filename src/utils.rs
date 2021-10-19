@@ -48,6 +48,26 @@ use crate::common::*;
 pub(crate) type BoxedFuture<T> = BoxFuture<'static, T>;
 pub(crate) type BoxedStream<T> = BoxStream<'static, T>;
 
+pub use tokio_mpsc_receiver_ext::*;
+
+mod tokio_mpsc_receiver_ext {
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    pub trait TokioMpscReceiverExt<T> {
+        fn into_stream(self) -> ReceiverStream<T>;
+    }
+
+    impl<T> TokioMpscReceiverExt<T> for mpsc::Receiver<T>
+    where
+        T: 'static + Send,
+    {
+        fn into_stream(self) -> ReceiverStream<T> {
+            ReceiverStream::new(self)
+        }
+    }
+}
+
 pub use flume_receiver_ext::*;
 
 mod flume_receiver_ext {

@@ -2,9 +2,9 @@ use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
     rt,
-    utils::{BoxedFuture, BoxedStream},
+    utils::{BoxedFuture, BoxedStream, TokioMpscReceiverExt},
 };
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 pub trait IndexedStreamExt
 where
@@ -224,11 +224,8 @@ where
     /// worker clones and passes each stream item to available receiver buffers. It can be used
     /// to _fork_ a stream into copies and pass them to concurrent workers.
     ///
-    /// The internal buffer size is determined by the `buf_size`. If `buf_size` is `None`,
-    /// the buffer size will be unbounded. A background worker is started and keeps
-    /// copying item to available receivers. The background worker halts when all receivers
-    /// are dropped.
-    ///
+    /// Each receiver maintains an internal buffer with `buf_size`. If one of the receiver buffer
+    /// is full, the stream will halt until the blocking buffer spare the space.
     ///
     /// ```rust
     /// use futures::prelude::*;
@@ -265,7 +262,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn tee(self, buf_size: impl Into<Option<usize>>) -> Tee<Self::Item>
+    fn tee(self, buf_size: usize) -> Tee<Self::Item>
     where
         Self::Item: Clone;
 
@@ -275,12 +272,15 @@ where
     /// The generated receivers can produce elements only after the guard is dropped.
     /// It ensures the receivers start receiving elements at the mean time.
     ///
+    /// Each receiver maintains an internal buffer with `buf_size`. If one of the receiver buffer
+    /// is full, the stream will halt until the blocking buffer spare the space.
+    ///
     /// ```rust
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let mut guard = futures::stream::iter(0..).broadcast(None);
+    ///     let mut guard = futures::stream::iter(0..).broadcast(2);
     ///     let rx1 = guard.register();
     ///     let rx2 = guard.register();
     ///     guard.finish(); // drop the guard
@@ -310,7 +310,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn broadcast(self, buf_size: impl Into<Option<usize>>) -> BroadcastGuard<Self::Item>
+    fn broadcast(self, buf_size: usize) -> BroadcastGuard<Self::Item>
     where
         Self::Item: Clone;
 
@@ -976,15 +976,12 @@ where
         ParBatchingUnordered { stream }
     }
 
-    fn tee(self, buf_size: impl Into<Option<usize>>) -> Tee<Self::Item>
+    fn tee(self, buf_size: usize) -> Tee<Self::Item>
     where
         Self::Item: Clone,
     {
         let buf_size = buf_size.into();
-        let (tx, rx) = match buf_size {
-            Some(buf_size) => flume::bounded(buf_size),
-            None => flume::unbounded(),
-        };
+        let (tx, rx) = mpsc::channel(buf_size);
         let sender_set = Arc::new(flurry::HashSet::new());
         let guard = sender_set.guard();
         sender_set.insert(ByAddress(Arc::new(tx)), &guard);
@@ -1002,7 +999,7 @@ where
                             let tx = tx.clone();
                             let item = item.clone();
                             async move {
-                                let result = tx.send_async(item).await;
+                                let result = tx.send(item).await;
                                 (result, tx)
                             }
                         })
@@ -1026,27 +1023,26 @@ where
                 }
             });
 
-            Arc::new(tokio::sync::Mutex::new(Some(future)))
+            Arc::new(Mutex::new(Some(future)))
         };
 
         Tee {
             future,
             sender_set: Arc::downgrade(&sender_set),
-            receiver: rx,
+            stream: rx.into_stream(),
             buf_size,
         }
     }
 
-    fn broadcast(self, buf_size: impl Into<Option<usize>>) -> BroadcastGuard<Self::Item>
+    fn broadcast(self, buf_size: usize) -> BroadcastGuard<Self::Item>
     where
         Self::Item: Clone,
     {
-        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
         let (init_tx, init_rx) = oneshot::channel();
         let ready = Arc::new(AtomicBool::new(false));
 
         let future = rt::spawn(async move {
-            let mut senders: Vec<flume::Sender<_>> = match init_rx.await {
+            let mut senders: Vec<mpsc::Sender<_>> = match init_rx.await {
                 Ok(senders) => senders,
                 Err(_) => return,
             };
@@ -1057,7 +1053,7 @@ where
                 let sending_futures = senders.into_iter().map(move |tx| {
                     let item = item.clone();
                     async move {
-                        tx.send_async(item).await.ok()?;
+                        tx.send(item).await.ok()?;
                         Some(tx)
                     }
                 });
@@ -1081,7 +1077,7 @@ where
             buf_size,
             ready,
             init_tx: Some(init_tx),
-            future: Arc::new(tokio::sync::Mutex::new(Some(future))),
+            future: Arc::new(Mutex::new(Some(future))),
             senders: Some(vec![]),
         }
     }
@@ -1679,7 +1675,7 @@ where
         });
 
         Scatter {
-            future: Arc::new(tokio::sync::Mutex::new(Some(future))),
+            future: Arc::new(Mutex::new(Some(future))),
             receiver: rx,
         }
     }
@@ -2091,7 +2087,7 @@ mod scatter {
     /// A stream combinator returned from [scatter()](ParStreamExt::scatter).
     #[derive(Debug)]
     pub struct Scatter<T> {
-        pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
         pub(super) receiver: flume::Receiver<T>,
     }
 
@@ -2137,14 +2133,15 @@ pub use tee::*;
 
 mod tee {
     use super::*;
+    use tokio_stream::wrappers::ReceiverStream;
 
     /// A stream combinator returned from [tee()](ParStreamExt::tee).
     #[derive(Debug)]
     pub struct Tee<T> {
-        pub(super) buf_size: Option<usize>,
-        pub(super) future: Arc<tokio::sync::Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<T>>>>>,
-        pub(super) receiver: flume::Receiver<T>,
+        pub(super) buf_size: usize,
+        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
+        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<mpsc::Sender<T>>>>>,
+        pub(super) stream: ReceiverStream<T>,
     }
 
     impl<T> Clone for Tee<T>
@@ -2153,10 +2150,7 @@ mod tee {
     {
         fn clone(&self) -> Self {
             let buf_size = self.buf_size;
-            let (tx, rx) = match buf_size {
-                Some(buf_size) => flume::bounded(buf_size),
-                None => flume::unbounded(),
-            };
+            let (tx, rx) = mpsc::channel(buf_size);
             let sender_set = self.sender_set.clone();
 
             if let Some(sender_set) = sender_set.upgrade() {
@@ -2167,7 +2161,7 @@ mod tee {
             Self {
                 future: self.future.clone(),
                 sender_set,
-                receiver: rx,
+                stream: rx.into_stream(),
                 buf_size,
             }
         }
@@ -2176,7 +2170,7 @@ mod tee {
     impl<T> Stream for Tee<T> {
         type Item = T;
 
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             if let Ok(mut future_opt) = self.future.try_lock() {
                 if let Some(future) = &mut *future_opt {
                     if Pin::new(future).poll(cx).is_ready() {
@@ -2185,12 +2179,12 @@ mod tee {
                 }
             }
 
-            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
-                Ready(Ok(output)) => {
+            match Pin::new(&mut self.stream).poll_next(cx) {
+                Ready(Some(output)) => {
                     cx.waker().clone().wake();
                     Ready(Some(output))
                 }
-                Ready(Err(_)) => Ready(None),
+                Ready(None) => Ready(None),
                 Pending => {
                     cx.waker().clone().wake();
                     Pending
@@ -2218,10 +2212,10 @@ mod broadcast {
     pub struct BroadcastGuard<T> {
         pub(super) buf_size: usize,
         pub(super) ready: Arc<AtomicBool>,
-        pub(super) init_tx: Option<oneshot::Sender<Vec<flume::Sender<T>>>>,
+        pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
         #[derivative(Debug = "ignore")]
-        pub(super) future: Arc<tokio::sync::Mutex<Option<BoxedFuture<()>>>>,
-        pub(super) senders: Option<Vec<flume::Sender<T>>>,
+        pub(super) future: Arc<Mutex<Option<BoxedFuture<()>>>>,
+        pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
     }
 
     impl<T> BroadcastGuard<T>
@@ -2239,7 +2233,7 @@ mod broadcast {
             } = *self;
             let senders = senders.as_mut().unwrap();
 
-            let (tx, rx) = flume::bounded(buf_size);
+            let (tx, rx) = mpsc::channel(buf_size);
             senders.push(tx);
 
             let future = future.clone();
@@ -2985,17 +2979,20 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_test() {
-        let mut guard = futures::stream::iter(0..).broadcast(None);
+        let mut guard = futures::stream::iter(0..).broadcast(2);
         let rx1 = guard.register();
         let rx2 = guard.register();
         guard.finish();
 
         let (ret1, ret2): (Vec<_>, Vec<_>) =
             futures::join!(rx1.take(100).collect(), rx2.take(100).collect());
-        let expect: Vec<_> = (0..100).collect();
 
-        assert_eq!(ret1, expect);
-        assert_eq!(ret2, expect);
+        izip!(ret1, 0..100).for_each(|(lhs, rhs)| {
+            assert_eq!(lhs, rhs);
+        });
+        izip!(ret2, 0..100).for_each(|(lhs, rhs)| {
+            assert_eq!(lhs, rhs);
+        });
     }
 
     #[tokio::test]

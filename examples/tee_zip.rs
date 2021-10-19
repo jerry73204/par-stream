@@ -3,7 +3,7 @@ use itertools::izip;
 use par_stream::ParStreamExt;
 
 async fn main_async() {
-    let rx1 = futures::stream::iter(1isize..=10).tee(None);
+    let rx1 = futures::stream::iter(1isize..=10).tee(2);
     let rx2 = rx1.clone();
 
     let values: Vec<_> = rx1

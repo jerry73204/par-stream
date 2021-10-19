@@ -93,7 +93,7 @@
 //! async fn main_async() {
 //!     let data = vec![2, -1, 3, 5];
 //!
-//!     let mut guard = futures::stream::iter(data.clone()).broadcast(None);
+//!     let mut guard = futures::stream::iter(data.clone()).broadcast(3);
 //!     let rx1 = guard.register();
 //!     let rx2 = guard.register();
 //!     let rx3 = guard.register();
