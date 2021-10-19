@@ -83,7 +83,7 @@
 //!
 //! ### Broadcast-Zip Pattern
 //!
-//! Another example is to construct a tee-zip pattern that clones each element to
+//! Another example is to construct a broadcast-zip pattern that clones each element to
 //! several concurrent workers, and pairs up outputs from each worker.
 //!
 //! ```rust
