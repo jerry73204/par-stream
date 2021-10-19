@@ -37,8 +37,10 @@ use par_stream::prelude::*;
 
 ## Distributing Patterns
 
-- `stream.tee(buf_size)` creates a copy of a stream.
-- `stream.scatter(buf_size)` forks a stream into parts.
+- `stream.broadcast(buf_size)` broadcasts copies of elements to multiple receivers.
+- `stream.tee(buf_size)` creates copies the stream at any time.
+  Unlike [`broadcast()`, receivers can start consuming at any time.
+- `stream.scatter(buf_size)` sends each element to one of existing receivers.
 - `gather(buf_size, streams)` merges multiple streams into one stream.
 
 ### Scatter-Gather Pattern
@@ -62,25 +64,30 @@ async fn main_async() {
 }
 ```
 
-### Tee-Zip Pattern
+### Broadcast-Zip Pattern
 
 Another example is to construct a tee-zip pattern that clones each element to
 several concurrent workers, and pairs up outputs from each worker.
 
 ```rust
-async fn main_async() {
-    let orig: Vec<_> = (0..1000).collect();
+let data = vec![2, -1, 3, 5];
 
-    let rx1 = futures::stream::iter(orig.clone()).tee(1);
-    let rx2 = rx1.clone();
-    let rx3 = rx1.clone();
+let mut guard = futures::stream::iter(data.clone()).broadcast(3);
+let rx1 = guard.register();
+let rx2 = guard.register();
+let rx3 = guard.register();
+guard.finish(); // the guard is dropped so that registered streams can start
 
-    let fut1 = rx1.map(|val| val).collect();
-    let fut2 = rx2.map(|val| val * 2).collect();
-    let fut3 = rx3.map(|val| val * 3).collect();
+let join = rx1
+    .map(|v| v * 2)
+    .zip(rx2.map(|v| v * 3))
+    .zip(rx3.map(|v| v * 5));
 
-    let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
-}
+let collected: Vec<_> = join.collect().await;
+assert_eq!(
+    collected,
+    vec![((4, 6), 10), ((-2, -3), -5), ((6, 9), 15), ((10, 15), 25)]
+);
 ```
 
 ## Item Ordering
@@ -121,7 +128,7 @@ If the buffer size is not specified, the default is the double of number of work
 
 ## Example
 
-Please visit the [example](example) directory to see usages of the crate.
+Please visit the [examples](examples) directory to explore more examples.
 
 ## License
 
