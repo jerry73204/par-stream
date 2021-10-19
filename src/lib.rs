@@ -35,7 +35,7 @@
 //!
 //! - [`stream.broadcast(buf_size)`](ParStreamExt::broadcast) broadcasts copies of elements to multiple receivers.
 //! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates copies the stream at any time.
-//!   Unlike [`broadcast()`](ParStreamExt::broadcast), receivers can start consuming at different points.
+//!   Unlike [`broadcast()`](ParStreamExt::broadcast), receivers can start consuming at any time.
 //! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) sends each element to one of existing receivers.
 //! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
 //!

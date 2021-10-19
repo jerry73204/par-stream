@@ -7,6 +7,7 @@ use crate::{
 };
 use tokio::sync::{broadcast, Mutex};
 
+/// An extension trait that controls ordering of items of fallible streams.
 pub trait FallibleIndexedStreamExt
 where
     Self: TryStream,
@@ -75,7 +76,7 @@ where
     }
 }
 
-/// An extension trait for streams providing fallible combinators for parallel processing.
+/// An extension trait that provides fallible combinators for parallel processing on streams.
 pub trait FallibleParStreamExt
 where
     Self: 'static + Send + TryStream + FallibleIndexedStreamExt,
@@ -2449,6 +2450,7 @@ pub use try_then_spawned::*;
 mod try_then_spawned {
     use super::*;
 
+    /// A stream combinator returned from [try_then_spawned()](FallibleParStreamExt::try_then_spawned).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryThenSpawned<T, E> {
@@ -2472,6 +2474,7 @@ pub use try_map_spawned::*;
 mod try_map_spawned {
     use super::*;
 
+    /// A stream combinator returned from [try_map_spawned()](FallibleParStreamExt::try_map_spawned).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryMapSpawned<T, E> {

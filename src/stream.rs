@@ -6,6 +6,7 @@ use crate::{
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
+/// An extension trait that controls ordering of stream items.
 pub trait IndexedStreamExt
 where
     Self: Stream,
@@ -94,7 +95,7 @@ where {
     }
 }
 
-/// An extension trait for streams providing combinators for parallel processing.
+/// An extension trait that provides parallel processing combinators on streams.
 pub trait ParStreamExt
 where
     Self: 'static + Send + Stream + IndexedStreamExt,
@@ -2776,6 +2777,7 @@ mod batching {
         output_rx: flume::Receiver<T>,
     }
 
+    /// The stream type that wraps over [BatchingReceiver].
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct BatchingReceiverStream<T> {
@@ -2857,6 +2859,7 @@ mod batching {
         }
     }
 
+    /// A stream combinator returned from [batching()](ParStreamExt::batching).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct Batching<T> {
@@ -2880,6 +2883,7 @@ pub use par_batching_unordered::*;
 mod par_batching_unordered {
     use super::*;
 
+    /// A stream combinator returned from [par_batching_unordered()](ParStreamExt::par_batching_unordered).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ParBatchingUnordered<T> {
@@ -2903,6 +2907,7 @@ pub use then_spawned::*;
 mod then_spawned {
     use super::*;
 
+    /// A stream combinator returned from [then_spawned()](ParStreamExt::then_spawned).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct ThenSpawned<T> {
@@ -2926,6 +2931,7 @@ pub use map_spawned::*;
 mod map_spawned {
     use super::*;
 
+    /// A stream combinator returned from [map_spawned()](ParStreamExt::map_spawned).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct MapSpawned<T> {
