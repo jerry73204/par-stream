@@ -1801,6 +1801,165 @@ where
     }
 }
 
+// sync
+
+pub use sync::*;
+
+mod sync {
+    use super::*;
+    use std::{cmp::Reverse, collections::BinaryHeap};
+
+    #[derive(Derivative)]
+    #[derivative(PartialEq, Eq, PartialOrd, Ord)]
+    struct KV<K, V> {
+        pub key: K,
+        pub index: usize,
+        #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
+        pub value: V,
+    }
+
+    pub fn sync_by_key<I, F, K, S>(
+        buf_size: impl Into<Option<usize>>,
+        key_fn: F,
+        streams: I,
+    ) -> Sync<S::Item>
+    where
+        I: IntoIterator<Item = S>,
+        S: 'static + Stream + Send,
+        S::Item: 'static + Send,
+        F: 'static + Fn(&S::Item) -> K + Send,
+        K: 'static + Clone + Ord + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+
+        let streams: Vec<_> = streams
+            .into_iter()
+            .enumerate()
+            .map(|(index, stream)| stream.map(move |item| (index, item)).boxed())
+            .collect();
+        let num_streams = streams.len();
+
+        match num_streams {
+            0 => {
+                return Sync {
+                    stream: futures::stream::empty().boxed(),
+                };
+            }
+            1 => {
+                return Sync {
+                    stream: streams.into_iter().next().unwrap().map(Ok).boxed(),
+                };
+            }
+            _ => {}
+        }
+
+        let mut select_stream = futures::stream::select_all(streams);
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
+
+        let input_future = async move {
+            while let Some((index, item)) = select_stream.next().await {
+                let key = key_fn(&item);
+                if input_tx.send_async((index, key, item)).await.is_err() {
+                    break;
+                }
+            }
+        };
+
+        let sync_future = rt::spawn_blocking(move || {
+            let mut heap: BinaryHeap<Reverse<KV<K, S::Item>>> = BinaryHeap::new();
+            let mut min_items: Vec<Option<K>> = vec![None; num_streams];
+            let mut threshold: Option<K>;
+
+            'worker: loop {
+                'input: while let Ok((index, key, item)) = input_rx.recv() {
+                    // update min item for that stream
+                    {
+                        let prev = &mut min_items[index];
+                        match prev {
+                            Some(prev) if *prev <= key => {
+                                *prev = key.clone();
+                            }
+                            Some(_) => {
+                                let ok = output_tx.send(Err((index, item))).is_ok();
+                                if !ok {
+                                    break 'worker;
+                                }
+                                continue 'input;
+                            }
+                            None => *prev = Some(key.clone()),
+                        }
+                    }
+
+                    // save item
+                    heap.push(Reverse(KV {
+                        index,
+                        key,
+                        value: item,
+                    }));
+
+                    // update global threshold
+                    threshold = min_items.iter().min().unwrap().clone();
+
+                    // pop items below threshold
+                    if let Some(threshold) = &threshold {
+                        'output: while let Some(Reverse(KV { key, .. })) = heap.peek() {
+                            if key < threshold {
+                                let KV { value, index, .. } = heap.pop().unwrap().0;
+                                let ok = output_tx.send(Ok((index, value))).is_ok();
+                                if !ok {
+                                    break 'worker;
+                                }
+                            } else {
+                                break 'output;
+                            }
+                        }
+                    }
+                }
+
+                // send remaining items
+                for Reverse(KV { index, value, .. }) in heap {
+                    let ok = output_tx.send(Ok((index, value))).is_ok();
+                    if !ok {
+                        break 'worker;
+                    }
+                }
+
+                break;
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let join_future = futures::future::join(input_future, sync_future);
+
+        let stream = futures::stream::select(
+            join_future.into_stream().map(|_| None),
+            output_rx.into_stream().map(|item| Some(item)),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        Sync { stream }
+    }
+
+    /// A stream combinator returned from [unfold()](super::unfold())
+    /// or [unfold_blocking()](super::unfold_blocking()).
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct Sync<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<Result<(usize, T), (usize, T)>>,
+    }
+
+    impl<T> Stream for Sync<T> {
+        type Item = Result<(usize, T), (usize, T)>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // unfold
 
 pub use unfold::*;
@@ -3359,5 +3518,50 @@ mod tests {
 
         assert_eq!(counts.len(), 4);
         assert!((0..4).all(|worker_index| counts[&worker_index] == (worker_index + 1) * 100));
+    }
+
+    #[tokio::test]
+    async fn sync_test() {
+        {
+            let stream1 = futures::stream::iter([1, 3, 5, 7]);
+            let stream2 = futures::stream::iter([2, 4, 6, 8]);
+
+            let collected: Vec<_> = super::sync_by_key(None, |&val| val, [stream1, stream2])
+                .collect()
+                .await;
+
+            assert_eq!(
+                collected,
+                [
+                    Ok((0, 1)),
+                    Ok((1, 2)),
+                    Ok((0, 3)),
+                    Ok((1, 4)),
+                    Ok((0, 5)),
+                    Ok((1, 6)),
+                    Ok((0, 7)),
+                    Ok((1, 8)),
+                ]
+            );
+        }
+
+        {
+            let stream1 = futures::stream::iter([1, 2, 3]);
+            let stream2 = futures::stream::iter([2, 1, 3]);
+
+            let (synced, leaked): (Vec<_>, Vec<_>) =
+                super::sync_by_key(None, |&val| val, [stream1, stream2])
+                    .map(|result| match result {
+                        Ok(item) => (Some(item), None),
+                        Err(item) => (None, Some(item)),
+                    })
+                    .unzip()
+                    .await;
+            let synced: Vec<_> = synced.into_iter().flatten().collect();
+            let leaked: Vec<_> = leaked.into_iter().flatten().collect();
+
+            assert_eq!(synced, [(0, 1), (0, 2), (1, 2), (0, 3), (1, 3)]);
+            assert_eq!(leaked, [(1, 1)]);
+        }
     }
 }
