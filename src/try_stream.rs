@@ -1661,6 +1661,187 @@ where
     }
 }
 
+// try_sync
+
+pub use try_sync::*;
+
+mod try_sync {
+    use super::*;
+    use std::{cmp::Reverse, collections::BinaryHeap};
+
+    #[derive(Derivative)]
+    #[derivative(PartialEq, Eq, PartialOrd, Ord)]
+    struct KV<K, V> {
+        pub key: K,
+        pub index: usize,
+        #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
+        pub value: V,
+    }
+
+    pub fn try_sync_by_key<I, F, K, T, E, S>(
+        buf_size: impl Into<Option<usize>>,
+        key_fn: F,
+        streams: I,
+    ) -> TrySync<T, E>
+    where
+        I: IntoIterator<Item = S>,
+        S: 'static + Stream<Item = Result<T, E>> + Send,
+        T: 'static + Send,
+        E: 'static + Send,
+        F: 'static + Fn(&T) -> K + Send,
+        K: 'static + Clone + Ord + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+
+        let streams: Vec<_> = streams
+            .into_iter()
+            .enumerate()
+            .map(|(index, stream)| stream.map_ok(move |item| (index, item)).boxed())
+            .collect();
+        let num_streams = streams.len();
+
+        match num_streams {
+            0 => {
+                return TrySync {
+                    stream: futures::stream::empty().boxed(),
+                };
+            }
+            1 => {
+                return TrySync {
+                    stream: streams
+                        .into_iter()
+                        .next()
+                        .unwrap()
+                        .and_then(|item| async move { Ok(Ok(item)) })
+                        .boxed(),
+                };
+            }
+            _ => {}
+        }
+
+        let mut select_stream = futures::stream::select_all(streams);
+        let (input_tx, input_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = flume::bounded(buf_size);
+
+        let input_future = async move {
+            while let Some(result) = select_stream.next().await {
+                match result {
+                    Ok((index, item)) => {
+                        let key = key_fn(&item);
+                        if input_tx.send_async(Ok((index, key, item))).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(err) => {
+                        let _ = input_tx.send_async(Err(err)).await;
+                        break;
+                    }
+                }
+            }
+        };
+
+        let sync_future = rt::spawn_blocking(move || {
+            let mut heap: BinaryHeap<Reverse<KV<K, T>>> = BinaryHeap::new();
+            let mut min_items: Vec<Option<K>> = vec![None; num_streams];
+            let mut threshold: Option<K>;
+
+            'worker: loop {
+                'input: while let Ok(result) = input_rx.recv() {
+                    let (index, key, item) = match result {
+                        Ok(tuple) => tuple,
+                        Err(err) => {
+                            let _ = output_tx.send(Err(err));
+                            break 'worker;
+                        }
+                    };
+
+                    // update min item for that stream
+                    {
+                        let prev = &mut min_items[index];
+                        match prev {
+                            Some(prev) if *prev <= key => {
+                                *prev = key.clone();
+                            }
+                            Some(_) => {
+                                let ok = output_tx.send(Ok(Err((index, item)))).is_ok();
+                                if !ok {
+                                    break 'worker;
+                                }
+                                continue 'input;
+                            }
+                            None => *prev = Some(key.clone()),
+                        }
+                    }
+
+                    // save item
+                    heap.push(Reverse(KV {
+                        index,
+                        key,
+                        value: item,
+                    }));
+
+                    // update global threshold
+                    threshold = min_items.iter().min().unwrap().clone();
+
+                    // pop items below threshold
+                    if let Some(threshold) = &threshold {
+                        'output: while let Some(Reverse(KV { key, .. })) = heap.peek() {
+                            if key < threshold {
+                                let KV { value, index, .. } = heap.pop().unwrap().0;
+                                let ok = output_tx.send(Ok(Ok((index, value)))).is_ok();
+                                if !ok {
+                                    break 'worker;
+                                }
+                            } else {
+                                break 'output;
+                            }
+                        }
+                    }
+                }
+
+                // send remaining items
+                for Reverse(KV { index, value, .. }) in heap {
+                    let ok = output_tx.send(Ok(Ok((index, value)))).is_ok();
+                    if !ok {
+                        break 'worker;
+                    }
+                }
+
+                break;
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let join_future = futures::future::join(input_future, sync_future);
+
+        let stream = futures::stream::select(
+            join_future.into_stream().map(|_| None),
+            output_rx.into_stream().map(|item| Some(item)),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        TrySync { stream }
+    }
+
+    /// A stream combinator returned from [unfold()](super::unfold())
+    /// or [unfold_blocking()](super::unfold_blocking()).
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TrySync<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<Result<Result<(usize, T), (usize, T)>, E>>,
+    }
+
+    impl<T, E> Stream for TrySync<T, E> {
+        type Item = Result<Result<(usize, T), (usize, T)>, E>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // try_tee
 
 pub use try_tee::*;
@@ -3004,6 +3185,44 @@ mod tests {
                 },
             );
             assert!(is_fused_at_error);
+        }
+    }
+
+    #[tokio::test]
+    async fn try_sync_test() {
+        {
+            let stream1 = futures::stream::iter(vec![Ok(3), Ok(1), Ok(5), Ok(7)]);
+            let stream2 = futures::stream::iter(vec![Ok(2), Ok(4), Ok(6), Err("error")]);
+
+            let mut stream = super::try_sync_by_key(None, |&val| val, [stream1, stream2]);
+
+            let mut prev = None;
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(Ok((index, value))) => {
+                        if value & 1 == 1 {
+                            assert_eq!(index, 0);
+                        } else {
+                            assert_eq!(index, 1);
+                        }
+
+                        if let Some(prev) = prev {
+                            assert!(prev < value);
+                        }
+                        prev = Some(value);
+                    }
+                    Ok(Err((index, value))) => {
+                        assert_eq!(index, 0);
+                        assert_eq!(value, 1);
+                    }
+                    Err(err) => {
+                        assert_eq!(err, "error");
+                        break;
+                    }
+                }
+            }
+
+            assert_eq!(stream.next().await, None);
         }
     }
 }
