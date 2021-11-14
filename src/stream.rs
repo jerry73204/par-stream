@@ -1818,6 +1818,15 @@ mod sync {
         pub value: V,
     }
 
+    /// Synchronize streams by pairing up keys of each stream item.
+    ///
+    /// The `key_fn` constructs the key for each item.
+    /// The input items are grouped by their keys in the interal buffer until
+    /// all items with the key arrives. The finished items are yielded in type
+    /// `Ok((stream_index, item))` in monotonic manner.
+    ///
+    /// If any one of the `streams` generates a non-monotonic item. The item is
+    /// yielded as `Err((stream_index, item))` immediately.
     pub fn sync_by_key<I, F, K, S>(
         buf_size: impl Into<Option<usize>>,
         key_fn: F,
@@ -1942,8 +1951,7 @@ mod sync {
         Sync { stream }
     }
 
-    /// A stream combinator returned from [unfold()](super::unfold())
-    /// or [unfold_blocking()](super::unfold_blocking()).
+    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct Sync<T> {

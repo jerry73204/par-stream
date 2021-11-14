@@ -33,11 +33,15 @@
 //!
 //! ## Distributing Patterns
 //!
-//! - [`stream.broadcast(buf_size)`](ParStreamExt::broadcast) broadcasts copies of elements to multiple receivers.
-//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates copies the stream at any time.
-//!   Unlike [`broadcast()`](ParStreamExt::broadcast), receivers can start consuming at any time.
+//! - [`stream.broadcast(buf_size)`](ParStreamExt::broadcast) broadcasts element copies to multiple receivers.
+//!   Each receiver are guaranteed to retrieve the same set of items.
+//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates receivers to recieve copied elements.
+//!   Unlike [`stream.broadcast(buf_size)`](ParStreamExt::broadcast), it can create new receivers after
+//!   existing receivers start consuming items. Receivers created lately may miss some of the elements.
 //! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) sends each element to one of existing receivers.
 //! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
+//! - [`sync_by_key(buf_size, key_fn, streams)`](sync_by_key) synchronizes multiple streams by pairing up
+//!   the key of each item from input streams.
 //!
 //! ### Scatter-Gather Pattern
 //!

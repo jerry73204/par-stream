@@ -1678,6 +1678,18 @@ mod try_sync {
         pub value: V,
     }
 
+    /// Synchronize streams by pairing up keys of each stream item. It is fallible counterpart of [sync_by_key](crate::sync_by_key).
+    ///
+    /// The `key_fn` constructs the key for each item.
+    /// The input items are grouped by their keys in the interal buffer until
+    /// all items with the key arrives. The finished items are yielded in type
+    /// `Ok(Ok((stream_index, item)))` in monotonic manner.
+    ///
+    /// If any one of the `streams` generates a non-monotonic item. The item is
+    /// yielded as `Ok(Err((stream_index, item)))` immediately.
+    ///
+    /// When an error is receiver from one of the `streams`. The returned stream
+    /// yields `Err(err)` and no longer produce future items.
     pub fn try_sync_by_key<I, F, K, T, E, S>(
         buf_size: impl Into<Option<usize>>,
         key_fn: F,
@@ -1824,8 +1836,7 @@ mod try_sync {
         TrySync { stream }
     }
 
-    /// A stream combinator returned from [unfold()](super::unfold())
-    /// or [unfold_blocking()](super::unfold_blocking()).
+    /// A stream combinator returned from [try_sync_by_key()](super::try_sync_by_key()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TrySync<T, E> {
