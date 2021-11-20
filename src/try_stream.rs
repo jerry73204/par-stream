@@ -81,6 +81,21 @@ pub trait FallibleParStreamExt
 where
     Self: 'static + Send + TryStream + FallibleIndexedStreamExt,
 {
+    fn try_scan_spawned<B, T, U, E, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        init: B,
+        map_fn: F,
+    ) -> TryScanSpawned<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        B: 'static + Send,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: Future<Output = Result<Option<(B, U)>, E>> + Send;
+
     /// A fallible analogue to [then_spawned](crate::ParStreamExt::then_spawned).
     fn try_then_spawned<T, U, E, F, Fut>(
         self,
@@ -331,6 +346,63 @@ impl<S> FallibleParStreamExt for S
 where
     S: 'static + Send + TryStream + FallibleIndexedStreamExt,
 {
+    fn try_scan_spawned<B, T, U, E, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        init: B,
+        mut map_fn: F,
+    ) -> TryScanSpawned<U, E>
+    where
+        Self: Stream<Item = Result<T, E>>,
+        B: 'static + Send,
+        T: 'static + Send,
+        U: 'static + Send,
+        E: 'static + Send,
+        F: 'static + FnMut(B, T) -> Fut + Send,
+        Fut: Future<Output = Result<Option<(B, U)>, E>> + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or(2);
+        let (tx, rx) = flume::bounded(buf_size);
+
+        let future = rt::spawn(async move {
+            let mut state = init;
+            let mut stream = self.boxed();
+
+            loop {
+                match stream.next().await {
+                    Some(Ok(item)) => match map_fn(state, item).await {
+                        Ok(Some((new_state, output))) => {
+                            state = new_state;
+                            if tx.send_async(Ok(output)).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(None) => break,
+                        Err(err) => {
+                            let _ = tx.send_async(Err(err)).await;
+                            break;
+                        }
+                    },
+                    Some(Err(err)) => {
+                        let _ = tx.send_async(Err(err)).await;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let stream = futures::stream::select(
+            future.into_stream().map(|()| None),
+            rx.into_stream().map(Some),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        TryScanSpawned { stream }
+    }
+
     fn try_then_spawned<T, U, E, F, Fut>(
         self,
         buf_size: impl Into<Option<usize>>,
@@ -1661,6 +1733,30 @@ where
     }
 }
 
+// scan_spawned
+
+pub use try_scan_spawned::*;
+
+mod try_scan_spawned {
+    use super::*;
+
+    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct TryScanSpawned<T, E> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<Result<T, E>>,
+    }
+
+    impl<T, E> Stream for TryScanSpawned<T, E> {
+        type Item = Result<T, E>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
+    }
+}
+
 // try_sync
 
 pub use try_sync::*;
@@ -2689,6 +2785,67 @@ mod try_map_spawned {
 mod tests {
     use super::*;
     use rand::prelude::*;
+
+    #[tokio::test]
+    async fn try_scan_spawned_test() {
+        {
+            let values: Result<Vec<_>, ()> = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
+                .try_scan_spawned(None, 0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    Ok(Some((new_acc, new_acc)))
+                })
+                .try_collect()
+                .await;
+
+            assert_eq!(values, Ok(vec![3, 4, 8, 9]));
+        }
+
+        {
+            let mut stream = futures::stream::iter([Ok(3), Ok(1), Err(()), Ok(1)])
+                .try_scan_spawned(None, 0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    Ok(Some((new_acc, new_acc)))
+                });
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, Some(Err(())));
+            assert_eq!(stream.next().await, None);
+        }
+
+        {
+            let mut stream = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                .try_scan_spawned(None, 0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    if new_acc != 8 {
+                        Ok(Some((new_acc, new_acc)))
+                    } else {
+                        Err(())
+                    }
+                });
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, Some(Err(())));
+            assert_eq!(stream.next().await, None);
+        }
+
+        {
+            let mut stream = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                .try_scan_spawned(None, 0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    if new_acc != 8 {
+                        Ok(Some((new_acc, new_acc)))
+                    } else {
+                        Ok(None)
+                    }
+                });
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, None);
+        }
+    }
 
     #[tokio::test]
     async fn try_then_spawned_test() {

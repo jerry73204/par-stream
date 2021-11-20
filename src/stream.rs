@@ -101,6 +101,18 @@ where
     Self: 'static + Send + Stream + IndexedStreamExt,
     Self::Item: 'static + Send,
 {
+    fn scan_spawned<B, T, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        init: B,
+        map_fn: F,
+    ) -> ScanSpawned<T>
+    where
+        B: 'static + Send,
+        T: 'static + Send,
+        F: 'static + FnMut(B, Self::Item) -> Fut + Send,
+        Fut: Future<Output = Option<(B, T)>> + Send;
+
     /// Maps the stream element to a different type on a spawned worker.
     fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
     where
@@ -842,6 +854,49 @@ where
     S: 'static + Send + Stream + IndexedStreamExt,
     S::Item: 'static + Send,
 {
+    fn scan_spawned<B, T, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        init: B,
+        mut map_fn: F,
+    ) -> ScanSpawned<T>
+    where
+        B: 'static + Send,
+        T: 'static + Send,
+        F: 'static + FnMut(B, Self::Item) -> Fut + Send,
+        Fut: Future<Output = Option<(B, T)>> + Send,
+    {
+        let buf_size = buf_size.into().unwrap_or(2);
+        let (tx, rx) = flume::bounded(buf_size);
+
+        let future = rt::spawn(async move {
+            let mut state = init;
+            let mut stream = self.boxed();
+
+            while let Some(item) = stream.next().await {
+                match map_fn(state, item).await {
+                    Some((new_state, output)) => {
+                        state = new_state;
+                        if tx.send_async(output).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        })
+        .map(|result| result.unwrap());
+
+        let stream = futures::stream::select(
+            future.into_stream().map(|()| None),
+            rx.into_stream().map(Some),
+        )
+        .filter_map(|item| async move { item })
+        .boxed();
+
+        ScanSpawned { stream }
+    }
+
     fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
     where
         T: 'static + Send,
@@ -1798,6 +1853,30 @@ where
     {
         let init = init_f();
         self.par_for_each_blocking(config, move |item| map_f(init.clone(), item))
+    }
+}
+
+// scan_spawned
+
+pub use scan_spawned::*;
+
+mod scan_spawned {
+    use super::*;
+
+    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct ScanSpawned<T> {
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: BoxedStream<T>,
+    }
+
+    impl<T> Stream for ScanSpawned<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
+        }
     }
 }
 
@@ -3570,6 +3649,31 @@ mod tests {
 
             assert_eq!(synced, [(0, 1), (0, 2), (1, 2), (0, 3), (1, 3)]);
             assert_eq!(leaked, [(1, 1)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn scan_spawned_test() {
+        {
+            let collected: Vec<_> = futures::stream::iter([2, 3, 1, 4])
+                .scan_spawned(None, 0, |acc, val| async move {
+                    let acc = acc + val;
+                    Some((acc, acc))
+                })
+                .collect()
+                .await;
+            assert_eq!(collected, [2, 5, 6, 10]);
+        }
+
+        {
+            let collected: Vec<_> = futures::stream::iter([2, 3, 1, 4])
+                .scan_spawned(None, 0, |acc, val| async move {
+                    let acc = acc + val;
+                    (acc != 6).then(|| (acc, acc))
+                })
+                .collect()
+                .await;
+            assert_eq!(collected, [2, 5]);
         }
     }
 }
