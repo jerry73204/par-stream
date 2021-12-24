@@ -1,4 +1,4 @@
-use futures::stream::StreamExt;
+use futures::stream::{self, StreamExt as _};
 use par_stream::ParStreamExt;
 
 async fn main_async() {
@@ -6,10 +6,7 @@ async fn main_async() {
     let rx2 = rx1.clone();
 
     // gather from workers
-    let gathered_values: Vec<_> =
-        par_stream::gather(None, vec![rx1.boxed(), rx2.map(|val| -val).boxed()])
-            .collect()
-            .await;
+    let gathered_values: Vec<_> = stream::select(rx1, rx2.map(|val| -val)).collect().await;
 
     // summary
     let n_pos = gathered_values

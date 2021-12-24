@@ -49,8 +49,8 @@
 //! and gathers the outputs together.
 //!
 //! ```rust
-//! # use futures::stream::StreamExt;
-//! # use par_stream::ParStreamExt;
+//! # use futures::stream::{StreamExt as _, self};
+//! # use par_stream::ParStreamExt as _;
 //! # use std::collections::HashSet;
 //!
 //! async fn main_async() {
@@ -61,7 +61,7 @@
 //!     let rx2 = rx1.clone();
 //!
 //!     // gather back from two receivers
-//!     let values: HashSet<_> = par_stream::gather(None, vec![rx1, rx2]).collect().await;
+//!     let values: HashSet<_> = stream::select(rx1, rx2).collect().await;
 //!
 //!     // the gathered values have equal content with the original
 //!     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
