@@ -2674,6 +2674,40 @@ mod try_map_spawned {
     }
 }
 
+// catch_error
+
+pub use catch_error::*;
+mod catch_error {
+    use super::*;
+
+    /// Separate the stream of `Result<T, E>` into a stream of `T` and a future of `Result<(), E>`.
+    pub fn catch_error<S, T, E>(
+        stream: S,
+    ) -> (impl Stream<Item = T>, impl Future<Output = Result<(), E>>)
+    where
+        S: Stream<Item = Result<T, E>>,
+    {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let future = rx.map(|result| match result {
+            Ok(err) => Err(err),
+            Err(_) => Ok(()),
+        });
+        let stream = stream.scan(Some(tx), |tx, result| {
+            let output = match result {
+                Ok(val) => Some(val),
+                Err(err) => {
+                    let _ = tx.take().unwrap().send(err);
+                    None
+                }
+            };
+
+            future::ready(output)
+        });
+
+        (stream, future)
+    }
+}
+
 // tests
 
 #[cfg(test)]
