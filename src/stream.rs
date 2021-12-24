@@ -95,7 +95,7 @@ where
         buf_size: impl Into<Option<usize>>,
         init: B,
         map_fn: F,
-    ) -> ScanSpawned<T>
+    ) -> BoxStream<'static, T>
     where
         B: 'static + Send,
         T: 'static + Send,
@@ -103,14 +103,18 @@ where
         Fut: Future<Output = Option<(B, T)>> + Send;
 
     /// Maps the stream element to a different type on a spawned worker.
-    fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
+    fn then_spawned<T, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        f: F,
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: Future<Output = T> + Send;
 
     /// Maps the stream element to a different type on a parallel thread.
-    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> MapSpawned<T>
+    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> T + Send;
@@ -168,7 +172,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn batching<T, F, Fut>(self, f: F) -> Batching<T>
+    fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
     where
         F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -213,7 +217,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_batching_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParBatchingUnordered<T>
+    fn par_batching_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -358,7 +362,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then<P, T, F, Fut>(self, config: P, f: F) -> ParThen<T>
+    fn par_then<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send + Clone,
@@ -371,7 +375,7 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> ParThen<T>
+    ) -> BoxStream<'static, T>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -426,7 +430,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParThenUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -440,7 +444,7 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> ParThenUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -495,7 +499,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map<P, T, F, Func>(self, config: P, f: F) -> ParMap<T>
+    fn par_map<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -509,7 +513,7 @@ where
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> ParMap<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -566,7 +570,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> ParMapUnordered<T>
+    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -580,7 +584,7 @@ where
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> ParMapUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -848,7 +852,7 @@ where
         buf_size: impl Into<Option<usize>>,
         init: B,
         mut map_fn: F,
-    ) -> ScanSpawned<T>
+    ) -> BoxStream<'static, T>
     where
         B: 'static + Send,
         T: 'static + Send,
@@ -876,17 +880,19 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = stream::select(
+        stream::select(
             future.into_stream().map(|()| None),
             rx.into_stream().map(Some),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        ScanSpawned { stream }
+        .boxed()
     }
 
-    fn then_spawned<T, F, Fut>(self, buf_size: impl Into<Option<usize>>, f: F) -> ThenSpawned<T>
+    fn then_spawned<T, F, Fut>(
+        self,
+        buf_size: impl Into<Option<usize>>,
+        f: F,
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -900,17 +906,15 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = stream::select(
+        stream::select(
             rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        ThenSpawned { stream }
+        .boxed()
     }
 
-    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> MapSpawned<T>
+    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> T + Send,
@@ -923,12 +927,10 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = utils::join_future_stream(future, rx.into_stream()).boxed();
-
-        MapSpawned { stream }
+        utils::join_future_stream(future, rx.into_stream()).boxed()
     }
 
-    fn batching<T, F, Fut>(self, f: F) -> Batching<T>
+    fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
     where
         F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -950,17 +952,15 @@ where
         let batching_future = f(input_rx, output_tx);
         let join_future = future::join(input_future, batching_future);
 
-        let stream = stream::select(
+        stream::select(
             output_rx.into_stream().map(Some),
             join_future.into_stream().map(|_| None),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        Batching { stream }
+        .boxed()
     }
 
-    fn par_batching_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> ParBatchingUnordered<T>
+    fn par_batching_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -988,14 +988,12 @@ where
 
         let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        let stream = stream::select(
+        stream::select(
             output_rx.into_stream().map(Some),
             join_fut.into_stream().map(|_| None),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        ParBatchingUnordered { stream }
+        .boxed()
     }
 
     fn tee(self, buf_size: usize) -> Tee<Self::Item>
@@ -1104,7 +1102,7 @@ where
         }
     }
 
-    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> ParThen<T>
+    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -1116,13 +1114,10 @@ where
             fut.map(move |output| (index, output))
         };
 
-        let stream = self
-            .enumerate()
+        self.enumerate()
             .par_then_unordered(config, indexed_f)
             .reorder_enumerated()
-            .boxed();
-
-        ParThen { stream }
+            .boxed()
     }
 
     fn par_then_init<P, T, B, InitF, MapF, Fut>(
@@ -1130,7 +1125,7 @@ where
         config: P,
         init_f: InitF,
         mut map_f: MapF,
-    ) -> ParThen<T>
+    ) -> BoxStream<'static, T>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -1139,19 +1134,16 @@ where
         MapF: 'static + FnMut(B, Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
     {
-        let stream = self
-            .enumerate()
+        self.enumerate()
             .par_then_init_unordered(config, init_f, move |init, (index, item)| {
                 let fut = map_f(init, item);
                 async move { (index, fut.await) }
             })
             .reorder_enumerated()
-            .boxed();
-
-        ParThen { stream }
+            .boxed()
     }
 
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParThenUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -1185,9 +1177,7 @@ where
             })
             .collect();
         let join_fut = future::join(input_fut, future::join_all(worker_futs));
-        let stream = utils::join_future_stream(join_fut, output_rx.into_stream()).boxed();
-
-        ParThenUnordered { stream }
+        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
     fn par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
@@ -1195,7 +1185,7 @@ where
         config: P,
         init_f: InitF,
         mut map_f: MapF,
-    ) -> ParThenUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -1237,33 +1227,28 @@ where
 
         let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        let stream = stream::select(
+        stream::select(
             output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        ParThenUnordered { stream }
+        .boxed()
     }
 
-    fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> ParMap<T>
+    fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
-        let stream = self
-            .enumerate()
+        self.enumerate()
             .par_map_unordered(config, move |(index, item)| {
                 let job = f(item);
                 move || (index, job())
             })
             .reorder_enumerated()
-            .boxed();
-
-        ParMap { stream }
+            .boxed()
     }
 
     fn par_map_init<P, T, B, InitF, MapF, Func>(
@@ -1271,7 +1256,7 @@ where
         config: P,
         init_f: InitF,
         mut map_f: MapF,
-    ) -> ParMap<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -1280,19 +1265,16 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: IntoParStreamParams,
     {
-        let stream = self
-            .enumerate()
+        self.enumerate()
             .par_map_init_unordered(config, init_f, move |init, (index, item)| {
                 let job = map_f(init, item);
                 move || (index, job())
             })
             .reorder_enumerated()
-            .boxed();
-
-        ParMap { stream }
+            .boxed()
     }
 
-    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> ParMapUnordered<T>
+    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -1331,14 +1313,12 @@ where
 
         let join_future = future::join(input_future, future::join_all(worker_futures));
 
-        let stream = stream::select(
+        stream::select(
             output_rx.into_stream().map(Some),
             join_future.map(|_| None).into_stream(),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        ParMapUnordered { stream }
+        .boxed()
     }
 
     fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(
@@ -1346,7 +1326,7 @@ where
         config: P,
         init_f: InitF,
         mut f: MapF,
-    ) -> ParMapUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         B: 'static + Send + Clone,
@@ -1357,16 +1337,13 @@ where
     {
         let init = init_f();
 
-        let stream = self
-            .enumerate()
+        self.enumerate()
             .par_map_unordered(config, move |(index, item)| {
                 let job = f(init.clone(), item);
                 move || (index, job())
             })
             .reorder_enumerated()
-            .boxed();
-
-        ParMapUnordered { stream }
+            .boxed()
     }
 
     fn par_reduce<P, F, Fut>(self, config: P, reduce_fn: F) -> ParReduce<Self::Item>
