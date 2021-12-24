@@ -1702,22 +1702,47 @@ where
     }
 }
 
-// scan_spawned
+// iter_spawned
 
-pub use scan_spawned::*;
+pub use iter_spawned::*;
 
-mod scan_spawned {
+mod iter_spawned {
     use super::*;
 
-    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct ScanSpawned<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, T>,
+    /// Converts an [Iterator] into a [Stream] by consuming the iterator in a blocking thread.
+    ///
+    /// It is useful when consuming the iterator is computationally expensive and involves blocking code.
+    /// It prevents blocking the asynchronous context when consuming the returned stream.
+    pub fn iter_spawned<I>(buf_size: usize, iter: I) -> IterSpawned<I::Item>
+    where
+        I: 'static + IntoIterator + Send,
+        I::Item: Send,
+    {
+        let (tx, rx) = flume::bounded(buf_size);
+
+        rt::spawn_blocking(move || {
+            for item in iter.into_iter() {
+                if tx.send(item).is_err() {
+                    break;
+                }
+            }
+        });
+
+        IterSpawned {
+            stream: rx.into_stream(),
+        }
     }
 
-    impl<T> Stream for ScanSpawned<T> {
+    /// Stream for the [iter_spawned] function.
+    #[derive(Clone)]
+    pub struct IterSpawned<T>
+    where
+        T: 'static,
+    {
+        stream: flume::r#async::RecvStream<'static, T>,
+    }
+
+    impl<T> Stream for IterSpawned<T> {
         type Item = T;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
