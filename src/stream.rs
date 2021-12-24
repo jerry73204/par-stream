@@ -2,7 +2,7 @@ use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
     rt,
-    utils::{self, BoxedFuture, BoxedStream, TokioMpscReceiverExt as _},
+    utils::{self, TokioMpscReceiverExt as _},
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -1794,7 +1794,7 @@ mod scan_spawned {
     #[derivative(Debug)]
     pub struct ScanSpawned<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ScanSpawned<T> {
@@ -1961,7 +1961,7 @@ mod sync {
     #[derivative(Debug)]
     pub struct Sync<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<(usize, T), (usize, T)>>,
+        pub(super) stream: BoxStream<'static, Result<(usize, T), (usize, T)>>,
     }
 
     impl<T> Stream for Sync<T> {
@@ -2085,7 +2085,7 @@ mod unfold {
     #[derivative(Debug)]
     pub struct Unfold<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for Unfold<T> {
@@ -2238,7 +2238,7 @@ mod par_unfold_unordered {
     #[derivative(Debug)]
     pub struct ParUnfoldUnordered<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParUnfoldUnordered<T> {
@@ -2387,7 +2387,7 @@ mod broadcast {
         pub(super) ready: Arc<AtomicBool>,
         pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
         #[derivative(Debug = "ignore")]
-        pub(super) future: Arc<Mutex<Option<BoxedFuture<()>>>>,
+        pub(super) future: Arc<Mutex<Option<BoxFuture<'static, ()>>>>,
         pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
     }
 
@@ -2456,7 +2456,7 @@ mod broadcast {
     #[derivative(Debug)]
     pub struct BroadcastStream<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for BroadcastStream<T> {
@@ -2553,7 +2553,7 @@ mod par_map {
     pub struct ParMap<T> {
         #[pin]
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParMap<T> {
@@ -2577,7 +2577,7 @@ mod par_map_unordered {
     #[derivative(Debug)]
     pub struct ParMapUnordered<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParMapUnordered<T> {
@@ -2603,7 +2603,7 @@ mod par_then {
     pub struct ParThen<T> {
         #[pin]
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParThen<T> {
@@ -2627,7 +2627,7 @@ mod par_then_unordered {
     #[derivative(Debug)]
     pub struct ParThenUnordered<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParThenUnordered<T> {
@@ -2651,7 +2651,7 @@ mod par_reduce {
     #[derivative(Debug)]
     pub struct ParReduce<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) future: BoxedFuture<Option<T>>,
+        pub(super) future: BoxFuture<'static, Option<T>>,
     }
 
     impl<T> Future for ParReduce<T> {
@@ -2675,7 +2675,7 @@ mod par_routing {
     #[derivative(Debug)]
     pub struct ParRouting<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParRouting<T> {
@@ -2699,7 +2699,7 @@ mod par_routing_unordered {
     #[derivative(Debug)]
     pub struct ParRoutingUnordered<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParRoutingUnordered<T> {
@@ -2723,7 +2723,7 @@ mod par_for_each {
     #[derivative(Debug)]
     pub struct ParForEach {
         #[derivative(Debug = "ignore")]
-        pub(super) future: BoxedFuture<()>,
+        pub(super) future: BoxFuture<'static, ()>,
     }
 
     impl Future for ParForEach {
@@ -2747,7 +2747,7 @@ mod par_for_each_blocking {
     #[derivative(Debug)]
     pub struct ParForEachBlocking {
         #[derivative(Debug = "ignore")]
-        pub(super) future: BoxedFuture<()>,
+        pub(super) future: BoxFuture<'static, ()>,
     }
 
     impl Future for ParForEachBlocking {
@@ -2809,7 +2809,7 @@ mod batching {
     #[derivative(Debug)]
     pub struct BatchingReceiverStream<T> {
         #[derivative(Debug = "ignore")]
-        stream: BoxedStream<T>,
+        stream: BoxStream<'static, T>,
     }
 
     impl<T> BatchingSender<T> {
@@ -2891,7 +2891,7 @@ mod batching {
     #[derivative(Debug)]
     pub struct Batching<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for Batching<T> {
@@ -2915,7 +2915,7 @@ mod par_batching_unordered {
     #[derivative(Debug)]
     pub struct ParBatchingUnordered<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ParBatchingUnordered<T> {
@@ -2939,7 +2939,7 @@ mod then_spawned {
     #[derivative(Debug)]
     pub struct ThenSpawned<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for ThenSpawned<T> {
@@ -2963,7 +2963,7 @@ mod map_spawned {
     #[derivative(Debug)]
     pub struct MapSpawned<T> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<T>,
+        pub(super) stream: BoxStream<'static, T>,
     }
 
     impl<T> Stream for MapSpawned<T> {

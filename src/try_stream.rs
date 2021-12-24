@@ -3,7 +3,6 @@ use crate::{
     config::{IntoParStreamParams, ParStreamParams},
     rt,
     stream::{batching_channel, BatchingReceiver, BatchingSender},
-    utils::{BoxedFuture, BoxedStream},
 };
 use tokio::sync::{broadcast, Mutex};
 
@@ -1725,7 +1724,7 @@ mod try_scan_spawned {
     #[derivative(Debug)]
     pub struct TryScanSpawned<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryScanSpawned<T, E> {
@@ -1917,7 +1916,7 @@ mod try_sync {
     #[derivative(Debug)]
     pub struct TrySync<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<Result<(usize, T), (usize, T)>, E>>,
+        pub(super) stream: BoxStream<'static, Result<Result<(usize, T), (usize, T)>, E>>,
     }
 
     impl<T, E> Stream for TrySync<T, E> {
@@ -2011,7 +2010,7 @@ mod try_par_map {
     #[derivative(Debug)]
     pub struct TryParMap<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParMap<T, E> {
@@ -2035,7 +2034,7 @@ mod try_par_map_unordered {
     #[derivative(Debug)]
     pub struct TryParMapUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParMapUnordered<T, E> {
@@ -2059,7 +2058,7 @@ mod try_par_then {
     #[derivative(Debug)]
     pub struct TryParThen<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParThen<T, E> {
@@ -2083,7 +2082,7 @@ mod try_par_then_unordered {
     #[derivative(Debug)]
     pub struct TryParThenUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParThenUnordered<T, E> {
@@ -2107,7 +2106,7 @@ mod try_par_for_each {
     #[derivative(Debug)]
     pub struct TryParForEach<E> {
         #[derivative(Debug = "ignore")]
-        pub(super) future: BoxedFuture<Result<(), E>>,
+        pub(super) future: BoxFuture<'static, Result<(), E>>,
     }
 
     impl<E> Future for TryParForEach<E> {
@@ -2131,7 +2130,7 @@ mod try_par_for_each_blocking {
     #[derivative(Debug)]
     pub struct TryParForEachBlocking<E> {
         #[derivative(Debug = "ignore")]
-        pub(super) future: BoxedFuture<Result<(), E>>,
+        pub(super) future: BoxFuture<'static, Result<(), E>>,
     }
 
     impl<E> Future for TryParForEachBlocking<E> {
@@ -2316,7 +2315,7 @@ mod try_batching {
     #[derivative(Debug)]
     pub struct TryBatching<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryBatching<T, E> {
@@ -2340,7 +2339,7 @@ mod try_par_batching_unordered {
     #[derivative(Debug)]
     pub struct TryParBatchingUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParBatchingUnordered<T, E> {
@@ -2426,7 +2425,7 @@ mod try_unfold_blocking {
     #[derivative(Debug)]
     pub struct TryUnfoldBlocking<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryUnfoldBlocking<T, E> {
@@ -2631,7 +2630,7 @@ mod try_par_unfold_unordered {
     #[derivative(Debug)]
     pub struct TryParUnfoldUnordered<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryParUnfoldUnordered<T, E> {
@@ -2655,7 +2654,7 @@ mod try_then_spawned {
     #[derivative(Debug)]
     pub struct TryThenSpawned<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryThenSpawned<T, E> {
@@ -2679,7 +2678,7 @@ mod try_map_spawned {
     #[derivative(Debug)]
     pub struct TryMapSpawned<T, E> {
         #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxedStream<Result<T, E>>,
+        pub(super) stream: BoxStream<'static, Result<T, E>>,
     }
 
     impl<T, E> Stream for TryMapSpawned<T, E> {
