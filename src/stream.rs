@@ -121,7 +121,7 @@ where
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
-    /// The function f([receiver](BatchingReceiver), [sender](BatchingSender)) takes one or more elements
+    /// The function f([receiver](flume::Receiver), [sender](flume::Sender)) takes one or more elements
     /// by calling `receiver.recv().await`,
     /// It returns `Some(item)` if an input element is available, otherwise it returns `None`.
     /// Calling `sender.send(item).await` will produce an output element. It returns `Ok(())` when success,
@@ -136,17 +136,17 @@ where
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
     ///     let mut stream = stream::iter(data).batching(|mut rx, mut tx| async move {
     ///         let mut buffer = vec![];
-    ///         while let Some(value) = rx.recv().await {
+    ///         while let Ok(value) = rx.recv_async().await {
     ///             buffer.push(value);
     ///             if value < 0 {
-    ///                 let result = tx.send(mem::take(&mut buffer)).await;
+    ///                 let result = tx.send_async(mem::take(&mut buffer)).await;
     ///                 if result.is_err() {
     ///                     return;
     ///                 }
     ///             }
     ///         }
     ///
-    ///         let _ = tx.send(mem::take(&mut buffer)).await;
+    ///         let _ = tx.send_async(mem::take(&mut buffer)).await;
     ///     });
     ///
     ///     assert_eq!(stream.next().await, Some(vec![1, 2, -3]));
@@ -174,7 +174,7 @@ where
     /// ```
     fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
     where
-        F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
+        F: FnOnce(flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send;
 
@@ -189,9 +189,9 @@ where
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
     ///     stream::iter(data).batching(|mut rx, mut tx| async move {
-    ///         while let Some(value) = rx.recv().await {
+    ///         while let Ok(value) = rx.recv_async().await {
     ///             if value > 0 {
-    ///                 let result = tx.send(value).await;
+    ///                 let result = tx.send_async(value).await;
     ///                 if result.is_err() {
     ///                     return;
     ///                 }
@@ -922,22 +922,15 @@ where
 
     fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
     where
-        F: FnOnce(BatchingReceiver<Self::Item>, BatchingSender<T>) -> Fut,
+        F: FnOnce(flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
     {
-        let (mut input_tx, input_rx) = batching_channel();
-        let (output_tx, output_rx) = batching_channel();
+        let (input_tx, input_rx) = flume::bounded(0);
+        let (output_tx, output_rx) = flume::bounded(0);
 
         let input_future = async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let result = input_tx.send(item).await;
-                if result.is_err() {
-                    break;
-                }
-            }
+            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
         };
         let batching_future = f(input_rx, output_tx);
         let join_future = future::join(input_future, batching_future);
@@ -1182,13 +1175,14 @@ where
         let (output_tx, output_rx) = flume::bounded(buf_size);
         let init = init_f();
 
-        let input_fut = async move {
+        let input_fut = rt::spawn(async move {
             let _ = self
                 .map(move |item| map_f(init.clone(), item))
                 .map(Ok)
                 .forward(input_tx.into_sink())
                 .await;
-        };
+        })
+        .map(|result| result.unwrap());
 
         let worker_futs = (0..num_workers).map(|_| {
             let input_rx = input_rx.clone();
@@ -2514,126 +2508,6 @@ pub use batching::*;
 mod batching {
     use super::*;
 
-    pub(crate) fn batching_channel<T>() -> (BatchingSender<T>, BatchingReceiver<T>) {
-        let (permit_tx, permit_rx) = flume::bounded(1);
-        let (output_tx, output_rx) = flume::bounded(1);
-
-        (
-            BatchingSender {
-                is_closed: false,
-                is_requesting: false,
-                permit_rx,
-                output_tx,
-            },
-            BatchingReceiver {
-                is_closed: false,
-                is_requesting: false,
-                permit_tx,
-                output_rx,
-            },
-        )
-    }
-
-    /// The sender type for batching function in [`batching()`](ParStreamExt::batching).
-    #[derive(Debug)]
-    pub struct BatchingSender<T> {
-        is_closed: bool,
-        is_requesting: bool,
-        permit_rx: flume::Receiver<()>,
-        output_tx: flume::Sender<T>,
-    }
-
-    /// The receiver type for batching function in [`batching()`](ParStreamExt::batching).
-    #[derive(Debug)]
-    pub struct BatchingReceiver<T> {
-        is_closed: bool,
-        is_requesting: bool,
-        permit_tx: flume::Sender<()>,
-        output_rx: flume::Receiver<T>,
-    }
-
-    /// The stream type that wraps over [BatchingReceiver].
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct BatchingReceiverStream<T> {
-        #[derivative(Debug = "ignore")]
-        stream: BoxStream<'static, T>,
-    }
-
-    impl<T> BatchingSender<T> {
-        pub async fn send(&mut self, item: T) -> Result<(), T> {
-            if self.is_closed {
-                return Err(item);
-            }
-
-            if !self.is_requesting {
-                let result = self.permit_rx.recv_async().await;
-                if result.is_err() {
-                    self.is_closed = true;
-                    return Err(item);
-                }
-                self.is_requesting = true;
-            }
-
-            let result = self.output_tx.send_async(item).await;
-            if let Err(err) = result {
-                self.is_closed = true;
-                return Err(err.0);
-            }
-            self.is_requesting = false;
-
-            Ok(())
-        }
-    }
-
-    impl<T> BatchingReceiver<T>
-    where
-        T: 'static + Send,
-    {
-        pub async fn recv(&mut self) -> Option<T> {
-            if self.is_closed {
-                return None;
-            }
-
-            if !self.is_requesting {
-                let result = self.permit_tx.send_async(()).await;
-                if result.is_err() {
-                    self.is_closed = true;
-                    return None;
-                }
-                self.is_requesting = true;
-            }
-
-            match self.output_rx.recv_async().await {
-                Ok(item) => {
-                    self.is_requesting = false;
-                    Some(item)
-                }
-                Err(_) => {
-                    self.is_closed = true;
-                    None
-                }
-            }
-        }
-
-        pub fn into_stream(self) -> BatchingReceiverStream<T> {
-            let stream = stream::unfold(self, |mut rx| async move {
-                rx.recv().await.map(|item| (item, rx))
-            })
-            .boxed();
-
-            BatchingReceiverStream { stream }
-        }
-    }
-
-    impl<T> Stream for BatchingReceiverStream<T> {
-        type Item = T;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-
     /// A stream combinator returned from [batching()](ParStreamExt::batching).
     #[derive(Derivative)]
     #[derivative(Debug)]
@@ -2736,16 +2610,16 @@ mod tests {
     #[tokio::test]
     async fn batching_test() {
         let sums: Vec<_> = stream::iter(0..10)
-            .batching(|mut input, mut output| async move {
+            .batching(|input, output| async move {
                 let mut sum = 0;
 
-                while let Some(val) = input.recv().await {
+                while let Ok(val) = input.recv_async().await {
                     let new_sum = sum + val;
 
                     if new_sum >= 10 {
                         sum = 0;
 
-                        let result = output.send(new_sum).await;
+                        let result = output.send_async(new_sum).await;
                         if result.is_err() {
                             break;
                         }

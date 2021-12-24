@@ -2,7 +2,6 @@ use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
     rt,
-    stream::{batching_channel, BatchingReceiver, BatchingSender},
 };
 use tokio::sync::{broadcast, Mutex};
 
@@ -112,7 +111,7 @@ where
         U: 'static + Send,
         E: 'static + Send,
         Self: Stream<Item = Result<T, E>>,
-        F: FnOnce(BatchingReceiver<T>, BatchingSender<U>) -> Fut,
+        F: FnOnce(flume::Receiver<T>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), E>> + Send;
 
     /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
@@ -493,17 +492,17 @@ where
         U: 'static + Send,
         E: 'static + Send,
         Self: Stream<Item = Result<T, E>>,
-        F: FnOnce(BatchingReceiver<T>, BatchingSender<U>) -> Fut,
+        F: FnOnce(flume::Receiver<T>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
         let mut stream = self.boxed();
 
-        let (mut input_tx, input_rx) = batching_channel();
-        let (output_tx, output_rx) = batching_channel();
+        let (input_tx, input_rx) = flume::bounded(0);
+        let (output_tx, output_rx) = flume::bounded(0);
 
         let input_future = async move {
             while let Some(item) = stream.try_next().await? {
-                let result = input_tx.send(item).await;
+                let result = input_tx.send_async(item).await;
                 if result.is_err() {
                     break;
                 }
@@ -513,11 +512,8 @@ where
         let batching_future = f(input_rx, output_tx);
         let join_future = future::try_join(input_future, batching_future);
 
-        let output_stream = stream::unfold(output_rx, move |mut output_rx| async move {
-            output_rx.recv().await.map(|output| (output, output_rx))
-        });
         let select_stream = stream::select(
-            output_stream.map(|item| Ok(Some(item))),
+            output_rx.into_stream().map(|item| Ok(Some(item))),
             join_future.into_stream().map(|result| result.map(|_| None)),
         )
         .boxed();
@@ -3053,33 +3049,32 @@ mod tests {
         }
 
         {
-            let mut stream =
-                stream::iter(0..10)
-                    .map(Ok)
-                    .try_batching(|mut input, mut output| async move {
-                        let mut sum = 0;
+            let mut stream = stream::iter(0..10)
+                .map(Ok)
+                .try_batching(|input, output| async move {
+                    let mut sum = 0;
 
-                        while let Some(val) = input.recv().await {
-                            let new_sum = val + sum;
+                    while let Ok(val) = input.recv_async().await {
+                        let new_sum = val + sum;
 
-                            if new_sum >= 10 {
-                                sum = 0;
-                                let result = output.send(new_sum).await;
-                                if result.is_err() {
-                                    break;
-                                }
-                            } else {
-                                sum = new_sum;
+                        if new_sum >= 10 {
+                            sum = 0;
+                            let result = output.send_async(new_sum).await;
+                            if result.is_err() {
+                                break;
                             }
-                        }
-
-                        if sum == 0 {
-                            Ok(())
                         } else {
-                            dbg!();
-                            Err("some elements are left behind")
+                            sum = new_sum;
                         }
-                    });
+                    }
+
+                    if sum == 0 {
+                        Ok(())
+                    } else {
+                        dbg!();
+                        Err("some elements are left behind")
+                    }
+                });
 
             assert_eq!(stream.next().await, Some(Ok(10)));
             assert_eq!(stream.next().await, Some(Ok(11)));
@@ -3089,34 +3084,33 @@ mod tests {
         }
 
         {
-            let mut stream =
-                stream::iter(0..10)
-                    .map(Ok)
-                    .try_batching(|mut input, mut output| async move {
-                        let mut sum = 0;
+            let mut stream = stream::iter(0..10)
+                .map(Ok)
+                .try_batching(|input, output| async move {
+                    let mut sum = 0;
 
-                        while let Some(val) = input.recv().await {
-                            let new_sum = val + sum;
+                    while let Ok(val) = input.recv_async().await {
+                        let new_sum = val + sum;
 
-                            if new_sum >= 15 {
-                                return Err("too large");
-                            } else if new_sum >= 10 {
-                                sum = 0;
-                                let result = output.send(new_sum).await;
-                                if result.is_err() {
-                                    break;
-                                }
-                            } else {
-                                sum = new_sum;
+                        if new_sum >= 15 {
+                            return Err("too large");
+                        } else if new_sum >= 10 {
+                            sum = 0;
+                            let result = output.send_async(new_sum).await;
+                            if result.is_err() {
+                                break;
                             }
-                        }
-
-                        if input.recv().await.is_none() {
-                            Ok(())
                         } else {
-                            Err("some elements are left behind")
+                            sum = new_sum;
                         }
-                    });
+                    }
+
+                    if input.recv_async().await.is_err() {
+                        Ok(())
+                    } else {
+                        Err("some elements are left behind")
+                    }
+                });
 
             assert_eq!(stream.next().await, Some(Ok(10)));
             assert_eq!(stream.next().await, Some(Ok(11)));
