@@ -862,7 +862,7 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let mut state = init;
             let mut stream = self.boxed();
 
@@ -877,10 +877,9 @@ where
                     None => break,
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
-        utils::join_future_stream(future, rx.into_stream()).boxed()
+        rx.into_stream().boxed()
     }
 
     fn then_spawned<T, F, Fut>(
@@ -896,12 +895,11 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self.then(f).map(Ok).forward(tx.into_sink()).await;
-        })
-        .map(|result| result.unwrap());
+        });
 
-        utils::join_future_stream(future, rx.into_stream()).boxed()
+        rx.into_stream().boxed()
     }
 
     fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
@@ -912,12 +910,11 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self.map(f).map(Ok).forward(tx.into_sink()).await;
-        })
-        .map(|result| result.unwrap());
+        });
 
-        utils::join_future_stream(future, rx.into_stream()).boxed()
+        rx.into_stream().boxed()
     }
 
     fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
@@ -953,20 +950,16 @@ where
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let input_fut = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self.map(Ok).forward(input_tx.into_sink()).await;
         });
 
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|worker_index| {
-                let fut = f(worker_index, input_rx.clone(), output_tx.clone());
-                rt::spawn(fut).map(|result| result.unwrap())
-            })
-            .collect();
+        (0..num_workers).for_each(|worker_index| {
+            let fut = f(worker_index, input_rx.clone(), output_tx.clone());
+            rt::spawn(fut);
+        });
 
-        let join_fut = future::join(input_fut, future::join_all(worker_futs));
-
-        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
+        output_rx.into_stream().boxed()
     }
 
     fn tee(self, buf_size: usize) -> Tee<Self::Item>
@@ -1130,27 +1123,23 @@ where
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let input_fut = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
         });
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
+        (0..num_workers).for_each(|_| {
+            let input_rx = input_rx.clone();
+            let output_tx = output_tx.clone();
 
-                rt::spawn(async move {
-                    let _ = input_rx
-                        .into_stream()
-                        .then(|fut| fut)
-                        .map(Ok)
-                        .forward(output_tx.into_sink())
-                        .await;
-                })
-                .map(|result| result.unwrap())
-            })
-            .collect();
-        let join_fut = future::join(input_fut, future::join_all(worker_futs));
-        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
+            rt::spawn(async move {
+                let _ = input_rx
+                    .into_stream()
+                    .then(|fut| fut)
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
+            });
+        });
+        output_rx.into_stream().boxed()
     }
 
     fn par_then_init_unordered<P, T, B, InitF, MapF, Fut>(
@@ -1175,16 +1164,15 @@ where
         let (output_tx, output_rx) = flume::bounded(buf_size);
         let init = init_f();
 
-        let input_fut = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self
                 .map(move |item| map_f(init.clone(), item))
                 .map(Ok)
                 .forward(input_tx.into_sink())
                 .await;
-        })
-        .map(|result| result.unwrap());
+        });
 
-        let worker_futs = (0..num_workers).map(|_| {
+        (0..num_workers).for_each(|_| {
             let input_rx = input_rx.clone();
             let output_tx = output_tx.clone();
 
@@ -1195,13 +1183,10 @@ where
                     .map(Ok)
                     .forward(output_tx.into_sink())
                     .await;
-            })
-            .map(|result| result.unwrap())
+            });
         });
 
-        let join_fut = future::join(input_fut, future::join_all(worker_futs));
-
-        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
+        output_rx.into_stream().boxed()
     }
 
     fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, T>
@@ -1257,32 +1242,26 @@ where
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let input_future = rt::spawn(async move {
+        rt::spawn(async move {
             let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
-        })
-        .map(|result| result.unwrap());
+        });
 
-        let worker_futures: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
+        (0..num_workers).for_each(|_| {
+            let input_rx = input_rx.clone();
+            let output_tx = output_tx.clone();
 
-                rt::spawn_blocking(move || {
-                    while let Ok(job) = input_rx.recv() {
-                        let output = job();
-                        let result = output_tx.send(output);
-                        if result.is_err() {
-                            break;
-                        }
+            rt::spawn_blocking(move || {
+                while let Ok(job) = input_rx.recv() {
+                    let output = job();
+                    let result = output_tx.send(output);
+                    if result.is_err() {
+                        break;
                     }
-                })
-                .map(|result| result.unwrap())
-            })
-            .collect();
+                }
+            });
+        });
 
-        let join_future = future::join(input_future, future::join_all(worker_futures));
-
-        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
+        output_rx.into_stream().boxed()
     }
 
     fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(

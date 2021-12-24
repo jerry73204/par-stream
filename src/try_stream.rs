@@ -398,7 +398,7 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let mut stream = self.boxed();
 
             loop {
@@ -421,15 +421,9 @@ where
                     None => break,
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
-        let stream = stream::select(
-            rx.into_stream().map(Some),
-            future.map(|()| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let stream = rx.into_stream().boxed();
 
         TryThenSpawned { stream }
     }
@@ -449,7 +443,7 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn_blocking(move || {
+        rt::spawn_blocking(move || {
             let mut stream = self.boxed();
 
             loop {
@@ -472,15 +466,9 @@ where
                     None => break,
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
-        let stream = stream::select(
-            rx.into_stream().map(Some),
-            future.map(|()| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let stream = rx.into_stream().boxed();
 
         TryMapSpawned { stream }
     }
