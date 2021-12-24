@@ -374,7 +374,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             future.into_stream().map(|()| None),
             rx.into_stream().map(Some),
         )
@@ -426,7 +426,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
@@ -477,7 +477,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
@@ -512,18 +512,18 @@ where
             Ok(())
         };
         let batching_future = f(input_rx, output_tx);
-        let join_future = futures::future::try_join(input_future, batching_future);
+        let join_future = future::try_join(input_future, batching_future);
 
-        let output_stream = futures::stream::unfold(output_rx, move |mut output_rx| async move {
+        let output_stream = stream::unfold(output_rx, move |mut output_rx| async move {
             output_rx.recv().await.map(|output| (output, output_rx))
         });
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_stream.map(|item| Ok(Some(item))),
             join_future.into_stream().map(|result| result.map(|_| None)),
         )
         .boxed();
 
-        let stream = futures::stream::try_unfold(
+        let stream = stream::try_unfold(
             (Some(select_stream), None),
             move |(mut stream, error)| async move {
                 if let Some(stream_) = &mut stream {
@@ -596,17 +596,16 @@ where
             })
             .collect();
 
-        let join_fut =
-            futures::future::try_join(input_fut, futures::future::try_join_all(worker_futs))
-                .map(|result| result.map(|_| ()));
+        let join_fut = future::try_join(input_fut, future::try_join_all(worker_futs))
+            .map(|result| result.map(|_| ()));
 
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_rx.into_stream().map(|item| Ok(Some(item))),
             join_fut.into_stream().map(|result| result.map(|()| None)),
         )
         .boxed();
 
-        let stream = futures::stream::try_unfold(
+        let stream = stream::try_unfold(
             (Some(select_stream), None),
             |(mut stream, error)| async move {
                 if let Some(stream_) = &mut stream {
@@ -672,7 +671,7 @@ where
                         })
                         .collect();
 
-                    let results = futures::future::join_all(futures).await;
+                    let results = future::join_all(futures).await;
                     let success_count = results
                         .iter()
                         .filter(|(result, tx)| {
@@ -788,7 +787,7 @@ where
             let mut errors = vec![];
 
             while !worker_futures.is_empty() {
-                let (result, index, _) = futures::future::select_all(&mut worker_futures).await;
+                let (result, index, _) = future::select_all(&mut worker_futures).await;
                 worker_futures.remove(index);
 
                 if let Err((index, error)) = result {
@@ -839,7 +838,7 @@ where
 
         let join_all_future = async move {
             let (input_result, mut worker_results, ()) =
-                futures::future::join3(input_future, select_worker_future, reorder_future).await;
+                future::join3(input_future, select_worker_future, reorder_future).await;
 
             if let Err((_, err)) = input_result {
                 return Err(err);
@@ -853,7 +852,7 @@ where
             Ok(())
         };
 
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_rx.into_stream().map(|item| Ok(Some(item))),
             join_all_future
                 .map(|result| result.map(|()| None))
@@ -861,7 +860,7 @@ where
         )
         .boxed();
 
-        let stream = futures::stream::unfold(
+        let stream = stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1004,11 +1003,11 @@ where
 
         let select_worker_future = async move {
             while !worker_futures.is_empty() {
-                let (result, index, _) = futures::future::select_all(&mut worker_futures).await;
+                let (result, index, _) = future::select_all(&mut worker_futures).await;
                 worker_futures.remove(index);
 
                 if let Err(error) = result {
-                    let _ = futures::future::join_all(worker_futures).await;
+                    let _ = future::join_all(worker_futures).await;
                     return Err(error);
                 }
             }
@@ -1018,7 +1017,7 @@ where
 
         let join_all_future = async move {
             let (input_result, worker_result) =
-                futures::future::join(input_future, select_worker_future).await;
+                future::join(input_future, select_worker_future).await;
 
             match (input_result, worker_result) {
                 (Err(err), _) => Err(err),
@@ -1027,7 +1026,7 @@ where
             }
         };
 
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_rx.into_stream().map(|item| Ok(Some(item))),
             join_all_future
                 .map(|result| result.map(|()| None))
@@ -1035,7 +1034,7 @@ where
         )
         .boxed();
 
-        let stream = futures::stream::unfold(
+        let stream = stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1183,7 +1182,7 @@ where
             let mut errors = vec![];
 
             while !worker_futures.is_empty() {
-                let (result, index, _) = futures::future::select_all(&mut worker_futures).await;
+                let (result, index, _) = future::select_all(&mut worker_futures).await;
                 worker_futures.remove(index);
 
                 if let Err((index, error)) = result {
@@ -1234,7 +1233,7 @@ where
 
         let join_all_future = async move {
             let (input_result, mut worker_results, ()) =
-                futures::future::join3(input_future, select_worker_future, reorder_future).await;
+                future::join3(input_future, select_worker_future, reorder_future).await;
 
             if let Err((_, err)) = input_result {
                 return Err(err);
@@ -1248,7 +1247,7 @@ where
             Ok(())
         };
 
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_rx.into_stream().map(|item| Ok(Some(item))),
             join_all_future
                 .map(|result| result.map(|()| None))
@@ -1256,7 +1255,7 @@ where
         )
         .boxed();
 
-        let stream = futures::stream::unfold(
+        let stream = stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1399,11 +1398,11 @@ where
 
         let select_worker_future = async move {
             while !worker_futures.is_empty() {
-                let (result, index, _) = futures::future::select_all(&mut worker_futures).await;
+                let (result, index, _) = future::select_all(&mut worker_futures).await;
                 worker_futures.remove(index);
 
                 if let Err(error) = result {
-                    let _ = futures::future::join_all(worker_futures).await;
+                    let _ = future::join_all(worker_futures).await;
                     return Err(error);
                 }
             }
@@ -1413,7 +1412,7 @@ where
 
         let join_all_future = async move {
             let (input_result, worker_result) =
-                futures::future::join(input_future, select_worker_future).await;
+                future::join(input_future, select_worker_future).await;
 
             match (input_result, worker_result) {
                 (Err(err), _) => Err(err),
@@ -1422,7 +1421,7 @@ where
             }
         };
 
-        let select_stream = futures::stream::select(
+        let select_stream = stream::select(
             output_rx.into_stream().map(|item| Ok(Some(item))),
             join_all_future
                 .map(|result| result.map(|()| None))
@@ -1430,7 +1429,7 @@ where
         )
         .boxed();
 
-        let stream = futures::stream::unfold(
+        let stream = stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1561,7 +1560,7 @@ where
 
         let output_fut = async move {
             let (map_result, worker_results) =
-                futures::join!(map_fut, futures::future::join_all(worker_futs));
+                futures::join!(map_fut, future::join_all(worker_futs));
 
             worker_results
                 .into_iter()
@@ -1677,7 +1676,7 @@ where
 
         let output_fut = async move {
             let (input_result, worker_results) =
-                futures::join!(input_fut, futures::future::join_all(worker_futs));
+                futures::join!(input_fut, future::join_all(worker_futs));
 
             worker_results
                 .into_iter()
@@ -1792,7 +1791,7 @@ mod try_sync {
         match num_streams {
             0 => {
                 return TrySync {
-                    stream: futures::stream::empty().boxed(),
+                    stream: stream::empty().boxed(),
                 };
             }
             1 => {
@@ -1808,7 +1807,7 @@ mod try_sync {
             _ => {}
         }
 
-        let mut select_stream = futures::stream::select_all(streams);
+        let mut select_stream = stream::select_all(streams);
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
@@ -1901,9 +1900,9 @@ mod try_sync {
         })
         .map(|result| result.unwrap());
 
-        let join_future = futures::future::join(input_future, sync_future);
+        let join_future = future::join(input_future, sync_future);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             join_future.into_stream().map(|_| None),
             output_rx.into_stream().map(|item| Some(item)),
         )
@@ -2402,7 +2401,7 @@ mod try_unfold_blocking {
             }
         });
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             producer_fut
                 .into_stream()
                 .map(|result| {
@@ -2512,9 +2511,9 @@ mod try_par_unfold_unordered {
             .map(|result| result.unwrap())
         });
 
-        let join_future = futures::future::join_all(worker_futs);
+        let join_future = future::join_all(worker_futs);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.map(|_| None).into_stream(),
         )
@@ -2599,9 +2598,9 @@ mod try_par_unfold_unordered {
             })
         });
 
-        let join_future = futures::future::try_join_all(worker_futs);
+        let join_future = future::try_join_all(worker_futs);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
@@ -2702,7 +2701,7 @@ mod tests {
     #[tokio::test]
     async fn try_scan_spawned_test() {
         {
-            let values: Result<Vec<_>, ()> = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
+            let values: Result<Vec<_>, ()> = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
                 .try_scan_spawned(None, 0, |acc, val| async move {
                     let new_acc = acc + val;
                     Ok(Some((new_acc, new_acc)))
@@ -2714,11 +2713,14 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter([Ok(3), Ok(1), Err(()), Ok(1)])
-                .try_scan_spawned(None, 0, |acc, val| async move {
+            let mut stream = stream::iter([Ok(3), Ok(1), Err(()), Ok(1)]).try_scan_spawned(
+                None,
+                0,
+                |acc, val| async move {
                     let new_acc = acc + val;
                     Ok(Some((new_acc, new_acc)))
-                });
+                },
+            );
 
             assert_eq!(stream.next().await, Some(Ok(3)));
             assert_eq!(stream.next().await, Some(Ok(4)));
@@ -2727,15 +2729,18 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
-                .try_scan_spawned(None, 0, |acc, val| async move {
+            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())]).try_scan_spawned(
+                None,
+                0,
+                |acc, val| async move {
                     let new_acc = acc + val;
                     if new_acc != 8 {
                         Ok(Some((new_acc, new_acc)))
                     } else {
                         Err(())
                     }
-                });
+                },
+            );
 
             assert_eq!(stream.next().await, Some(Ok(3)));
             assert_eq!(stream.next().await, Some(Ok(4)));
@@ -2744,15 +2749,18 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
-                .try_scan_spawned(None, 0, |acc, val| async move {
+            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())]).try_scan_spawned(
+                None,
+                0,
+                |acc, val| async move {
                     let new_acc = acc + val;
                     if new_acc != 8 {
                         Ok(Some((new_acc, new_acc)))
                     } else {
                         Ok(None)
                     }
-                });
+                },
+            );
 
             assert_eq!(stream.next().await, Some(Ok(3)));
             assert_eq!(stream.next().await, Some(Ok(4)));
@@ -2763,7 +2771,7 @@ mod tests {
     #[tokio::test]
     async fn try_then_spawned_test() {
         {
-            let values: Result<Vec<_>, ()> = futures::stream::iter(0..1000)
+            let values: Result<Vec<_>, ()> = stream::iter(0..1000)
                 .map(Ok)
                 .try_then_spawned(None, |val| async move { Ok(val * 2) })
                 .try_collect()
@@ -2775,7 +2783,7 @@ mod tests {
 
         {
             let mut stream =
-                futures::stream::iter(0..1000)
+                stream::iter(0..1000)
                     .map(Ok)
                     .try_then_spawned(None, |val| async move {
                         if val < 3 {
@@ -2796,7 +2804,7 @@ mod tests {
     #[tokio::test]
     async fn try_map_spawned_test() {
         {
-            let values: Result<Vec<_>, ()> = futures::stream::iter(0..1000)
+            let values: Result<Vec<_>, ()> = stream::iter(0..1000)
                 .map(Ok)
                 .try_map_spawned(None, |val| Ok(val * 2))
                 .try_collect()
@@ -2807,9 +2815,13 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter(0..1000)
-                .map(Ok)
-                .try_map_spawned(None, |val| if val < 3 { Ok(val) } else { Err(val) });
+            let mut stream = stream::iter(0..1000).map(Ok).try_map_spawned(None, |val| {
+                if val < 3 {
+                    Ok(val)
+                } else {
+                    Err(val)
+                }
+            });
 
             assert_eq!(stream.next().await, Some(Ok(0)));
             assert_eq!(stream.next().await, Some(Ok(1)));
@@ -2941,7 +2953,7 @@ mod tests {
     #[tokio::test]
     async fn try_par_batching_unordered_test() {
         {
-            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+            let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
                 .try_par_batching_unordered::<_, (), _, _, _, _>(None, |_, _, _| async move {
                     Result::<(), _>::Err("init error")
@@ -2952,7 +2964,7 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+            let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
                 .try_par_batching_unordered(None, |_, input, output| async move {
                     let mut sum = 0;
@@ -2987,7 +2999,7 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter(iter::repeat(1).take(10))
+            let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
                 .try_par_batching_unordered(None, |_, input, output| async move {
                     let mut sum = 0;
@@ -3033,7 +3045,7 @@ mod tests {
     #[tokio::test]
     async fn try_batching_test() {
         {
-            let mut stream = futures::stream::iter(0..10)
+            let mut stream = stream::iter(0..10)
                 .map(Ok)
                 .try_batching::<_, usize, _, _, _>(|_, _| async move { Err("init error") });
 
@@ -3042,32 +3054,33 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter(0..10).map(Ok).try_batching(
-                |mut input, mut output| async move {
-                    let mut sum = 0;
+            let mut stream =
+                stream::iter(0..10)
+                    .map(Ok)
+                    .try_batching(|mut input, mut output| async move {
+                        let mut sum = 0;
 
-                    while let Some(val) = input.recv().await {
-                        let new_sum = val + sum;
+                        while let Some(val) = input.recv().await {
+                            let new_sum = val + sum;
 
-                        if new_sum >= 10 {
-                            sum = 0;
-                            let result = output.send(new_sum).await;
-                            if result.is_err() {
-                                break;
+                            if new_sum >= 10 {
+                                sum = 0;
+                                let result = output.send(new_sum).await;
+                                if result.is_err() {
+                                    break;
+                                }
+                            } else {
+                                sum = new_sum;
                             }
-                        } else {
-                            sum = new_sum;
                         }
-                    }
 
-                    if sum == 0 {
-                        Ok(())
-                    } else {
-                        dbg!();
-                        Err("some elements are left behind")
-                    }
-                },
-            );
+                        if sum == 0 {
+                            Ok(())
+                        } else {
+                            dbg!();
+                            Err("some elements are left behind")
+                        }
+                    });
 
             assert_eq!(stream.next().await, Some(Ok(10)));
             assert_eq!(stream.next().await, Some(Ok(11)));
@@ -3077,33 +3090,34 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::iter(0..10).map(Ok).try_batching(
-                |mut input, mut output| async move {
-                    let mut sum = 0;
+            let mut stream =
+                stream::iter(0..10)
+                    .map(Ok)
+                    .try_batching(|mut input, mut output| async move {
+                        let mut sum = 0;
 
-                    while let Some(val) = input.recv().await {
-                        let new_sum = val + sum;
+                        while let Some(val) = input.recv().await {
+                            let new_sum = val + sum;
 
-                        if new_sum >= 15 {
-                            return Err("too large");
-                        } else if new_sum >= 10 {
-                            sum = 0;
-                            let result = output.send(new_sum).await;
-                            if result.is_err() {
-                                break;
+                            if new_sum >= 15 {
+                                return Err("too large");
+                            } else if new_sum >= 10 {
+                                sum = 0;
+                                let result = output.send(new_sum).await;
+                                if result.is_err() {
+                                    break;
+                                }
+                            } else {
+                                sum = new_sum;
                             }
-                        } else {
-                            sum = new_sum;
                         }
-                    }
 
-                    if input.recv().await.is_none() {
-                        Ok(())
-                    } else {
-                        Err("some elements are left behind")
-                    }
-                },
-            );
+                        if input.recv().await.is_none() {
+                            Ok(())
+                        } else {
+                            Err("some elements are left behind")
+                        }
+                    });
 
             assert_eq!(stream.next().await, Some(Ok(10)));
             assert_eq!(stream.next().await, Some(Ok(11)));
@@ -3115,7 +3129,7 @@ mod tests {
     #[tokio::test]
     async fn try_par_for_each_test() {
         {
-            let result = futures::stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)].into_iter())
+            let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)].into_iter())
                 .try_par_for_each(None, |_| async move { Result::<_, ()>::Ok(()) })
                 .await;
 
@@ -3123,10 +3137,9 @@ mod tests {
         }
 
         {
-            let result =
-                futures::stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                    .try_par_for_each(None, |_| async move { Ok(()) })
-                    .await;
+            let result = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                .try_par_for_each(None, |_| async move { Ok(()) })
+                .await;
 
             assert_eq!(result, Err(-3));
         }
@@ -3135,7 +3148,7 @@ mod tests {
     #[tokio::test]
     async fn try_par_for_each_blocking_test() {
         {
-            let result = futures::stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)])
+            let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)])
                 .try_par_for_each_blocking(None, |_| || Result::<_, ()>::Ok(()))
                 .await;
 
@@ -3143,7 +3156,7 @@ mod tests {
         }
 
         {
-            let result = futures::stream::iter(0..)
+            let result = stream::iter(0..)
                 .then(|val| async move {
                     if val == 3 {
                         Err(val)
@@ -3158,7 +3171,7 @@ mod tests {
         }
 
         {
-            let result = futures::stream::iter(0..)
+            let result = stream::iter(0..)
                 .map(Ok)
                 .try_par_for_each_blocking(None, |val| {
                     move || {
@@ -3179,9 +3192,8 @@ mod tests {
     #[tokio::test]
     async fn try_par_then_test() {
         {
-            let mut stream =
-                futures::stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                    .try_par_then(None, |value| async move { Ok(value) });
+            let mut stream = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                .try_par_then(None, |value| async move { Ok(value) });
 
             assert_eq!(stream.try_next().await, Ok(Some(1usize)));
             assert_eq!(stream.try_next().await, Ok(Some(2usize)));
@@ -3190,7 +3202,7 @@ mod tests {
         }
 
         {
-            let vec: Result<Vec<()>, ()> = futures::stream::iter(vec![])
+            let vec: Result<Vec<()>, ()> = stream::iter(vec![])
                 .try_par_then(None, |()| async move { Ok(()) })
                 .try_collect()
                 .await;
@@ -3199,15 +3211,16 @@ mod tests {
         }
 
         {
-            let mut stream = futures::stream::repeat(())
-                .enumerate()
-                .map(Ok)
-                .try_par_then(3, |(index, ())| async move {
-                    match index {
-                        3 | 6 => Err(index),
-                        index => Ok(index),
-                    }
-                });
+            let mut stream =
+                stream::repeat(())
+                    .enumerate()
+                    .map(Ok)
+                    .try_par_then(3, |(index, ())| async move {
+                        match index {
+                            3 | 6 => Err(index),
+                            index => Ok(index),
+                        }
+                    });
 
             assert_eq!(stream.next().await, Some(Ok(0)));
             assert_eq!(stream.next().await, Some(Ok(1)));
@@ -3227,7 +3240,7 @@ mod tests {
             let err_index_2 = rng.gen_range(0..len);
             let min_err_index = err_index_1.min(err_index_2);
 
-            let results: Vec<_> = futures::stream::iter(0..len)
+            let results: Vec<_> = stream::iter(0..len)
                 .map(move |value| {
                     if value == err_index_1 || value == err_index_2 {
                         Err(-(value as isize))
@@ -3272,8 +3285,8 @@ mod tests {
     #[tokio::test]
     async fn try_sync_test() {
         {
-            let stream1 = futures::stream::iter(vec![Ok(3), Ok(1), Ok(5), Ok(7)]);
-            let stream2 = futures::stream::iter(vec![Ok(2), Ok(4), Ok(6), Err("error")]);
+            let stream1 = stream::iter(vec![Ok(3), Ok(1), Ok(5), Ok(7)]);
+            let stream2 = stream::iter(vec![Ok(2), Ok(4), Ok(6), Err("error")]);
 
             let mut stream = super::try_sync_by_key(None, |&val| val, [stream1, stream2]);
 

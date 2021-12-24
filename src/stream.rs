@@ -2,7 +2,7 @@ use crate::{
     common::*,
     config::{IntoParStreamParams, ParStreamParams},
     rt,
-    utils::{BoxedFuture, BoxedStream, TokioMpscReceiverExt},
+    utils::{self, BoxedFuture, BoxedStream, TokioMpscReceiverExt as _},
 };
 use tokio::sync::{mpsc, oneshot, Mutex};
 
@@ -25,7 +25,7 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let doubled = futures::stream::iter(0..1000)
+    ///     let doubled = stream::iter(0..1000)
     ///         // add enumerated index that does not panic on overflow
     ///         .enumerate()
     ///         // double the values in parallel
@@ -130,7 +130,7 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     let mut stream = futures::stream::iter(data).batching(|mut rx, mut tx| async move {
+    ///     let mut stream = stream::iter(data).batching(|mut rx, mut tx| async move {
     ///         let mut buffer = vec![];
     ///         while let Some(value) = rx.recv().await {
     ///             buffer.push(value);
@@ -184,7 +184,7 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     futures::stream::iter(data).batching(|mut rx, mut tx| async move {
+    ///     stream::iter(data).batching(|mut rx, mut tx| async move {
     ///         while let Some(value) = rx.recv().await {
     ///             if value > 0 {
     ///                 let result = tx.send(value).await;
@@ -236,7 +236,7 @@ where
     /// async fn main_async() {
     ///     let orig: Vec<_> = (0..1000).collect();
     ///
-    ///     let rx1 = futures::stream::iter(orig.clone()).tee(1);
+    ///     let rx1 = stream::iter(orig.clone()).tee(1);
     ///     let rx2 = rx1.clone();
     ///     let rx3 = rx1.clone();
     ///
@@ -282,7 +282,7 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let mut guard = futures::stream::iter(0..).broadcast(2);
+    ///     let mut guard = stream::iter(0..).broadcast(2);
     ///     let rx1 = guard.register();
     ///     let rx2 = guard.register();
     ///     guard.finish(); // drop the guard
@@ -331,7 +331,7 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let doubled: Vec<_> = futures::stream::iter(0..1000)
+    ///     let doubled: Vec<_> = stream::iter(0..1000)
     ///         // doubles the values in parallel
     ///         .par_then(None, move |value| async move { value * 2 })
     ///         // the collected values will be ordered
@@ -396,7 +396,7 @@ where
     /// use std::collections::HashSet;
     ///
     /// async fn main_async() {
-    ///     let doubled: HashSet<_> = futures::stream::iter(0..1000)
+    ///     let doubled: HashSet<_> = stream::iter(0..1000)
     ///         // doubles the values in parallel
     ///         .par_then_unordered(None, move |value| {
     ///             // the future is sent to a parallel worker
@@ -465,7 +465,7 @@ where
     ///
     /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
-    ///     let doubled: Vec<_> = futures::stream::iter(0..1000)
+    ///     let doubled: Vec<_> = stream::iter(0..1000)
     ///         // doubles the values in parallel
     ///         .par_map(None, move |value| {
     ///             // the closure is sent to parallel worker
@@ -536,7 +536,7 @@ where
     /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
     ///
-    ///     let doubled: HashSet<_> = futures::stream::iter(0..1000)
+    ///     let doubled: HashSet<_> = stream::iter(0..1000)
     ///         // doubles the values in parallel
     ///         .par_map_unordered(None, move |value| {
     ///             // the closure is sent to parallel worker
@@ -597,7 +597,7 @@ where
     /// The `buf_size` is the size of buffer that stores the temporary reduced values.
     /// If it is `0` or `None`, it defaults the number of cores on system.
     ///
-    /// Unlike [fold()](futures::StreamExt::fold), the method does not combine the values sequentially.
+    /// Unlike [fold()](streamExt::fold), the method does not combine the values sequentially.
     /// Instead, the parallel workers greedly take two values from the buffer, reduce to
     /// one value, and push back to the buffer.
     ///
@@ -607,7 +607,7 @@ where
     ///
     /// async fn main_async() {
     ///     // the variable will be shared by parallel workers
-    ///     let sum = futures::stream::iter(1..=1000)
+    ///     let sum = stream::iter(1..=1000)
     ///         // sum up the values in parallel
     ///         .par_reduce(None, move |lhs, rhs| {
     ///             // the closure is sent to parallel worker
@@ -666,7 +666,7 @@ where
     ///         Box::new(|odd_value| Box::pin(async move { odd_value * 2 + 1 })),
     ///     ];
     ///
-    ///     let transformed: Vec<_> = futures::stream::iter(0..1000)
+    ///     let transformed: Vec<_> = stream::iter(0..1000)
     ///         // doubles the values in parallel
     ///         .par_routing(
     ///             None,
@@ -760,7 +760,7 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let orig = futures::stream::iter(1isize..=1000);
+    ///     let orig = stream::iter(1isize..=1000);
     ///
     ///     // scatter the items
     ///     let rx1 = orig.scatter(None);
@@ -876,7 +876,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             future.into_stream().map(|()| None),
             rx.into_stream().map(Some),
         )
@@ -896,17 +896,11 @@ where
         let (tx, rx) = flume::bounded(buf_size);
 
         let future = rt::spawn(async move {
-            let mut stream = self.then(f).boxed();
-
-            while let Some(output) = stream.next().await {
-                if tx.send_async(output).await.is_err() {
-                    break;
-                }
-            }
+            let _ = self.then(f).map(Ok).forward(tx.into_sink()).await;
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             rx.into_stream().map(Some),
             future.map(|()| None).into_stream(),
         )
@@ -924,23 +918,12 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn_blocking(move || {
-            let mut stream = self.map(f).boxed();
-
-            while let Some(output) = rt::block_on(stream.next()) {
-                if tx.send(output).is_err() {
-                    break;
-                }
-            }
+        let future = rt::spawn(async move {
+            let _ = self.map(f).map(Ok).forward(tx.into_sink()).await;
         })
         .map(|result| result.unwrap());
 
-        let stream = futures::stream::select(
-            rx.into_stream().map(Some),
-            future.map(|()| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let stream = utils::join_future_stream(future, rx.into_stream()).boxed();
 
         MapSpawned { stream }
     }
@@ -965,9 +948,9 @@ where
             }
         };
         let batching_future = f(input_rx, output_tx);
-        let join_future = futures::future::join(input_future, batching_future);
+        let join_future = future::join(input_future, batching_future);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.into_stream().map(|_| None),
         )
@@ -991,15 +974,9 @@ where
 
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
-        let mut stream = self.boxed();
 
         let input_fut = rt::spawn(async move {
-            while let Some(item) = stream.next().await {
-                let result = input_tx.send_async(item).await;
-                if result.is_err() {
-                    break;
-                }
-            }
+            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
         });
 
         let worker_futs: Vec<_> = (0..num_workers)
@@ -1009,9 +986,9 @@ where
             })
             .collect();
 
-        let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
+        let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_fut.into_stream().map(|_| None),
         )
@@ -1050,7 +1027,7 @@ where
                         })
                         .collect();
 
-                    let results = futures::future::join_all(futures).await;
+                    let results = future::join_all(futures).await;
                     let success_count = results
                         .iter()
                         .filter(|(result, tx)| {
@@ -1102,7 +1079,7 @@ where
                         Some(tx)
                     }
                 });
-                let senders_: Option<Vec<_>> = futures::future::join_all(sending_futures)
+                let senders_: Option<Vec<_>> = future::join_all(sending_futures)
                     .await
                     .into_iter()
                     .collect();
@@ -1174,7 +1151,7 @@ where
         ParThen { stream }
     }
 
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> ParThenUnordered<T>
+    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> ParThenUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -1188,42 +1165,27 @@ where
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let input_fut = async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let fut = f(item);
-                if input_tx.send_async(fut).await.is_err() {
-                    break;
-                };
-            }
-        };
-
+        let input_fut = rt::spawn(async move {
+            let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
+        });
         let worker_futs: Vec<_> = (0..num_workers)
             .map(|_| {
                 let input_rx = input_rx.clone();
                 let output_tx = output_tx.clone();
 
                 rt::spawn(async move {
-                    while let Ok(fut) = input_rx.recv_async().await {
-                        let output = fut.await;
-                        if output_tx.send_async(output).await.is_err() {
-                            break;
-                        }
-                    }
+                    let _ = input_rx
+                        .into_stream()
+                        .then(|fut| fut)
+                        .map(Ok)
+                        .forward(output_tx.into_sink())
+                        .await;
                 })
                 .map(|result| result.unwrap())
             })
             .collect();
-
-        let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
-
-        let stream = futures::stream::select(
-            output_rx.into_stream().map(Some),
-            join_fut.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let join_fut = future::join(input_fut, future::join_all(worker_futs));
+        let stream = utils::join_future_stream(join_fut, output_rx.into_stream()).boxed();
 
         ParThenUnordered { stream }
     }
@@ -1251,36 +1213,31 @@ where
         let init = init_f();
 
         let input_fut = async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let job = map_f(init.clone(), item);
-                if input_tx.send_async(job).await.is_err() {
-                    break;
-                };
-            }
+            let _ = self
+                .map(move |item| map_f(init.clone(), item))
+                .map(Ok)
+                .forward(input_tx.into_sink())
+                .await;
         };
 
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
+        let worker_futs = (0..num_workers).map(|_| {
+            let input_rx = input_rx.clone();
+            let output_tx = output_tx.clone();
 
-                rt::spawn(async move {
-                    while let Ok(job) = input_rx.recv_async().await {
-                        let output = job.await;
-                        if output_tx.send_async(output).await.is_err() {
-                            break;
-                        }
-                    }
-                })
-                .map(|result| result.unwrap())
+            rt::spawn(async move {
+                let _ = input_rx
+                    .into_stream()
+                    .then(|fut| fut)
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
             })
-            .collect();
+            .map(|result| result.unwrap())
+        });
 
-        let join_fut = futures::future::join(input_fut, futures::future::join_all(worker_futs));
+        let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
@@ -1335,7 +1292,7 @@ where
         ParMap { stream }
     }
 
-    fn par_map_unordered<P, T, F, Func>(self, config: P, mut f: F) -> ParMapUnordered<T>
+    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> ParMapUnordered<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -1350,15 +1307,7 @@ where
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
         let input_future = rt::spawn(async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let job = f(item);
-                let result = input_tx.send_async(job).await;
-                if result.is_err() {
-                    break;
-                };
-            }
+            let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
         })
         .map(|result| result.unwrap());
 
@@ -1380,10 +1329,9 @@ where
             })
             .collect();
 
-        let join_future =
-            futures::future::join(input_future, futures::future::join_all(worker_futures));
+        let join_future = future::join(input_future, future::join_all(worker_futures));
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.map(|_| None).into_stream(),
         )
@@ -1437,13 +1385,7 @@ where
             let (input_tx, input_rx) = flume::bounded(buf_size);
 
             let input_future = rt::spawn(async move {
-                let mut stream = self.boxed();
-
-                while let Some(item) = stream.next().await {
-                    if input_tx.send_async(item).await.is_err() {
-                        break;
-                    }
-                }
+                let _ = self.map(Ok).forward(input_tx.into_sink()).await;
             })
             .map(|result| result.unwrap());
 
@@ -1466,9 +1408,9 @@ where
                     .map(|result| result.unwrap())
                 })
             };
-            let join_reducer_future = futures::future::join_all(reducer_futures);
+            let join_reducer_future = future::join_all(reducer_futures);
 
-            let ((), values) = futures::future::join(input_future, join_reducer_future).await;
+            let ((), values) = future::join(input_future, join_reducer_future).await;
 
             (values, reduce_fn)
         };
@@ -1527,9 +1469,9 @@ where
                 })
                 .map(|result| result.unwrap())
             });
-            let join_reducer_future = futures::future::join_all(reducer_futures);
+            let join_reducer_future = future::join_all(reducer_futures);
 
-            let (output, _) = futures::future::join(pairing_future, join_reducer_future).await;
+            let (output, _) = future::join(pairing_future, join_reducer_future).await;
 
             output
         };
@@ -1622,14 +1564,9 @@ where
             }
         };
 
-        let join_fut = futures::future::join3(
-            routing_fut,
-            reorder_fut,
-            futures::future::join_all(map_futs),
-        )
-        .boxed();
+        let join_fut = future::join3(routing_fut, reorder_fut, future::join_all(map_futs)).boxed();
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
@@ -1694,9 +1631,9 @@ where
             }
         };
 
-        let join_fut = futures::future::join(routing_fut, futures::future::join_all(map_futs));
+        let join_fut = future::join(routing_fut, future::join_all(map_futs));
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_fut.map(|_| None).into_stream(),
         )
@@ -1761,7 +1698,7 @@ where
             })
             .collect();
 
-        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs))
+        let join_fut = future::join(map_fut, future::join_all(worker_futs))
             .map(|_| ())
             .boxed();
 
@@ -1820,7 +1757,7 @@ where
             })
             .collect();
 
-        let join_fut = futures::future::join(map_fut, futures::future::join_all(worker_futs))
+        let join_fut = future::join(map_fut, future::join_all(worker_futs))
             .map(|_| ())
             .boxed();
 
@@ -1919,7 +1856,7 @@ mod sync {
         match num_streams {
             0 => {
                 return Sync {
-                    stream: futures::stream::empty().boxed(),
+                    stream: stream::empty().boxed(),
                 };
             }
             1 => {
@@ -1930,7 +1867,7 @@ mod sync {
             _ => {}
         }
 
-        let mut select_stream = futures::stream::select_all(streams);
+        let mut select_stream = stream::select_all(streams);
         let (input_tx, input_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
@@ -2007,9 +1944,9 @@ mod sync {
         })
         .map(|result| result.unwrap());
 
-        let join_future = futures::future::join(input_future, sync_future);
+        let join_future = future::join(input_future, sync_future);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             join_future.into_stream().map(|_| None),
             output_rx.into_stream().map(|item| Some(item)),
         )
@@ -2076,7 +2013,7 @@ mod unfold {
             }
         });
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             producer_fut
                 .into_stream()
                 .map(|result| {
@@ -2124,7 +2061,7 @@ mod unfold {
             }
         });
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             producer_fut
                 .into_stream()
                 .map(|result| {
@@ -2221,9 +2158,9 @@ mod par_unfold_unordered {
             })
         });
 
-        let join_future = futures::future::try_join_all(worker_futs);
+        let join_future = future::try_join_all(worker_futs);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
@@ -2280,9 +2217,9 @@ mod par_unfold_unordered {
             })
         });
 
-        let join_future = futures::future::try_join_all(worker_futs);
+        let join_future = future::try_join_all(worker_futs);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             join_future.into_stream().map(|result| {
                 result.unwrap();
@@ -2475,7 +2412,7 @@ mod broadcast {
             let future = future.clone();
             let ready = ready.clone();
 
-            let stream = futures::stream::select(
+            let stream = stream::select(
                 rx.into_stream().map(Some),
                 async move {
                     assert!(
@@ -2784,12 +2721,12 @@ mod gather {
     /// Collect multiple streams into single stream.
     ///
     /// ```rust
-    /// use futures::stream::StreamExt;
+    /// use futures::stream::{self, StreamExt as _};
     /// use par_stream::prelude::*;
     /// use std::collections::HashSet;
     ///
     /// async fn main_async() {
-    ///     let orig = futures::stream::iter(0..1000);
+    ///     let orig = stream::iter(0..1000);
     ///
     ///     // scatter stream items to two receivers
     ///     let rx1 = orig.scatter(None);
@@ -2843,9 +2780,9 @@ mod gather {
                 }
             }
         });
-        let gather_future = futures::future::join_all(worker_futures);
+        let gather_future = future::join_all(worker_futures);
 
-        let stream = futures::stream::select(
+        let stream = stream::select(
             output_rx.into_stream().map(Some),
             gather_future.into_stream().map(|_| None),
         )
@@ -3036,7 +2973,7 @@ mod batching {
         }
 
         pub fn into_stream(self) -> BatchingReceiverStream<T> {
-            let stream = futures::stream::unfold(self, |mut rx| async move {
+            let stream = stream::unfold(self, |mut rx| async move {
                 rx.recv().await.map(|item| (item, rx))
             })
             .boxed();
@@ -3154,7 +3091,7 @@ mod tests {
     #[tokio::test]
     async fn then_spawned_test() {
         {
-            let values: Vec<_> = futures::stream::iter(0..1000)
+            let values: Vec<_> = stream::iter(0..1000)
                 .then_spawned(None, |val| async move { val * 2 })
                 .collect()
                 .await;
@@ -3167,7 +3104,7 @@ mod tests {
     #[tokio::test]
     async fn map_spawned_test() {
         {
-            let values: Vec<_> = futures::stream::iter(0..1000)
+            let values: Vec<_> = stream::iter(0..1000)
                 .map_spawned(None, |val| val * 2)
                 .collect()
                 .await;
@@ -3179,7 +3116,7 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_test() {
-        let mut guard = futures::stream::iter(0..).broadcast(2);
+        let mut guard = stream::iter(0..).broadcast(2);
         let rx1 = guard.register();
         let rx2 = guard.register();
         guard.finish();
@@ -3200,7 +3137,7 @@ mod tests {
         let mut rng = rand::thread_rng();
         let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
-        let sums: Vec<_> = futures::stream::iter(data)
+        let sums: Vec<_> = stream::iter(data)
             .par_batching_unordered(None, |_, input, output| async move {
                 let mut sum = 0;
 
@@ -3226,7 +3163,7 @@ mod tests {
 
     #[tokio::test]
     async fn batching_test() {
-        let sums: Vec<_> = futures::stream::iter(0..10)
+        let sums: Vec<_> = stream::iter(0..10)
             .batching(|mut input, mut output| async move {
                 let mut sum = 0;
 
@@ -3254,7 +3191,7 @@ mod tests {
     #[tokio::test]
     async fn par_then_output_is_ordered_test() {
         let max = 1000u64;
-        futures::stream::iter(0..max)
+        stream::iter(0..max)
             .par_then(None, |value| async move {
                 rt::sleep(Duration::from_millis(value % 20)).await;
                 value
@@ -3269,7 +3206,7 @@ mod tests {
     #[tokio::test]
     async fn par_then_unordered_test() {
         let max = 1000u64;
-        let mut values: Vec<_> = futures::stream::iter((0..max).into_iter())
+        let mut values: Vec<_> = stream::iter((0..max).into_iter())
             .par_then_unordered(None, |value| async move {
                 rt::sleep(Duration::from_millis(value % 20)).await;
                 value
@@ -3286,7 +3223,7 @@ mod tests {
     #[tokio::test]
     async fn par_reduce_test() {
         {
-            let sum: Option<u64> = futures::stream::iter(iter::empty())
+            let sum: Option<u64> = stream::iter(iter::empty())
                 .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
                 .await;
             assert!(sum.is_none());
@@ -3294,7 +3231,7 @@ mod tests {
 
         {
             let max = 100_000u64;
-            let sum = futures::stream::iter((1..=max).into_iter())
+            let sum = stream::iter((1..=max).into_iter())
                 .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
                 .await;
             assert_eq!(sum, Some((1 + max) * max / 2));
@@ -3304,7 +3241,7 @@ mod tests {
     #[tokio::test]
     async fn reorder_index_haling_test() {
         let indexes = vec![5, 2, 1, 0, 6, 4, 3];
-        let output: Vec<_> = futures::stream::iter(indexes)
+        let output: Vec<_> = stream::iter(indexes)
             .then(|index| async move {
                 rt::sleep(Duration::from_millis(20)).await;
                 (index, index)
@@ -3320,14 +3257,14 @@ mod tests {
         let max = 1000u64;
         let iterator = (0..max).rev().step_by(2);
 
-        let lhs = futures::stream::iter(iterator.clone())
+        let lhs = stream::iter(iterator.clone())
             .enumerate()
             .par_then_unordered(None, |(index, value)| async move {
                 rt::sleep(std::time::Duration::from_millis(value % 20)).await;
                 (index, value)
             })
             .reorder_enumerated();
-        let rhs = futures::stream::iter(iterator.clone());
+        let rhs = stream::iter(iterator.clone());
 
         let is_equal =
             async_std::stream::StreamExt::all(&mut lhs.zip(rhs), |(lhs_value, rhs_value)| {
@@ -3345,7 +3282,7 @@ mod tests {
             let sum = Arc::new(AtomicUsize::new(0));
             {
                 let sum = sum.clone();
-                futures::stream::iter(1..=1000)
+                stream::iter(1..=1000)
                     .par_for_each(None, move |value| {
                         let sum = sum.clone();
                         async move {
@@ -3359,7 +3296,7 @@ mod tests {
 
         {
             let sum = Arc::new(AtomicUsize::new(0));
-            futures::stream::iter(1..=1000)
+            stream::iter(1..=1000)
                 .par_for_each_init(
                     None,
                     || sum.clone(),
@@ -3377,7 +3314,7 @@ mod tests {
 
     #[tokio::test]
     async fn tee_halt_test() {
-        let mut rx1 = futures::stream::iter(0..).tee(1);
+        let mut rx1 = stream::iter(0..).tee(1);
         let mut rx2 = rx1.clone();
 
         assert!(rx1.next().await.is_some());
@@ -3398,7 +3335,7 @@ mod tests {
     async fn tee_test() {
         let orig: Vec<_> = (0..100).collect();
 
-        let rx1 = futures::stream::iter(orig.clone()).tee(1);
+        let rx1 = stream::iter(orig.clone()).tee(1);
         let rx2 = rx1.clone();
         let rx3 = rx1.clone();
 
@@ -3558,8 +3495,8 @@ mod tests {
     #[tokio::test]
     async fn sync_test() {
         {
-            let stream1 = futures::stream::iter([1, 3, 5, 7]);
-            let stream2 = futures::stream::iter([2, 4, 6, 8]);
+            let stream1 = stream::iter([1, 3, 5, 7]);
+            let stream2 = stream::iter([2, 4, 6, 8]);
 
             let collected: Vec<_> = super::sync_by_key(None, |&val| val, [stream1, stream2])
                 .collect()
@@ -3581,8 +3518,8 @@ mod tests {
         }
 
         {
-            let stream1 = futures::stream::iter([1, 2, 3]);
-            let stream2 = futures::stream::iter([2, 1, 3]);
+            let stream1 = stream::iter([1, 2, 3]);
+            let stream2 = stream::iter([2, 1, 3]);
 
             let (synced, leaked): (Vec<_>, Vec<_>) =
                 super::sync_by_key(None, |&val| val, [stream1, stream2])
@@ -3603,7 +3540,7 @@ mod tests {
     #[tokio::test]
     async fn scan_spawned_test() {
         {
-            let collected: Vec<_> = futures::stream::iter([2, 3, 1, 4])
+            let collected: Vec<_> = stream::iter([2, 3, 1, 4])
                 .scan_spawned(None, 0, |acc, val| async move {
                     let acc = acc + val;
                     Some((acc, acc))
@@ -3614,7 +3551,7 @@ mod tests {
         }
 
         {
-            let collected: Vec<_> = futures::stream::iter([2, 3, 1, 4])
+            let collected: Vec<_> = stream::iter([2, 3, 1, 4])
                 .scan_spawned(None, 0, |acc, val| async move {
                     let acc = acc + val;
                     (acc != 6).then(|| (acc, acc))
