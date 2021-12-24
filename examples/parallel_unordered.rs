@@ -8,7 +8,7 @@ async fn main_async() {
 
     let doubled: Vec<_> = futures::stream::iter(0..1000)
         // add indexes that does not panic on overflow
-        .wrapping_enumerate()
+        .enumerate()
         // unordered parallel tasks on futures
         .par_then_unordered(None, move |(index, value)| {
             // cloned needed variables in the main thread

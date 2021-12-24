@@ -11,9 +11,6 @@ pub trait IndexedStreamExt
 where
     Self: Stream,
 {
-    /// Gives the current iteration count that may overflow to zero as well as the next value.
-    fn wrapping_enumerate(self) -> WrappingEnumerate<Self>;
-
     /// Reorder the input items paired with a iteration count.
     ///
     /// The combinator asserts the input item has tuple type `(usize, T)`.
@@ -30,7 +27,7 @@ where
     /// async fn main_async() {
     ///     let doubled = futures::stream::iter(0..1000)
     ///         // add enumerated index that does not panic on overflow
-    ///         .wrapping_enumerate()
+    ///         .enumerate()
     ///         // double the values in parallel
     ///         .par_then_unordered(None, move |(index, value)| {
     ///             // the closure is sent to parallel worker
@@ -75,14 +72,6 @@ impl<S> IndexedStreamExt for S
 where
     S: Stream,
 {
-    fn wrapping_enumerate(self) -> WrappingEnumerate<Self>
-where {
-        WrappingEnumerate {
-            stream: self,
-            counter: 0,
-        }
-    }
-
     fn reorder_enumerated<T>(self) -> ReorderEnumerated<Self, T>
     where
         Self: Stream<Item = (usize, T)>,
@@ -1151,7 +1140,7 @@ where
         };
 
         let stream = self
-            .wrapping_enumerate()
+            .enumerate()
             .par_then_unordered(config, indexed_f)
             .reorder_enumerated()
             .boxed();
@@ -2542,47 +2531,6 @@ mod broadcast {
     }
 }
 
-// wrapping_enumerate
-
-pub use wrapping_enumerate::*;
-
-mod wrapping_enumerate {
-    use super::*;
-
-    /// A stream combinator returned from [wrapping_enumerate()](IndexedStreamExt::wrapping_enumerate).
-    #[pin_project(project = WrappingEnumerateProj)]
-    #[derive(Debug)]
-    pub struct WrappingEnumerate<S>
-    where
-        S: ?Sized,
-    {
-        pub(super) counter: usize,
-        #[pin]
-        pub(super) stream: S,
-    }
-
-    impl<S> Stream for WrappingEnumerate<S>
-    where
-        S: Stream,
-    {
-        type Item = (usize, S::Item);
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let WrappingEnumerateProj { stream, counter } = self.project();
-
-            match stream.poll_next(cx) {
-                Ready(Some(item)) => {
-                    let index = *counter;
-                    *counter = counter.wrapping_add(1);
-                    Ready(Some((index, item)))
-                }
-                Ready(None) => Ready(None),
-                Pending => Pending,
-            }
-        }
-    }
-}
-
 // reorder_enumerated
 
 pub use reorder_enumerated::*;
@@ -3373,7 +3321,7 @@ mod tests {
         let iterator = (0..max).rev().step_by(2);
 
         let lhs = futures::stream::iter(iterator.clone())
-            .wrapping_enumerate()
+            .enumerate()
             .par_then_unordered(None, |(index, value)| async move {
                 rt::sleep(std::time::Duration::from_millis(value % 20)).await;
                 (index, value)

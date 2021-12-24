@@ -19,13 +19,6 @@ where
     where
         Self: Stream<Item = Result<T, E>>;
 
-    /// Create a fallible stream that gives the current iteration count.
-    ///
-    /// The count wraps to zero if the count overflows.
-    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
-    where
-        Self: Stream<Item = Result<T, E>>;
-
     /// Creates a fallible stream that reorders the items according to the iteration count.
     ///
     /// It is usually combined with [try_wrapping_enumerate](FallibleIndexedStreamExt::try_wrapping_enumerate).
@@ -43,18 +36,6 @@ where
         Self: Stream<Item = Result<T, E>>,
     {
         TryEnumerate {
-            stream: self,
-            counter: 0,
-            fused: false,
-            _phantom: PhantomData,
-        }
-    }
-
-    fn try_wrapping_enumerate<T, E>(self) -> TryWrappingEnumerate<Self, T, E>
-    where
-        Self: Stream<Item = Result<T, E>>,
-    {
-        TryWrappingEnumerate {
             stream: self,
             counter: 0,
             fused: false,
@@ -2231,74 +2212,6 @@ mod try_enumerate {
     }
 }
 
-// try_wrapping_enumerate
-
-pub use try_wrapping_enumerate::*;
-
-mod try_wrapping_enumerate {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_wrapping_enumerate()](FallibleIndexedStreamExt::try_wrapping_enumerate).
-    #[pin_project(project = TryWrappingEnumerateProj)]
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryWrappingEnumerate<S, T, E>
-    where
-        S: ?Sized,
-    {
-        pub(super) counter: usize,
-        pub(super) fused: bool,
-        pub(super) _phantom: PhantomData<(T, E)>,
-        #[pin]
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: S,
-    }
-
-    impl<S, T, E> Stream for TryWrappingEnumerate<S, T, E>
-    where
-        S: Stream<Item = Result<T, E>>,
-    {
-        type Item = Result<(usize, T), E>;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let TryWrappingEnumerateProj {
-                stream,
-                fused,
-                counter,
-                ..
-            } = self.project();
-
-            if *fused {
-                return Ready(None);
-            }
-
-            let poll = stream.poll_next(cx);
-            match poll {
-                Ready(Some(Ok(item))) => {
-                    let index = *counter;
-                    *counter = counter.wrapping_add(1);
-                    Ready(Some(Ok((index, item))))
-                }
-                Ready(Some(Err(err))) => {
-                    *fused = true;
-                    Ready(Some(Err(err)))
-                }
-                Ready(None) => Ready(None),
-                Pending => Pending,
-            }
-        }
-    }
-
-    impl<S, T, E> FusedStream for TryWrappingEnumerate<S, T, E>
-    where
-        S: Stream<Item = Result<T, E>>,
-    {
-        fn is_terminated(&self) -> bool {
-            self.fused
-        }
-    }
-}
-
 // reorder_enumerated
 
 pub use try_reorder_enumerated::*;
@@ -3322,7 +3235,7 @@ mod tests {
                         Ok(value)
                     }
                 })
-                .try_wrapping_enumerate()
+                .try_enumerate()
                 .try_par_then_unordered(None, |(index, value)| async move {
                     rt::sleep(Duration::from_millis(value as u64 % 10)).await;
                     Ok((index, value))
