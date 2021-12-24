@@ -2,7 +2,7 @@ use futures::stream::{self, StreamExt as _};
 use par_stream::ParStreamExt;
 
 async fn main_async() {
-    let rx1 = futures::stream::iter(1isize..=1000).scatter(None);
+    let rx1 = futures::stream::iter(1isize..=1000).scatter();
     let rx2 = rx1.clone();
 
     // gather from workers

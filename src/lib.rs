@@ -38,7 +38,7 @@
 //! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates receivers to recieve copied elements.
 //!   Unlike [`stream.broadcast(buf_size)`](ParStreamExt::broadcast), it can create new receivers after
 //!   existing receivers start consuming items. Receivers created lately may miss some of the elements.
-//! - [`stream.scatter(buf_size)`](ParStreamExt::scatter) sends each element to one of existing receivers.
+//! - [`stream.scatter()`](ParStreamExt::scatter) sends each element to one of existing receivers.
 //! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
 //! - [`sync_by_key(buf_size, key_fn, streams)`](sync_by_key) synchronizes multiple streams by pairing up
 //!   the key of each item from input streams.
@@ -57,7 +57,7 @@
 //!     let orig = futures::stream::iter(0..1000);
 //!
 //!     // scatter stream items to two receivers
-//!     let rx1 = orig.scatter(None);
+//!     let rx1 = orig.scatter();
 //!     let rx2 = rx1.clone();
 //!
 //!     // gather back from two receivers

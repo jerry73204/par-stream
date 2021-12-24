@@ -721,7 +721,7 @@ where
         buf_size: impl Into<Option<usize>>,
         routing_fn: F1,
         map_fns: Vec<F2>,
-    ) -> ParRouting<T>
+    ) -> BoxStream<'static, T>
     where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -743,7 +743,7 @@ where
         buf_size: impl Into<Option<usize>>,
         routing_fn: F1,
         map_fns: Vec<F2>,
-    ) -> ParRoutingUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -767,7 +767,7 @@ where
     ///     let orig = stream::iter(1isize..=1000);
     ///
     ///     // scatter the items
-    ///     let rx1 = orig.scatter(None);
+    ///     let rx1 = orig.scatter();
     ///     let rx2 = rx1.clone();
     ///
     ///     // collect the values concurrently
@@ -794,7 +794,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn scatter(self, buf_size: impl Into<Option<usize>>) -> Scatter<Self::Item>
+    fn scatter(self) -> Scatter<Self::Item>
 where;
 
     /// Runs an asynchronous task on each element of an stream in parallel.
@@ -880,12 +880,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        stream::select(
-            future.into_stream().map(|()| None),
-            rx.into_stream().map(Some),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(future, rx.into_stream()).boxed()
     }
 
     fn then_spawned<T, F, Fut>(
@@ -906,12 +901,7 @@ where
         })
         .map(|result| result.unwrap());
 
-        stream::select(
-            rx.into_stream().map(Some),
-            future.map(|()| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(future, rx.into_stream()).boxed()
     }
 
     fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
@@ -952,12 +942,7 @@ where
         let batching_future = f(input_rx, output_tx);
         let join_future = future::join(input_future, batching_future);
 
-        stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.into_stream().map(|_| None),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
     }
 
     fn par_batching_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, T>
@@ -988,12 +973,7 @@ where
 
         let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        stream::select(
-            output_rx.into_stream().map(Some),
-            join_fut.into_stream().map(|_| None),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
     fn tee(self, buf_size: usize) -> Tee<Self::Item>
@@ -1227,12 +1207,7 @@ where
 
         let join_fut = future::join(input_fut, future::join_all(worker_futs));
 
-        stream::select(
-            output_rx.into_stream().map(Some),
-            join_fut.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
     fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, T>
@@ -1313,12 +1288,7 @@ where
 
         let join_future = future::join(input_future, future::join_all(worker_futures));
 
-        stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
     }
 
     fn par_map_init_unordered<P, T, B, InitF, MapF, Func>(
@@ -1463,7 +1433,7 @@ where
         buf_size: impl Into<Option<usize>>,
         mut routing_fn: F1,
         mut map_fns: Vec<F2>,
-    ) -> ParRouting<T>
+    ) -> BoxStream<'static, T>
     where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -1543,14 +1513,7 @@ where
 
         let join_fut = future::join3(routing_fut, reorder_fut, future::join_all(map_futs)).boxed();
 
-        let stream = stream::select(
-            output_rx.into_stream().map(Some),
-            join_fut.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        ParRouting { stream }
+        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
     fn par_routing_unordered<F1, F2, Fut, T>(
@@ -1558,7 +1521,7 @@ where
         buf_size: impl Into<Option<usize>>,
         mut routing_fn: F1,
         mut map_fns: Vec<F2>,
-    ) -> ParRoutingUnordered<T>
+    ) -> BoxStream<'static, T>
     where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -1610,32 +1573,18 @@ where
 
         let join_fut = future::join(routing_fut, future::join_all(map_futs));
 
-        let stream = stream::select(
-            output_rx.into_stream().map(Some),
-            join_fut.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        ParRoutingUnordered { stream }
+        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
-    fn scatter(self, buf_size: impl Into<Option<usize>>) -> Scatter<Self::Item> {
-        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (tx, rx) = flume::bounded(buf_size);
+    fn scatter(self) -> Scatter<Self::Item> {
+        let (tx, rx) = flume::bounded(0);
 
-        let future = rt::spawn(async move {
-            let mut stream = self.boxed();
-            while let Some(item) = stream.next().await {
-                if tx.send_async(item).await.is_err() {
-                    break;
-                }
-            }
+        rt::spawn(async move {
+            let _ = self.map(Ok).forward(tx.into_sink()).await;
         });
 
         Scatter {
-            future: Arc::new(Mutex::new(Some(future))),
-            receiver: rx,
+            stream: rx.into_stream(),
         }
     }
 
@@ -1923,12 +1872,7 @@ mod sync {
 
         let join_future = future::join(input_future, sync_future);
 
-        let stream = stream::select(
-            join_future.into_stream().map(|_| None),
-            output_rx.into_stream().map(|item| Some(item)),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let stream = utils::join_future_stream(join_future, output_rx.into_stream()).boxed();
 
         Sync { stream }
     }
@@ -2235,44 +2179,19 @@ mod scatter {
     use super::*;
 
     /// A stream combinator returned from [scatter()](ParStreamExt::scatter).
-    #[derive(Debug)]
-    pub struct Scatter<T> {
-        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) receiver: flume::Receiver<T>,
+    #[derive(Clone)]
+    pub struct Scatter<T>
+    where
+        T: 'static,
+    {
+        pub(super) stream: flume::r#async::RecvStream<'static, T>,
     }
 
     impl<T> Stream for Scatter<T> {
         type Item = T;
 
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Ok(mut future_opt) = self.future.try_lock() {
-                if let Some(future) = &mut *future_opt {
-                    if Pin::new(future).poll(cx).is_ready() {
-                        *future_opt = None;
-                    }
-                }
-            }
-
-            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
-                Ready(Ok(output)) => {
-                    cx.waker().clone().wake();
-                    Ready(Some(output))
-                }
-                Ready(Err(_)) => Ready(None),
-                Pending => {
-                    cx.waker().clone().wake();
-                    Pending
-                }
-            }
-        }
-    }
-
-    impl<T> Clone for Scatter<T> {
-        fn clone(&self) -> Self {
-            Self {
-                future: self.future.clone(),
-                receiver: self.receiver.clone(),
-            }
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
