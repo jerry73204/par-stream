@@ -182,7 +182,11 @@ where
 
     /// Runs this stream to completion, executing asynchronous closure for each element on the stream
     /// in parallel.
-    fn try_par_for_each<P, F, Fut>(self, config: P, f: F) -> TryParForEach<Self::Error>
+    fn try_par_for_each<P, F, Fut>(
+        self,
+        config: P,
+        f: F,
+    ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
@@ -194,7 +198,7 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> TryParForEach<Self::Error>
+    ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
         P: IntoParStreamParams,
         B: 'static + Send + Clone,
@@ -207,7 +211,7 @@ where
         self,
         config: P,
         f: F,
-    ) -> TryParForEachBlocking<Self::Error>
+    ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
@@ -219,7 +223,7 @@ where
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> TryParForEachBlocking<Self::Error>
+    ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
         P: IntoParStreamParams,
         B: 'static + Send + Clone,
@@ -1323,7 +1327,7 @@ where
         self.try_par_map_unordered(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_for_each<P, F, Fut>(self, config: P, mut f: F) -> TryParForEach<E>
+    fn try_par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(T) -> Fut + Send,
@@ -1388,7 +1392,7 @@ where
             })
             .collect();
 
-        let output_fut = async move {
+        async move {
             let (map_result, worker_results) =
                 futures::join!(map_fut, future::join_all(worker_futs));
 
@@ -1399,11 +1403,7 @@ where
                     result.and(folded)
                 })
         }
-        .boxed();
-
-        TryParForEach {
-            future: output_fut.boxed(),
-        }
+        .boxed()
     }
 
     fn try_par_for_each_init<P, B, InitF, MapF, Fut>(
@@ -1411,7 +1411,7 @@ where
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParForEach<E>
+    ) -> BoxFuture<'static, Result<(), E>>
     where
         P: IntoParStreamParams,
         B: 'static + Send + Clone,
@@ -1423,7 +1423,11 @@ where
         self.try_par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> TryParForEachBlocking<E>
+    fn try_par_for_each_blocking<P, F, Func>(
+        self,
+        config: P,
+        mut f: F,
+    ) -> BoxFuture<'static, Result<(), E>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(T) -> Func + Send,
@@ -1494,7 +1498,7 @@ where
             })
             .collect();
 
-        let output_fut = async move {
+        async move {
             let (input_result, worker_results) =
                 futures::join!(input_fut, future::join_all(worker_futs));
 
@@ -1505,11 +1509,7 @@ where
                     result.and(folded)
                 })
         }
-        .boxed();
-
-        TryParForEachBlocking {
-            future: output_fut.boxed(),
-        }
+        .boxed()
     }
 
     fn try_par_for_each_blocking_init<P, B, InitF, MapF, Func>(
@@ -1517,7 +1517,7 @@ where
         config: P,
         mut init_f: InitF,
         mut f: MapF,
-    ) -> TryParForEachBlocking<E>
+    ) -> BoxFuture<'static, Result<(), E>>
     where
         P: IntoParStreamParams,
         B: 'static + Send + Clone,
@@ -1596,54 +1596,6 @@ mod try_tee {
                     Pending
                 }
             }
-        }
-    }
-}
-
-// try_par_for_each
-
-pub use try_par_for_each::*;
-
-mod try_par_for_each {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_for_each()](FallibleParStreamExt::try_par_for_each) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParForEach<E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) future: BoxFuture<'static, Result<(), E>>,
-    }
-
-    impl<E> Future for TryParForEach<E> {
-        type Output = Result<(), E>;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            Pin::new(&mut self.future).poll(cx)
-        }
-    }
-}
-
-// try_par_for_each
-
-pub use try_par_for_each_blocking::*;
-
-mod try_par_for_each_blocking {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_for_each()](FallibleParStreamExt::try_par_for_each) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParForEachBlocking<E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) future: BoxFuture<'static, Result<(), E>>,
-    }
-
-    impl<E> Future for TryParForEachBlocking<E> {
-        type Output = Result<(), E>;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            Pin::new(&mut self.future).poll(cx)
         }
     }
 }
@@ -1979,54 +1931,6 @@ mod try_par_unfold_unordered {
     }
 
     impl<T, E> Stream for TryParUnfoldUnordered<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_then_spawned
-
-pub use try_then_spawned::*;
-
-mod try_then_spawned {
-    use super::*;
-
-    /// A stream combinator returned from [try_then_spawned()](FallibleParStreamExt::try_then_spawned).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryThenSpawned<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryThenSpawned<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_map_spawned
-
-pub use try_map_spawned::*;
-
-mod try_map_spawned {
-    use super::*;
-
-    /// A stream combinator returned from [try_map_spawned()](FallibleParStreamExt::try_map_spawned).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryMapSpawned<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryMapSpawned<T, E> {
         type Item = Result<T, E>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

@@ -561,7 +561,11 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_reduce<P, F, Fut>(self, config: P, reduce_fn: F) -> ParReduce<Self::Item>
+    fn par_reduce<P, F, Fut>(
+        self,
+        config: P,
+        reduce_fn: F,
+    ) -> BoxFuture<'static, Option<Self::Item>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
@@ -717,11 +721,10 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn scatter(self) -> Scatter<Self::Item>
-where;
+    fn scatter(self) -> Scatter<Self::Item>;
 
     /// Runs an asynchronous task on each element of an stream in parallel.
-    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> ParForEach
+    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
@@ -734,7 +737,7 @@ where;
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> ParForEach
+    ) -> BoxFuture<'static, ()>
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -743,7 +746,7 @@ where;
         P: IntoParStreamParams;
 
     /// Runs an blocking task on each element of an stream in parallel.
-    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> ParForEachBlocking
+    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -756,7 +759,7 @@ where;
         config: P,
         init_f: InitF,
         f: MapF,
-    ) -> ParForEachBlocking
+    ) -> BoxFuture<'static, ()>
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -1212,7 +1215,11 @@ where
             .boxed()
     }
 
-    fn par_reduce<P, F, Fut>(self, config: P, reduce_fn: F) -> ParReduce<Self::Item>
+    fn par_reduce<P, F, Fut>(
+        self,
+        config: P,
+        reduce_fn: F,
+    ) -> BoxFuture<'static, Option<Self::Item>>
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
@@ -1319,9 +1326,7 @@ where
             output
         };
 
-        let future = phase_2_future.boxed();
-
-        ParReduce { future }
+        phase_2_future.boxed()
     }
 
     fn par_routing<F1, F2, Fut, T>(
@@ -1484,7 +1489,7 @@ where
         }
     }
 
-    fn par_for_each<P, F, Fut>(self, config: P, mut f: F) -> ParForEach
+    fn par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
@@ -1520,11 +1525,9 @@ where
             })
             .collect();
 
-        let join_fut = future::join(map_fut, future::join_all(worker_futs))
+        future::join(map_fut, future::join_all(worker_futs))
             .map(|_| ())
-            .boxed();
-
-        ParForEach { future: join_fut }
+            .boxed()
     }
 
     fn par_for_each_init<P, B, InitF, MapF, Fut>(
@@ -1532,7 +1535,7 @@ where
         config: P,
         init_f: InitF,
         mut map_f: MapF,
-    ) -> ParForEach
+    ) -> BoxFuture<'static, ()>
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -1544,7 +1547,7 @@ where
         self.par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
-    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> ParForEachBlocking
+    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -1579,11 +1582,9 @@ where
             })
             .collect();
 
-        let join_fut = future::join(map_fut, future::join_all(worker_futs))
+        future::join(map_fut, future::join_all(worker_futs))
             .map(|_| ())
-            .boxed();
-
-        ParForEachBlocking { future: join_fut }
+            .boxed()
     }
 
     fn par_for_each_blocking_init<P, B, InitF, MapF, Func>(
@@ -1591,7 +1592,7 @@ where
         config: P,
         init_f: InitF,
         mut map_f: MapF,
-    ) -> ParForEachBlocking
+    ) -> BoxFuture<'static, ()>
     where
         B: 'static + Send + Clone,
         InitF: FnOnce() -> B,
@@ -1793,78 +1794,6 @@ mod broadcast {
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// par_reduce
-
-pub use par_reduce::*;
-
-mod par_reduce {
-    use super::*;
-
-    /// A stream combinator returned from [par_reduce()](ParStreamExt::par_reduce).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct ParReduce<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) future: BoxFuture<'static, Option<T>>,
-    }
-
-    impl<T> Future for ParReduce<T> {
-        type Output = Option<T>;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Self::Output> {
-            Pin::new(&mut self.future).poll(cx)
-        }
-    }
-}
-
-// par_for each
-
-pub use par_for_each::*;
-
-mod par_for_each {
-    use super::*;
-
-    /// A stream combinator returned from [par_for_each()](ParStreamExt::par_for_each) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct ParForEach {
-        #[derivative(Debug = "ignore")]
-        pub(super) future: BoxFuture<'static, ()>,
-    }
-
-    impl Future for ParForEach {
-        type Output = ();
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.future).poll(cx)
-        }
-    }
-}
-
-// par_for each_blocking
-
-pub use par_for_each_blocking::*;
-
-mod par_for_each_blocking {
-    use super::*;
-
-    /// A stream combinator returned from [par_for_each_blocking()](ParStreamExt::par_for_each_blocking) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct ParForEachBlocking {
-        #[derivative(Debug = "ignore")]
-        pub(super) future: BoxFuture<'static, ()>,
-    }
-
-    impl Future for ParForEachBlocking {
-        type Output = ();
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.future).poll(cx)
         }
     }
 }
