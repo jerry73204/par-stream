@@ -65,7 +65,7 @@ where
         buf_size: impl Into<Option<usize>>,
         init: B,
         map_fn: F,
-    ) -> TryScanSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         B: 'static + Send,
@@ -80,7 +80,7 @@ where
         self,
         buf_size: impl Into<Option<usize>>,
         f: F,
-    ) -> TryThenSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -94,7 +94,7 @@ where
         self,
         buf_size: impl Into<Option<usize>>,
         f: F,
-    ) -> TryMapSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -104,7 +104,7 @@ where
 
     /// A fallible analogue to [batching](crate::ParStreamExt::batching) that consumes
     /// as many elements as it likes for each next output element.
-    fn try_batching<T, U, E, F, Fut>(self, f: F) -> TryBatching<U, E>
+    fn try_batching<T, U, E, F, Fut>(self, f: F) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -119,7 +119,7 @@ where
         self,
         config: P,
         f: F,
-    ) -> TryParBatchingUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         F: FnMut(usize, flume::Receiver<T>, flume::Sender<U>) -> Fut,
@@ -138,7 +138,7 @@ where
         E: 'static + Send + Clone;
 
     /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
-    fn try_par_then<P, T, U, E, F, Fut>(self, config: P, f: F) -> TryParThen<U, E>
+    fn try_par_then<P, T, U, E, F, Fut>(self, config: P, f: F) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -154,7 +154,7 @@ where
         config: P,
         init_f: InitF,
         map_f: ThenF,
-    ) -> TryParThen<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -171,7 +171,7 @@ where
         self,
         config: P,
         f: F,
-    ) -> TryParThenUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         U: 'static + Send,
@@ -187,7 +187,7 @@ where
         config: P,
         init_f: InitF,
         map_f: ThenF,
-    ) -> TryParThenUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -200,7 +200,7 @@ where
         Fut: 'static + Future<Output = Result<U, E>> + Send;
 
     /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
-    fn try_par_map<P, T, U, E, F, Func>(self, config: P, f: F) -> TryParMap<U, E>
+    fn try_par_map<P, T, U, E, F, Func>(self, config: P, f: F) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -216,7 +216,7 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> TryParMap<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -233,7 +233,7 @@ where
         self,
         config: P,
         f: F,
-    ) -> TryParMapUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -249,7 +249,7 @@ where
         config: P,
         init_f: InitF,
         map_f: MapF,
-    ) -> TryParMapUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -330,7 +330,7 @@ where
         buf_size: impl Into<Option<usize>>,
         init: B,
         mut map_fn: F,
-    ) -> TryScanSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         B: 'static + Send,
@@ -372,21 +372,19 @@ where
         })
         .map(|result| result.unwrap());
 
-        let stream = stream::select(
+        stream::select(
             future.into_stream().map(|()| None),
             rx.into_stream().map(Some),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TryScanSpawned { stream }
+        .boxed()
     }
 
     fn try_then_spawned<T, U, E, F, Fut>(
         self,
         buf_size: impl Into<Option<usize>>,
         mut f: F,
-    ) -> TryThenSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -423,16 +421,14 @@ where
             }
         });
 
-        let stream = rx.into_stream().boxed();
-
-        TryThenSpawned { stream }
+        rx.into_stream().boxed()
     }
 
     fn try_map_spawned<T, U, E, F>(
         self,
         buf_size: impl Into<Option<usize>>,
         mut f: F,
-    ) -> TryMapSpawned<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -468,12 +464,10 @@ where
             }
         });
 
-        let stream = rx.into_stream().boxed();
-
-        TryMapSpawned { stream }
+        rx.into_stream().boxed()
     }
 
-    fn try_batching<T, U, E, F, Fut>(self, f: F) -> TryBatching<U, E>
+    fn try_batching<T, U, E, F, Fut>(self, f: F) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         T: 'static + Send,
@@ -506,7 +500,7 @@ where
         )
         .boxed();
 
-        let stream = stream::try_unfold(
+        stream::try_unfold(
             (Some(select_stream), None),
             move |(mut stream, error)| async move {
                 if let Some(stream_) = &mut stream {
@@ -532,16 +526,14 @@ where
             },
         )
         .try_filter_map(|item| async move { Ok(item) })
-        .boxed();
-
-        TryBatching { stream }
+        .boxed()
     }
 
     fn try_par_batching_unordered<T, U, E, P, F, Fut>(
         self,
         config: P,
         mut f: F,
-    ) -> TryParBatchingUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -588,7 +580,7 @@ where
         )
         .boxed();
 
-        let stream = stream::try_unfold(
+        stream::try_unfold(
             (Some(select_stream), None),
             |(mut stream, error)| async move {
                 if let Some(stream_) = &mut stream {
@@ -614,9 +606,7 @@ where
             },
         )
         .try_filter_map(|item| async move { Ok(item) })
-        .boxed();
-
-        TryParBatchingUnordered { stream }
+        .boxed()
     }
 
     fn try_tee<T, E>(self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
@@ -683,7 +673,11 @@ where
         }
     }
 
-    fn try_par_then<P, T, U, E, F, Fut>(self, config: P, mut f: F) -> TryParThen<U, E>
+    fn try_par_then<P, T, U, E, F, Fut>(
+        self,
+        config: P,
+        mut f: F,
+    ) -> BoxStream<'static, Result<U, E>>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -843,7 +837,7 @@ where
         )
         .boxed();
 
-        let stream = stream::unfold(
+        stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -878,9 +872,7 @@ where
             },
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TryParThen { stream }
+        .boxed()
     }
 
     fn try_par_then_init<P, T, U, E, B, InitF, MapF, Fut>(
@@ -888,7 +880,7 @@ where
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParThen<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -908,7 +900,7 @@ where
         self,
         config: P,
         mut f: F,
-    ) -> TryParThenUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         U: 'static + Send,
         T: 'static + Send,
@@ -1017,7 +1009,7 @@ where
         )
         .boxed();
 
-        let stream = stream::unfold(
+        stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1052,9 +1044,7 @@ where
             },
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TryParThenUnordered { stream }
+        .boxed()
     }
 
     fn try_par_then_init_unordered<P, T, U, E, B, InitF, MapF, Fut>(
@@ -1062,7 +1052,7 @@ where
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParThenUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -1078,7 +1068,11 @@ where
         self.try_par_then_unordered(config, move |item| map_f(init.clone(), item))
     }
 
-    fn try_par_map<P, T, U, E, F, Func>(self, config: P, mut f: F) -> TryParMap<U, E>
+    fn try_par_map<P, T, U, E, F, Func>(
+        self,
+        config: P,
+        mut f: F,
+    ) -> BoxStream<'static, Result<U, E>>
     where
         P: IntoParStreamParams,
         T: 'static + Send,
@@ -1238,7 +1232,7 @@ where
         )
         .boxed();
 
-        let stream = stream::unfold(
+        stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1273,9 +1267,7 @@ where
             },
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TryParMap { stream }
+        .boxed()
     }
 
     fn try_par_map_init<P, T, U, E, B, InitF, MapF, Func>(
@@ -1283,7 +1275,7 @@ where
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMap<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1303,7 +1295,7 @@ where
         self,
         config: P,
         mut f: F,
-    ) -> TryParMapUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1412,7 +1404,7 @@ where
         )
         .boxed();
 
-        let stream = stream::unfold(
+        stream::unfold(
             (Some(select_stream), None),
             |(mut select_stream, mut error)| async move {
                 if let Some(stream) = &mut select_stream {
@@ -1447,9 +1439,7 @@ where
             },
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TryParMapUnordered { stream }
+        .boxed()
     }
 
     fn try_par_map_init_unordered<P, T, U, E, B, InitF, MapF, Func>(
@@ -1457,7 +1447,7 @@ where
         config: P,
         mut init_f: InitF,
         mut map_f: MapF,
-    ) -> TryParMapUnordered<U, E>
+    ) -> BoxStream<'static, Result<U, E>>
     where
         Self: Stream<Item = Result<T, E>>,
         P: IntoParStreamParams,
@@ -1693,30 +1683,6 @@ where
     {
         let init = init_f();
         self.try_par_for_each_blocking(config, move |item| f(init.clone(), item))
-    }
-}
-
-// scan_spawned
-
-pub use try_scan_spawned::*;
-
-mod try_scan_spawned {
-    use super::*;
-
-    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryScanSpawned<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryScanSpawned<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
     }
 }
 
@@ -1978,102 +1944,6 @@ mod try_tee {
                     Pending
                 }
             }
-        }
-    }
-}
-
-// try_par_map
-
-pub use try_par_map::*;
-
-mod try_par_map {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_map()](FallibleParStreamExt::try_par_map) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParMap<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParMap<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_par_then_unordered
-
-pub use try_par_map_unordered::*;
-
-mod try_par_map_unordered {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_map_unordered()](FallibleParStreamExt::try_par_map_unordered) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParMapUnordered<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParMapUnordered<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_par_map
-
-pub use try_par_then::*;
-
-mod try_par_then {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_then()](FallibleParStreamExt::try_par_then) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParThen<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParThen<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_par_then_unordered
-
-pub use try_par_then_unordered::*;
-
-mod try_par_then_unordered {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_then_unordered()](FallibleParStreamExt::try_par_then_unordered) and its siblings.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParThenUnordered<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParThenUnordered<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
         }
     }
 }
