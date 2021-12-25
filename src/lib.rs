@@ -172,8 +172,8 @@
 /// Commonly used traits.
 pub mod prelude {
     pub use super::{
-        stream::{ParStreamExt as _, StreamExt as _},
-        try_stream::{FallibleParStreamExt as _, TryStreamExt as _},
+        stream::{IndexStreamExt as _, ParStreamExt as _},
+        try_stream::{FallibleParStreamExt as _, TryIndexStreamExt as _, TryStreamExt as _},
     };
 }
 

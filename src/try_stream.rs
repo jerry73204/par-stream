@@ -13,26 +13,14 @@ where
     /// Create a fallible stream that gives the current iteration count.
     ///
     /// The count wraps to zero if the count overflows.
-    fn try_enumerate<T, E>(self) -> TryEnumerate<Self, T, E>
-    where
-        Self: Stream<Item = Result<T, E>>;
-
-    /// Creates a fallible stream that reorders the items according to the iteration count.
-    ///
-    /// It is usually combined with [try_wrapping_enumerate](FallibleIndexedStreamExt::try_wrapping_enumerate).
-    fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<Self, T, E>
-    where
-        Self: Stream<Item = Result<(usize, T), E>>;
+    fn try_enumerate(self) -> TryEnumerate<Self, Self::Ok, Self::Error>;
 }
 
-impl<S> TryStreamExt for S
+impl<S, T, E> TryStreamExt for S
 where
-    S: TryStream,
+    S: Stream<Item = Result<T, E>>,
 {
-    fn try_enumerate<T, E>(self) -> TryEnumerate<Self, T, E>
-    where
-        Self: Stream<Item = Result<T, E>>,
-    {
+    fn try_enumerate(self) -> TryEnumerate<Self, T, E> {
         TryEnumerate {
             stream: self,
             counter: 0,
@@ -40,11 +28,30 @@ where
             _phantom: PhantomData,
         }
     }
+}
 
-    fn try_reorder_enumerated<T, E>(self) -> TryReorderEnumerated<Self, T, E>
-    where
-        Self: Stream<Item = Result<(usize, T), E>>,
-    {
+/// An extension trait that controls ordering of items of fallible streams.
+pub trait TryIndexStreamExt
+where
+    Self: Stream<Item = Result<(usize, Self::Ok), Self::Error>>,
+{
+    type Ok;
+    type Error;
+
+    /// Creates a fallible stream that reorders the items according to the iteration count.
+    ///
+    /// It is usually combined with [try_wrapping_enumerate](FallibleIndexedStreamExt::try_wrapping_enumerate).
+    fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, Self::Ok, Self::Error>;
+}
+
+impl<S, T, E> TryIndexStreamExt for S
+where
+    S: Stream<Item = Result<(usize, T), E>>,
+{
+    type Ok = T;
+    type Error = E;
+
+    fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, Self::Ok, Self::Error> {
         TryReorderEnumerated {
             stream: self,
             commit: 0,
