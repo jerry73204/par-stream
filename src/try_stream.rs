@@ -6,7 +6,7 @@ use crate::{
 use tokio::sync::{broadcast, Mutex};
 
 /// An extension trait that controls ordering of items of fallible streams.
-pub trait FallibleIndexedStreamExt
+pub trait TryStreamExt
 where
     Self: TryStream,
 {
@@ -25,7 +25,7 @@ where
         Self: Stream<Item = Result<(usize, T), E>>;
 }
 
-impl<S> FallibleIndexedStreamExt for S
+impl<S> TryStreamExt for S
 where
     S: TryStream,
 {
@@ -58,7 +58,7 @@ where
 /// An extension trait that provides fallible combinators for parallel processing on streams.
 pub trait FallibleParStreamExt
 where
-    Self: 'static + Send + TryStream + FallibleIndexedStreamExt,
+    Self: 'static + Send + TryStream + TryStreamExt,
 {
     fn try_scan_spawned<B, T, U, E, F, Fut>(
         self,
@@ -323,7 +323,7 @@ where
 
 impl<S> FallibleParStreamExt for S
 where
-    S: 'static + Send + TryStream + FallibleIndexedStreamExt,
+    S: 'static + Send + TryStream + TryStreamExt,
 {
     fn try_scan_spawned<B, T, U, E, F, Fut>(
         self,

@@ -7,7 +7,7 @@ use crate::{
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// An extension trait that controls ordering of stream items.
-pub trait IndexedStreamExt
+pub trait StreamExt
 where
     Self: Stream,
 {
@@ -68,7 +68,7 @@ where
         Self: Stream<Item = (usize, T)>;
 }
 
-impl<S> IndexedStreamExt for S
+impl<S> StreamExt for S
 where
     S: Stream,
 {
@@ -87,7 +87,7 @@ where
 /// An extension trait that provides parallel processing combinators on streams.
 pub trait ParStreamExt
 where
-    Self: 'static + Send + Stream + IndexedStreamExt,
+    Self: 'static + Send + Stream + StreamExt,
     Self::Item: 'static + Send,
 {
     fn scan_spawned<B, T, F, Fut>(
@@ -844,7 +844,7 @@ where;
 
 impl<S> ParStreamExt for S
 where
-    S: 'static + Send + Stream + IndexedStreamExt,
+    S: 'static + Send + Stream + StreamExt,
     S::Item: 'static + Send,
 {
     fn scan_spawned<B, T, F, Fut>(
