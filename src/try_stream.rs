@@ -70,7 +70,7 @@ pub use try_enumerate::*;
 mod try_enumerate {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_wrapping_enumerate()](FallibleIndexedStreamExt::try_wrapping_enumerate).
+    /// A fallible stream combinator returned from [try_enumerate()](crate::try_stream::TryStreamExt::try_enumerate).
     #[pin_project(project = TryEnumerateProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]

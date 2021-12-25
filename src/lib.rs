@@ -28,8 +28,8 @@
 //! - [`stream.par_then(config, fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
 //! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered)
 //!   are unordered variances.
-//! - [`try_par_map()`](FallibleParStreamExt::try_par_map), [`try_par_then()`](FallibleParStreamExt::try_par_then),
-//!   [`try_par_then_unordered()`](FallibleParStreamExt::try_par_then_unordered) are the fallible variances.
+//! - [`try_par_map()`](TryParStreamExt::try_par_map), [`try_par_then()`](TryParStreamExt::try_par_then),
+//!   [`try_par_then_unordered()`](TryParStreamExt::try_par_then_unordered) are the fallible variances.
 //!
 //! ## Distributing Patterns
 //!
@@ -39,7 +39,6 @@
 //!   Unlike [`stream.broadcast(buf_size)`](ParStreamExt::broadcast), it can create new receivers after
 //!   existing receivers start consuming items. Receivers created lately may miss some of the elements.
 //! - [`stream.scatter()`](ParStreamExt::scatter) sends each element to one of existing receivers.
-//! - [`gather(buf_size, streams)`](gather) merges multiple streams into one stream.
 //! - [`sync_by_key(buf_size, key_fn, streams)`](sync_by_key) synchronizes multiple streams by pairing up
 //!   the key of each item from input streams.
 //!
@@ -135,12 +134,8 @@
 //!
 //! ## Item Ordering
 //!
-//! - [`stream.wrapping_enumerate()`](IndexedStreamExt::wrapping_enumerate) is like [`enumerate()`](futures::StreamExt::enumerate),
-//!   but wraps around to zero after reaching [usize::MAX].
-//! - [`stream.reorder_enumerated()`](IndexedStreamExt::reorder_enumerated) accepts a `(usize, T)` typed stream and
+//! - [`stream.reorder_enumerated()`](IndexStreamExt::reorder_enumerated) accepts a `(usize, T)` typed stream and
 //!   reorder the items according to the index number.
-//! - [`stream.try_wrapping_enumerate()`](FallibleIndexedStreamExt::try_wrapping_enumerate) and
-//!   [`stream.try_reorder_enumerated()`](FallibleIndexedStreamExt::try_reorder_enumerated) are fallible counterparts.
 //!
 //! The item ordering combinators are usually combined with unordered concurrent processing methods,
 //! allowing on-demand data passing between stages.

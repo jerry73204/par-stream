@@ -12,7 +12,7 @@ where
     /// The combinator asserts the input item has tuple type `(usize, T)`.
     /// It reorders the items according to the first value of input tuple.
     ///
-    /// It is usually combined with [IndexedStreamExt::wrapping_enumerate], then
+    /// It is usually combined with [enumerate()](futures::StreamExt::enumerate), then
     /// applies a series of unordered parallel mapping, and finally reorders the values
     /// back by this method. It avoids reordering the values after each parallel mapping step.
     ///
@@ -85,7 +85,7 @@ pub use reorder_enumerated::*;
 mod reorder_enumerated {
     use super::*;
 
-    /// A stream combinator returned from [reorder_enumerated()](IndexedStreamExt::reorder_enumerated).
+    /// A stream combinator returned from [reorder_enumerated()](IndexStreamExt::reorder_enumerated).
     #[pin_project(project = ReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]

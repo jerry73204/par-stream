@@ -515,7 +515,7 @@ where
     /// The `buf_size` is the size of buffer that stores the temporary reduced values.
     /// If it is `0` or `None`, it defaults the number of cores on system.
     ///
-    /// Unlike [fold()](streamExt::fold), the method does not combine the values sequentially.
+    /// Unlike [fold()](futures::stream::StreamExt::fold), the method does not combine the values sequentially.
     /// Instead, the parallel workers greedly take two values from the buffer, reduce to
     /// one value, and push back to the buffer.
     ///

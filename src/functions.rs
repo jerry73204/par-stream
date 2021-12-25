@@ -35,7 +35,7 @@ mod iter_spawned {
         }
     }
 
-    /// Stream for the [iter_spawned] function.
+    /// Stream for the [iter_spawned()] function.
     #[derive(Clone)]
     pub struct IterSpawned<T>
     where
@@ -691,7 +691,7 @@ pub use try_unfold_blocking::*;
 mod try_unfold_blocking {
     use super::*;
 
-    /// A fallible analogue to [unfold_blocking](crate::stream::unfold_blocking).
+    /// A fallible analogue to [unfold_blocking](super::unfold_blocking).
     pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
         buf_size: impl Into<Option<usize>>,
         mut init_f: IF,
@@ -777,7 +777,7 @@ pub use try_par_unfold_unordered::*;
 mod try_par_unfold_unordered {
     use super::*;
 
-    /// A fallible analogue to [par_unfold_unordered](crate::stream::par_unfold_unordered).
+    /// A fallible analogue to [par_unfold_unordered](super::par_unfold_unordered()).
     pub fn try_par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item, Error>(
         config: P,
         mut init_f: IF,
@@ -868,7 +868,7 @@ mod try_par_unfold_unordered {
         TryParUnfoldUnordered { stream }
     }
 
-    /// A fallible analogue to [par_unfold_blocking_unordered](crate::stream::par_unfold_blocking_unordered).
+    /// A fallible analogue to [par_unfold_blocking_unordered](super::par_unfold_blocking_unordered).
     pub fn try_par_unfold_blocking_unordered<P, IF, UF, State, Item, Error>(
         config: P,
         init_f: IF,

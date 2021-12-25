@@ -84,7 +84,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
 
-    /// A fallible analogue to [par_then_init](crate::ParStreamExt::par_then_init).
+    /// A fallible analogue to [par_scan](crate::ParStreamExt::par_scan).
     fn try_par_scan<P, U, B, F, Fut>(
         self,
         config: P,
@@ -110,7 +110,7 @@ where
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send,
         P: IntoParStreamParams;
 
-    /// A fallible analogue to [par_then_init_unordered](crate::ParStreamExt::par_then_init_unordered).
+    /// A fallible analogue to [par_scan_unordered](crate::ParStreamExt::par_scan_unordered).
     fn try_par_scan_unordered<P, U, B, F, Fut>(
         self,
         config: P,
@@ -136,7 +136,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
-    /// A fallible analogue to [par_map_init](crate::ParStreamExt::par_map_init).
+    /// A fallible analogue to [par_scan_blocking](crate::ParStreamExt::par_scan_blocking).
     fn try_par_scan_blocking<P, U, B, F, Func>(
         self,
         config: P,
@@ -162,7 +162,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
-    /// A fallible analogue to [par_map_init_unordered](crate::ParStreamExt::par_map_init_unordered).
+    /// A fallible analogue to [par_scan_blocking_unordered](crate::ParStreamExt::par_scan_blocking_unordered).
     fn try_par_scan_blocking_unordered<P, U, B, F, Func>(
         self,
         config: P,
@@ -1525,7 +1525,7 @@ pub use try_tee::*;
 mod try_tee {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_tee()](FallibleParStreamExt::try_tee).
+    /// A fallible stream combinator returned from [try_tee()](TryParStreamExt::try_tee).
     #[derive(Debug)]
     pub struct TryTee<T, E> {
         pub(super) buf_size: Option<usize>,
@@ -1595,7 +1595,7 @@ pub use try_batching::*;
 mod try_batching {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_batching()](FallibleParStreamExt::try_batching()).
+    /// A fallible stream combinator returned from [try_batching()](TryParStreamExt::try_batching()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryBatching<T, E> {
@@ -1619,7 +1619,7 @@ pub use try_par_batching_unordered::*;
 mod try_par_batching_unordered {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_par_batching_unordered()](FallibleParStreamExt::try_par_batching_unordered()).
+    /// A fallible stream combinator returned from [try_par_batching_unordered()](TryParStreamExt::try_par_batching_unordered()).
     #[derive(Derivative)]
     #[derivative(Debug)]
     pub struct TryParBatchingUnordered<T, E> {

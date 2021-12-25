@@ -10,7 +10,7 @@ where
 
     /// Creates a fallible stream that reorders the items according to the iteration count.
     ///
-    /// It is usually combined with [try_wrapping_enumerate](FallibleIndexedStreamExt::try_wrapping_enumerate).
+    /// It is usually combined with [try_enumerate](crate::try_stream::TryStreamExt::try_enumerate).
     fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, Self::Ok, Self::Error>
     where
         Self: Sized,
@@ -40,7 +40,7 @@ pub use try_reorder_enumerated::*;
 mod try_reorder_enumerated {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_reorder_enumerated()](FallibleIndexedStreamExt::try_reorder_enumerated).
+    /// A fallible stream combinator returned from [try_reorder_enumerated()](TryIndexStreamExt::try_reorder_enumerated).
     #[pin_project(project = TryReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
