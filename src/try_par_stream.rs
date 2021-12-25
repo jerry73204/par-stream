@@ -84,20 +84,6 @@ where
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
 
-    /// A fallible analogue to [par_scan](crate::ParStreamExt::par_scan).
-    fn try_par_scan<P, U, B, F, Fut>(
-        self,
-        config: P,
-        state: B,
-        map_f: F,
-    ) -> BoxStream<'static, Result<U, Self::Error>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
-
     /// A fallible analogue to [par_then_unordered](crate::ParStreamExt::par_then_unordered).
     fn try_par_then_unordered<P, U, F, Fut>(
         self,
@@ -110,20 +96,6 @@ where
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send,
         P: IntoParStreamParams;
 
-    /// A fallible analogue to [par_scan_unordered](crate::ParStreamExt::par_scan_unordered).
-    fn try_par_scan_unordered<P, U, B, F, Fut>(
-        self,
-        config: P,
-        state: B,
-        map_f: F,
-    ) -> BoxStream<'static, Result<U, Self::Error>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
-
     /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
     fn try_par_map<P, U, F, Func>(
         self,
@@ -134,20 +106,6 @@ where
         P: IntoParStreamParams,
         U: 'static + Send,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
-
-    /// A fallible analogue to [par_scan_blocking](crate::ParStreamExt::par_scan_blocking).
-    fn try_par_scan_blocking<P, U, B, F, Func>(
-        self,
-        config: P,
-        state: B,
-        map_f: F,
-    ) -> BoxStream<'static, Result<U, Self::Error>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
     /// A fallible analogue to [par_map_unordered](crate::ParStreamExt::par_map_unordered).
@@ -162,20 +120,6 @@ where
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
-    /// A fallible analogue to [par_scan_blocking_unordered](crate::ParStreamExt::par_scan_blocking_unordered).
-    fn try_par_scan_blocking_unordered<P, U, B, F, Func>(
-        self,
-        config: P,
-        state: B,
-        map_f: F,
-    ) -> BoxStream<'static, Result<U, Self::Error>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
-
     /// Runs this stream to completion, executing asynchronous closure for each element on the stream
     /// in parallel.
     fn try_par_for_each<P, F, Fut>(
@@ -188,20 +132,6 @@ where
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
-    /// A fallible analogue to [par_for_each_init](crate::ParStreamExt::par_for_each_init).
-    fn try_par_for_each_init<P, B, InitF, MapF, Fut>(
-        self,
-        config: P,
-        init_f: InitF,
-        map_f: MapF,
-    ) -> BoxFuture<'static, Result<(), Self::Error>>
-    where
-        P: IntoParStreamParams,
-        B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
-
     /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
     fn try_par_for_each_blocking<P, F, Func>(
         self,
@@ -211,20 +141,6 @@ where
     where
         P: IntoParStreamParams,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<(), Self::Error> + Send;
-
-    /// A fallible analogue to [par_for_each_blocking_init](crate::ParStreamExt::par_for_each_blocking_init).
-    fn try_par_for_each_blocking_init<P, B, InitF, MapF, Func>(
-        self,
-        config: P,
-        init_f: InitF,
-        f: MapF,
-    ) -> BoxFuture<'static, Result<(), Self::Error>>
-    where
-        P: IntoParStreamParams,
-        B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), Self::Error> + Send;
 }
 
@@ -760,22 +676,6 @@ where
         .boxed()
     }
 
-    fn try_par_scan<P, U, B, F, Fut>(
-        self,
-        config: P,
-        state: B,
-        mut map_f: F,
-    ) -> BoxStream<'static, Result<U, E>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, T) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<U, E>> + Send,
-    {
-        self.try_par_then(config, move |item| map_f(&state, item))
-    }
-
     fn try_par_then_unordered<P, U, F, Fut>(
         self,
         config: P,
@@ -922,22 +822,6 @@ where
         )
         .filter_map(|item| async move { item })
         .boxed()
-    }
-
-    fn try_par_scan_unordered<P, U, B, F, Fut>(
-        self,
-        config: P,
-        state: B,
-        mut map_f: F,
-    ) -> BoxStream<'static, Result<U, E>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, T) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<U, E>> + Send,
-    {
-        self.try_par_then_unordered(config, move |item| map_f(&state, item))
     }
 
     fn try_par_map<P, U, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
@@ -1135,22 +1019,6 @@ where
         .boxed()
     }
 
-    fn try_par_scan_blocking<P, U, B, F, Func>(
-        self,
-        config: P,
-        state: B,
-        mut map_f: F,
-    ) -> BoxStream<'static, Result<U, E>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, T) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<U, E> + Send,
-    {
-        self.try_par_map(config, move |item| map_f(&state, item))
-    }
-
     fn try_par_map_unordered<P, U, F, Func>(
         self,
         config: P,
@@ -1299,22 +1167,6 @@ where
         .boxed()
     }
 
-    fn try_par_scan_blocking_unordered<P, U, B, F, Func>(
-        self,
-        config: P,
-        state: B,
-        mut map_f: F,
-    ) -> BoxStream<'static, Result<U, E>>
-    where
-        P: IntoParStreamParams,
-        U: 'static + Send,
-        B: 'static + Send + Clone,
-        F: 'static + FnMut(&B, T) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<U, E> + Send,
-    {
-        self.try_par_map_unordered(config, move |item| map_f(&state, item))
-    }
-
     fn try_par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
     where
         P: IntoParStreamParams,
@@ -1392,23 +1244,6 @@ where
                 })
         }
         .boxed()
-    }
-
-    fn try_par_for_each_init<P, B, InitF, MapF, Fut>(
-        self,
-        config: P,
-        mut init_f: InitF,
-        mut map_f: MapF,
-    ) -> BoxFuture<'static, Result<(), E>>
-    where
-        P: IntoParStreamParams,
-        B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, T) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
-    {
-        let init = init_f();
-        self.try_par_for_each(config, move |item| map_f(init.clone(), item))
     }
 
     fn try_par_for_each_blocking<P, F, Func>(
@@ -1498,23 +1333,6 @@ where
                 })
         }
         .boxed()
-    }
-
-    fn try_par_for_each_blocking_init<P, B, InitF, MapF, Func>(
-        self,
-        config: P,
-        mut init_f: InitF,
-        mut f: MapF,
-    ) -> BoxFuture<'static, Result<(), E>>
-    where
-        P: IntoParStreamParams,
-        B: 'static + Send + Clone,
-        InitF: FnMut() -> B,
-        MapF: 'static + FnMut(B, T) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<(), E> + Send,
-    {
-        let init = init_f();
-        self.try_par_for_each_blocking(config, move |item| f(init.clone(), item))
     }
 }
 
