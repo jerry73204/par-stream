@@ -13,34 +13,7 @@ where
     Self: 'static + Send + Stream,
     Self::Item: 'static + Send,
 {
-    fn scan_spawned<B, T, F, Fut>(
-        self,
-        buf_size: impl Into<Option<usize>>,
-        init: B,
-        map_fn: F,
-    ) -> BoxStream<'static, T>
-    where
-        B: 'static + Send,
-        T: 'static + Send,
-        F: 'static + FnMut(B, Self::Item) -> Fut + Send,
-        Fut: Future<Output = Option<(B, T)>> + Send;
-
-    /// Maps the stream element to a different type on a spawned worker.
-    fn then_spawned<T, F, Fut>(
-        self,
-        buf_size: impl Into<Option<usize>>,
-        f: F,
-    ) -> BoxStream<'static, T>
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut + Send,
-        Fut: Future<Output = T> + Send;
-
-    /// Maps the stream element to a different type on a parallel thread.
-    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> T + Send;
+    fn spawned(self, buf_size: usize) -> BoxStream<'static, Self::Item>;
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
@@ -681,71 +654,11 @@ where
     S: 'static + Send + Stream,
     S::Item: 'static + Send,
 {
-    fn scan_spawned<B, T, F, Fut>(
-        self,
-        buf_size: impl Into<Option<usize>>,
-        init: B,
-        mut map_fn: F,
-    ) -> BoxStream<'static, T>
-    where
-        B: 'static + Send,
-        T: 'static + Send,
-        F: 'static + FnMut(B, Self::Item) -> Fut + Send,
-        Fut: Future<Output = Option<(B, T)>> + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or(2);
+    fn spawned(self, buf_size: usize) -> BoxStream<'static, Self::Item> {
         let (tx, rx) = flume::bounded(buf_size);
 
         rt::spawn(async move {
-            let mut state = init;
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                match map_fn(state, item).await {
-                    Some((new_state, output)) => {
-                        state = new_state;
-                        if tx.send_async(output).await.is_err() {
-                            break;
-                        }
-                    }
-                    None => break,
-                }
-            }
-        });
-
-        rx.into_stream().boxed()
-    }
-
-    fn then_spawned<T, F, Fut>(
-        self,
-        buf_size: impl Into<Option<usize>>,
-        f: F,
-    ) -> BoxStream<'static, T>
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut + Send,
-        Fut: Future<Output = T> + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = flume::bounded(buf_size);
-
-        rt::spawn(async move {
-            let _ = self.then(f).map(Ok).forward(tx.into_sink()).await;
-        });
-
-        rx.into_stream().boxed()
-    }
-
-    fn map_spawned<T, F>(self, buf_size: impl Into<Option<usize>>, f: F) -> BoxStream<'static, T>
-    where
-        T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> T + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or(2);
-        let (tx, rx) = flume::bounded(buf_size);
-
-        rt::spawn(async move {
-            let _ = self.map(f).map(Ok).forward(tx.into_sink()).await;
+            let _ = self.map(Ok).forward(tx.into_sink()).await;
         });
 
         rx.into_stream().boxed()
@@ -1523,32 +1436,6 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn then_spawned_test() {
-        {
-            let values: Vec<_> = stream::iter(0..1000)
-                .then_spawned(None, |val| async move { val * 2 })
-                .collect()
-                .await;
-
-            let expect: Vec<_> = (0..1000).map(|val| val * 2).collect();
-            assert_eq!(values, expect);
-        }
-    }
-
-    #[tokio::test]
-    async fn map_spawned_test() {
-        {
-            let values: Vec<_> = stream::iter(0..1000)
-                .map_spawned(None, |val| val * 2)
-                .collect()
-                .await;
-
-            let expect: Vec<_> = (0..1000).map(|val| val * 2).collect();
-            assert_eq!(values, expect);
-        }
-    }
-
-    #[tokio::test]
     async fn broadcast_test() {
         let mut guard = stream::iter(0..).broadcast(2);
         let rx1 = guard.register();
@@ -1813,30 +1700,5 @@ mod tests {
             .iter()
             .zip(&vec3)
             .all(|(&orig, &val)| orig * 3 == val));
-    }
-
-    #[tokio::test]
-    async fn scan_spawned_test() {
-        {
-            let collected: Vec<_> = stream::iter([2, 3, 1, 4])
-                .scan_spawned(None, 0, |acc, val| async move {
-                    let acc = acc + val;
-                    Some((acc, acc))
-                })
-                .collect()
-                .await;
-            assert_eq!(collected, [2, 5, 6, 10]);
-        }
-
-        {
-            let collected: Vec<_> = stream::iter([2, 3, 1, 4])
-                .scan_spawned(None, 0, |acc, val| async move {
-                    let acc = acc + val;
-                    (acc != 6).then(|| (acc, acc))
-                })
-                .collect()
-                .await;
-            assert_eq!(collected, [2, 5]);
-        }
     }
 }
