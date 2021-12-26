@@ -1406,54 +1406,6 @@ mod try_tee {
     }
 }
 
-// try_batching
-
-pub use try_batching::*;
-
-mod try_batching {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_batching()](TryParStreamExt::try_batching()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryBatching<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryBatching<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_par_batching_unordered
-
-pub use try_par_batching_unordered::*;
-
-mod try_par_batching_unordered {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_par_batching_unordered()](TryParStreamExt::try_par_batching_unordered()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParBatchingUnordered<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParBatchingUnordered<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
 // tests
 
 #[cfg(test)]

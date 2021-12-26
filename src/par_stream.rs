@@ -1554,30 +1554,6 @@ mod broadcast {
     }
 }
 
-// batching
-
-pub use batching::*;
-
-mod batching {
-    use super::*;
-
-    /// A stream combinator returned from [batching()](ParStreamExt::batching).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct Batching<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, T>,
-    }
-
-    impl<T> Stream for Batching<T> {
-        type Item = T;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
 // tests
 
 #[cfg(test)]
