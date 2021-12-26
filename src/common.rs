@@ -12,6 +12,7 @@ pub use std::{
     future::Future,
     iter,
     marker::PhantomData,
+    marker::Sync,
     mem::{self, ManuallyDrop},
     ops::{ControlFlow, Deref, DerefMut},
     pin::Pin,

@@ -53,84 +53,33 @@ mod iter_spawned {
     }
 }
 
-// unfold
+// unfold_blocking
 
-pub use unfold::*;
+pub use unfold_blocking::*;
 
-mod unfold {
+mod unfold_blocking {
     use super::*;
-
-    /// Creates a stream with elements produced by an asynchronous function.
-    ///
-    /// The `init_f` function creates an initial state. Then `unfold_f` consumes the state
-    /// and is called repeatedly. If `unfold_f` returns `Some(output, state)`, it produces
-    /// the output as stream element and updates the state, until it returns `None`.
-    pub fn unfold<IF, UF, IFut, UFut, State, Item>(
-        buf_size: impl Into<Option<usize>>,
-        mut init_f: IF,
-        mut unfold_f: UF,
-    ) -> Unfold<Item>
-    where
-        IF: 'static + FnMut() -> IFut + Send,
-        UF: 'static + FnMut(State) -> UFut + Send,
-        IFut: Future<Output = State> + Send,
-        UFut: Future<Output = Option<(Item, State)>> + Send,
-        State: Send,
-        Item: 'static + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = flume::bounded(buf_size);
-
-        let producer_fut = rt::spawn(async move {
-            let mut state = init_f().await;
-
-            while let Some((item, new_state)) = unfold_f(state).await {
-                let result = data_tx.send_async(item).await;
-                if result.is_err() {
-                    break;
-                }
-                state = new_state;
-            }
-        });
-
-        let stream = stream::select(
-            producer_fut
-                .into_stream()
-                .map(|result| {
-                    if let Err(err) = result {
-                        panic!("unable to spawn a worker: {:?}", err);
-                    }
-                    None
-                })
-                .fuse(),
-            data_rx.into_stream().map(Some),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        Unfold { stream }
-    }
 
     /// Creates a stream with elements produced by a function.
     ///
     /// The `init_f` function creates an initial state. Then `unfold_f` consumes the state
     /// and is called repeatedly. If `unfold_f` returns `Some(output, state)`, it produces
     /// the output as stream element and updates the state, until it returns `None`.
-    pub fn unfold_blocking<IF, UF, State, Item>(
+    pub fn unfold_blocking<F, State, Item>(
         buf_size: impl Into<Option<usize>>,
-        mut init_f: IF,
-        mut unfold_f: UF,
-    ) -> Unfold<Item>
+        init: State,
+        mut unfold_f: F,
+    ) -> BoxStream<'static, Item>
     where
-        IF: 'static + FnMut() -> State + Send,
-        UF: 'static + FnMut(State) -> Option<(Item, State)> + Send,
+        F: 'static + FnMut(State) -> Option<(Item, State)> + Send,
+        State: 'static + Send,
         Item: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
         let (data_tx, data_rx) = flume::bounded(buf_size);
 
-        let producer_fut = rt::spawn_blocking(move || {
-            let mut state = init_f();
+        rt::spawn_blocking(move || {
+            let mut state = init;
 
             while let Some((item, new_state)) = unfold_f(state) {
                 let result = data_tx.send(item);
@@ -141,47 +90,15 @@ mod unfold {
             }
         });
 
-        let stream = stream::select(
-            producer_fut
-                .into_stream()
-                .map(|result| {
-                    if let Err(err) = result {
-                        panic!("unable to spawn a worker: {:?}", err);
-                    }
-                    None
-                })
-                .fuse(),
-            data_rx.into_stream().map(Some),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        Unfold { stream }
-    }
-
-    /// A stream combinator returned from [unfold()](super::unfold())
-    /// or [unfold_blocking()](super::unfold_blocking()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct Unfold<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, T>,
-    }
-
-    impl<T> Stream for Unfold<T> {
-        type Item = T;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
+        data_rx.into_stream().boxed()
     }
 }
 
 // par_unfold_unordered
 
-pub use par_unfold_unordered::*;
+pub use par_unfold::*;
 
-mod par_unfold_unordered {
+mod par_unfold {
     use super::*;
 
     /// Creates a stream elements produced by multiple concurrent workers.
@@ -193,123 +110,84 @@ mod par_unfold_unordered {
     ///
     /// The output elements collected from workers can be arbitrary ordered. There is no
     /// ordering guarantee respecting to the order of function callings and worker indexes.
-    pub fn par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item>(
+    pub fn par_unfold<P, F, Fut, State, Item>(
         config: P,
-        mut init_f: IF,
-        unfold_f: UF,
-    ) -> ParUnfoldUnordered<Item>
+        state: State,
+        f: F,
+    ) -> BoxStream<'static, Item>
     where
-        IF: 'static + FnMut(usize) -> IFut,
-        UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
-        IFut: 'static + Future<Output = State> + Send,
-        UFut: 'static + Future<Output = Option<(Item, State)>> + Send,
-        State: Send,
-        Item: 'static + Send,
         P: IntoParStreamParams,
+        F: 'static + FnMut(usize, Arc<State>) -> Fut + Send + Clone,
+        Fut: 'static + Future<Output = Option<(Item, Arc<State>)>> + Send,
+        Item: 'static + Send,
+        State: 'static + Sync + Send,
     {
         let ParStreamParams {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
         let (output_tx, output_rx) = flume::bounded(buf_size);
+        let state = Arc::new(state);
 
-        let worker_futs = (0..num_workers).map(|worker_index| {
-            let init_fut = init_f(worker_index);
-            let mut unfold_f = unfold_f.clone();
+        (0..num_workers).for_each(|worker_index| {
             let output_tx = output_tx.clone();
+            let state = state.clone();
+            let f = f.clone();
 
             rt::spawn(async move {
-                let mut state = init_fut.await;
-
-                loop {
-                    match unfold_f(worker_index, state).await {
-                        Some((item, new_state)) => {
-                            let result = output_tx.send_async(item).await;
-                            if result.is_err() {
-                                break;
-                            }
-                            state = new_state;
-                        }
-                        None => {
-                            break;
-                        }
-                    }
-                }
-            })
+                let _ = stream::unfold((state, f), |(state, mut f)| async move {
+                    f(worker_index, state)
+                        .await
+                        .map(|(item, state)| (item, (state, f)))
+                })
+                .map(Ok)
+                .forward(output_tx.into_sink())
+                .await;
+            });
         });
 
-        let join_future = future::try_join_all(worker_futs);
-
-        let stream = stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.into_stream().map(|result| {
-                result.unwrap();
-                None
-            }),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        ParUnfoldUnordered { stream }
+        output_rx.into_stream().boxed()
     }
 
     /// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
     /// [par_unfold_unordered()].
-    pub fn par_unfold_blocking_unordered<P, IF, UF, State, Item>(
+    pub fn par_unfold_blocking<P, F, State, Item>(
         config: P,
-        init_f: IF,
-        unfold_f: UF,
-    ) -> ParUnfoldUnordered<Item>
+        state: State,
+        f: F,
+    ) -> BoxStream<'static, Item>
     where
-        IF: 'static + FnMut(usize) -> State + Send + Clone,
-        UF: 'static + FnMut(usize, State) -> Option<(Item, State)> + Send + Clone,
-        Item: 'static + Send,
         P: IntoParStreamParams,
+        F: 'static + FnMut(usize, Arc<State>) -> Option<(Item, Arc<State>)> + Send + Clone,
+        Item: 'static + Send,
+        State: 'static + Send + Sync,
     {
         let ParStreamParams {
             num_workers,
             buf_size,
         } = config.into_par_stream_params();
         let (output_tx, output_rx) = flume::bounded(buf_size);
+        let state = Arc::new(state);
 
-        let worker_futs = (0..num_workers).map(|worker_index| {
-            let mut init_f = init_f.clone();
-            let mut unfold_f = unfold_f.clone();
+        (0..num_workers).for_each(|worker_index| {
+            let mut f = f.clone();
+            let mut state = state.clone();
             let output_tx = output_tx.clone();
 
-            rt::spawn_blocking(move || {
-                let mut state = init_f(worker_index);
-
-                loop {
-                    match unfold_f(worker_index, state) {
-                        Some((item, new_state)) => {
-                            let result = output_tx.send(item);
-                            if result.is_err() {
-                                break;
-                            }
-                            state = new_state;
-                        }
-                        None => {
-                            break;
-                        }
+            rt::spawn_blocking(move || loop {
+                if let Some((item, state_)) = f(worker_index, state) {
+                    if output_tx.send(item).is_ok() {
+                        state = state_;
+                    } else {
+                        break;
                     }
+                } else {
+                    break;
                 }
-            })
+            });
         });
 
-        let join_future = future::try_join_all(worker_futs);
-
-        let stream = stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.into_stream().map(|result| {
-                result.unwrap();
-                None
-            }),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
-
-        ParUnfoldUnordered { stream }
+        output_rx.into_stream().boxed()
     }
 
     /// A stream combinator returned from [par_unfold_unordered()](super::par_unfold_unordered())
