@@ -167,7 +167,7 @@
 /// Commonly used traits.
 pub mod prelude {
     pub use super::{
-        index_stream::IndexStreamExt as _, par_stream::ParStreamExt as _,
+        index_stream::IndexStreamExt as _, par_stream::ParStreamExt as _, stream::StreamExt as _,
         try_index_stream::TryIndexStreamExt as _, try_par_stream::TryParStreamExt as _,
         try_stream::TryStreamExt as _,
     };
@@ -179,6 +179,7 @@ mod functions;
 mod index_stream;
 mod par_stream;
 mod rt;
+mod stream;
 mod try_index_stream;
 mod try_par_stream;
 mod try_stream;
@@ -188,6 +189,7 @@ pub use crate::par_stream::*;
 pub use config::*;
 pub use functions::*;
 pub use index_stream::*;
+pub use stream::*;
 pub use try_index_stream::*;
 pub use try_par_stream::*;
 pub use try_stream::*;

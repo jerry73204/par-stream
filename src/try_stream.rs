@@ -30,12 +30,47 @@ where
         Self: 'static + Send,
         Self::Ok: 'static + Send,
         Self::Error: 'static + Send;
+
+    fn try_stateful_then<B, U, F, Fut>(
+        self,
+        init: B,
+        f: F,
+    ) -> TryStatefulThen<Self, B, Self::Ok, U, Self::Error, F, Fut>;
+
+    fn try_stateful_map<B, U, F>(
+        self,
+        init: B,
+        f: F,
+    ) -> TryStatefulMap<Self, B, Self::Ok, U, Self::Error, F>;
 }
 
 impl<S, T, E> TryStreamExt for S
 where
     S: Stream<Item = Result<T, E>>,
 {
+    fn try_stateful_then<B, U, F, Fut>(
+        self,
+        init: B,
+        f: F,
+    ) -> TryStatefulThen<Self, B, T, U, E, F, Fut> {
+        TryStatefulThen {
+            stream: self,
+            future: None,
+            state: Some(init),
+            f,
+            _phantom: PhantomData,
+        }
+    }
+
+    fn try_stateful_map<B, U, F>(self, init: B, f: F) -> TryStatefulMap<Self, B, T, U, E, F> {
+        TryStatefulMap {
+            stream: self,
+            state: Some(init),
+            f,
+            _phantom: PhantomData,
+        }
+    }
+
     fn catch_error(self) -> (BoxStream<'static, T>, BoxFuture<'static, Result<(), E>>)
     where
         S: 'static + Send,
@@ -60,6 +95,130 @@ where
         });
 
         (stream.boxed(), future.boxed())
+    }
+}
+
+pub use try_stateful_then::*;
+mod try_stateful_then {
+    use super::*;
+
+    /// Stream for the [`try_stateful_then`](super::TryStreamExt::try_stateful_then) method.
+    #[pin_project]
+    pub struct TryStatefulThen<St, B, T, U, E, F, Fut>
+    where
+        St: ?Sized,
+    {
+        #[pin]
+        pub(super) future: Option<Fut>,
+        pub(super) state: Option<B>,
+        pub(super) f: F,
+        pub(super) _phantom: PhantomData<(T, U, E)>,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St, B, T, U, E, F, Fut> Stream for TryStatefulThen<St, B, T, U, E, F, Fut>
+    where
+        St: Stream<Item = Result<T, E>>,
+        F: FnMut(B, T) -> Fut,
+        Fut: Future<Output = Result<Option<(B, U)>, E>>,
+    {
+        type Item = Result<U, E>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut this = self.project();
+
+            Poll::Ready(loop {
+                if let Some(fut) = this.future.as_mut().as_pin_mut() {
+                    let result = ready!(fut.poll(cx));
+                    this.future.set(None);
+
+                    match result {
+                        Ok(Some((state, item))) => {
+                            *this.state = Some(state);
+                            break Some(Ok(item));
+                        }
+                        Ok(None) => {
+                            break None;
+                        }
+                        Err(err) => break Some(Err(err)),
+                    }
+                } else if let Some(state) = this.state.take() {
+                    match this.stream.as_mut().poll_next(cx) {
+                        Ready(Some(Ok(item))) => {
+                            this.future.set(Some((this.f)(state, item)));
+                        }
+                        Ready(Some(Err(err))) => break Some(Err(err)),
+                        Ready(None) => break None,
+                        Pending => {
+                            *this.state = Some(state);
+                            return Pending;
+                        }
+                    }
+                } else {
+                    break None;
+                }
+            })
+        }
+    }
+}
+
+pub use try_stateful_map::*;
+mod try_stateful_map {
+    use super::*;
+
+    /// Stream for the [`try_stateful_map`](super::TryStreamExt::try_stateful_map) method.
+    #[pin_project]
+    pub struct TryStatefulMap<St, B, T, U, E, F>
+    where
+        St: ?Sized,
+    {
+        pub(super) state: Option<B>,
+        pub(super) f: F,
+        pub(super) _phantom: PhantomData<(T, U, E)>,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St, B, T, U, E, F> Stream for TryStatefulMap<St, B, T, U, E, F>
+    where
+        St: Stream<Item = Result<T, E>>,
+        F: FnMut(B, T) -> Result<Option<(B, U)>, E>,
+    {
+        type Item = Result<U, E>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut this = self.project();
+
+            Poll::Ready(loop {
+                if let Some(state) = this.state.take() {
+                    match this.stream.as_mut().poll_next(cx) {
+                        Ready(Some(Ok(in_item))) => {
+                            let result = (this.f)(state, in_item);
+
+                            match result {
+                                Ok(Some((state, out_item))) => {
+                                    *this.state = Some(state);
+                                    break Some(Ok(out_item));
+                                }
+                                Ok(None) => {
+                                    break None;
+                                }
+                                Err(err) => break Some(Err(err)),
+                            }
+                        }
+                        Ready(Some(Err(err))) => break Some(Err(err)),
+                        Ready(None) => break None,
+                        Pending => {
+                            *this.state = Some(state);
+                            return Pending;
+                        }
+                    }
+                } else {
+                    break None;
+                }
+            })
+        }
     }
 }
 
@@ -127,6 +286,75 @@ mod try_enumerate {
     {
         fn is_terminated(&self) -> bool {
             self.fused
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn try_stateful_then_test() {
+        {
+            let values: Result<Vec<_>, ()> = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
+                .try_stateful_then(0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    Ok(Some((new_acc, new_acc)))
+                })
+                .try_collect()
+                .await;
+
+            assert_eq!(values, Ok(vec![3, 4, 8, 9]));
+        }
+
+        {
+            let mut stream = stream::iter([Ok(3), Ok(1), Err(()), Ok(1)])
+                .try_stateful_then(0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    Ok(Some((new_acc, new_acc)))
+                })
+                .boxed();
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, Some(Err(())));
+            assert_eq!(stream.next().await, None);
+        }
+
+        {
+            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                .try_stateful_then(0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    if new_acc != 8 {
+                        Ok(Some((new_acc, new_acc)))
+                    } else {
+                        Err(())
+                    }
+                })
+                .boxed();
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, Some(Err(())));
+            assert_eq!(stream.next().await, None);
+        }
+
+        {
+            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                .try_stateful_then(0, |acc, val| async move {
+                    let new_acc = acc + val;
+                    if new_acc != 8 {
+                        Ok(Some((new_acc, new_acc)))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .boxed();
+
+            assert_eq!(stream.next().await, Some(Ok(3)));
+            assert_eq!(stream.next().await, Some(Ok(4)));
+            assert_eq!(stream.next().await, None);
         }
     }
 }

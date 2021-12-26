@@ -2,6 +2,7 @@ pub use by_address::ByAddress;
 pub use derivative::Derivative;
 pub use futures::{
     future::{self, BoxFuture, FutureExt as _},
+    ready,
     stream::{self, BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
 };
 pub use pin_project::pin_project;
