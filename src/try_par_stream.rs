@@ -158,7 +158,7 @@ where
         let buf_size = buf_size.into().unwrap_or(2);
         let (tx, rx) = flume::bounded(buf_size);
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let mut state = init;
             let mut stream = self.boxed();
 
@@ -184,15 +184,9 @@ where
                     None => break,
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
-        stream::select(
-            future.into_stream().map(|()| None),
-            rx.into_stream().map(Some),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        rx.into_stream().boxed()
     }
 
     fn try_then_spawned<U, F, Fut>(
@@ -363,13 +357,12 @@ where
                 }
             }
             Ok(())
-        })
-        .map(|result| result.unwrap());
+        });
 
         let worker_futs: Vec<_> = (0..num_workers)
             .map(|worker_index| {
                 let fut = f(worker_index, input_rx.clone(), output_tx.clone());
-                rt::spawn(fut).map(|result| result.unwrap())
+                rt::spawn(fut)
             })
             .collect();
 
@@ -454,7 +447,6 @@ where
 
                 Ok(())
             })
-            .map(|result| result.unwrap())
         };
 
         let mut worker_futures: Vec<_> = (0..num_workers)
@@ -486,7 +478,6 @@ where
 
                     Ok(())
                 })
-                .map(|result| result.unwrap())
                 .boxed()
             })
             .collect();
@@ -541,8 +532,7 @@ where
                     Greater => panic!("duplicated index number {}", index),
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
         let join_all_future = async move {
             let (input_result, mut worker_results, ()) =
@@ -678,7 +668,6 @@ where
 
                     Ok(())
                 })
-                .map(|result| result.unwrap())
                 .boxed()
             })
             .collect();
@@ -797,7 +786,6 @@ where
 
                 Ok(())
             })
-            .map(|result| result.unwrap())
         };
 
         let mut worker_futures: Vec<_> = (0..num_workers)
@@ -829,7 +817,6 @@ where
 
                     Ok(())
                 })
-                .map(|result| result.unwrap())
                 .boxed()
             })
             .collect();
@@ -849,7 +836,7 @@ where
             errors
         };
 
-        let reorder_future = rt::spawn(async move {
+        rt::spawn(async move {
             let mut map = HashMap::new();
             let mut commit = 0;
 
@@ -884,12 +871,11 @@ where
                     Greater => panic!("duplicated index number {}", index),
                 }
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
         let join_all_future = async move {
-            let (input_result, mut worker_results, ()) =
-                future::join3(input_future, select_worker_future, reorder_future).await;
+            let (input_result, mut worker_results) =
+                future::join(input_future, select_worker_future).await;
 
             if let Err((_, err)) = input_result {
                 return Err(err);
@@ -1021,7 +1007,6 @@ where
 
                     Ok(())
                 })
-                .map(|result| result.unwrap())
                 .boxed()
             })
             .collect();
@@ -1158,7 +1143,7 @@ where
                         }
                     }
                 };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
+                rt::spawn(worker_fut)
             })
             .collect();
 
@@ -1247,7 +1232,6 @@ where
 
                     Ok(())
                 })
-                .map(|result| result.unwrap())
             })
             .collect();
 

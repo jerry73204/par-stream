@@ -112,17 +112,11 @@ mod rt_dummy {
     }
 
     impl<T> Future for JoinHandle<T> {
-        type Output = Result<T, JoinError>;
+        type Output = T;
 
         fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<Self::Output> {
             panic!();
         }
-    }
-
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct JoinError {
-        _private: [u8; 0],
     }
 }
 
@@ -167,18 +161,12 @@ mod rt_tokio {
     pub struct JoinHandle<T>(tokio::task::JoinHandle<T>);
 
     impl<T> Future for JoinHandle<T> {
-        type Output = Result<T, JoinError>;
+        type Output = T;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.0)
-                .poll(cx)
-                .map(|result| result.map_err(JoinError))
+            Pin::new(&mut self.0).poll(cx).map(|result| result.unwrap())
         }
     }
-
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct JoinError(tokio::task::JoinError);
 }
 
 #[cfg(all(
@@ -221,17 +209,11 @@ mod rt_async_std {
     pub struct JoinHandle<T>(async_std::task::JoinHandle<T>);
 
     impl<T> Future for JoinHandle<T> {
-        type Output = Result<T, JoinError>;
+        type Output = T;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.0).poll(cx).map(|output| Ok(output))
+            Pin::new(&mut self.0).poll(cx)
         }
-    }
-
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct JoinError {
-        _private: [u8; 0],
     }
 }
 
@@ -278,20 +260,13 @@ mod rt_smol {
     }
 
     impl<T> Future for JoinHandle<T> {
-        type Output = Result<T, JoinError>;
+        type Output = T;
 
         fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
             match &mut *self {
                 Self::Task(task) => Pin::new(task).poll(cx),
                 Self::UnBlock(future) => Pin::new(future).poll(cx),
             }
-            .map(Ok)
         }
-    }
-
-    #[derive(Debug)]
-    #[repr(transparent)]
-    pub struct JoinError {
-        _private: [u8; 0],
     }
 }

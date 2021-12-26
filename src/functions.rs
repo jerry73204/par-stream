@@ -343,8 +343,7 @@ mod sync {
 
                 break;
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
         let join_future = future::join(input_future, sync_future);
 
@@ -530,8 +529,7 @@ mod try_sync {
 
                 break;
             }
-        })
-        .map(|result| result.unwrap());
+        });
 
         let join_future = future::join(input_future, sync_future);
 
@@ -584,7 +582,7 @@ mod try_unfold_blocking {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
         let (data_tx, data_rx) = flume::bounded(buf_size);
 
-        let producer_fut = rt::spawn_blocking(move || {
+        rt::spawn_blocking(move || {
             let mut state = match init_f() {
                 Ok(state) => state,
                 Err(err) => {
@@ -611,22 +609,7 @@ mod try_unfold_blocking {
             }
         });
 
-        let stream = stream::select(
-            producer_fut
-                .into_stream()
-                .map(|result| {
-                    if let Err(err) = result {
-                        panic!("unable to spawn a worker: {:?}", err);
-                    }
-                    None
-                })
-                .fuse(),
-            data_rx
-                .into_stream()
-                .map(|item: Result<Item, Error>| Some(item)),
-        )
-        .filter_map(|item| async move { item })
-        .boxed();
+        let stream = data_rx.into_stream().boxed();
 
         TryUnfoldBlocking { stream }
     }
@@ -718,7 +701,6 @@ mod try_par_unfold_unordered {
                     }
                 }
             })
-            .map(|result| result.unwrap())
         });
 
         let join_future = future::join_all(worker_futs);
@@ -766,7 +748,7 @@ mod try_par_unfold_unordered {
         let (output_tx, output_rx) = flume::bounded(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
 
-        let worker_futs = (0..num_workers).map(|worker_index| {
+        (0..num_workers).for_each(|worker_index| {
             let mut init_f = init_f.clone();
             let mut unfold_f = unfold_f.clone();
             let output_tx = output_tx.clone();
@@ -805,32 +787,24 @@ mod try_par_unfold_unordered {
                         }
                     }
                 }
-            })
+            });
         });
 
-        let join_future = future::try_join_all(worker_futs);
+        let stream = output_rx
+            .into_stream()
+            .scan(false, |terminated, result| {
+                let output = if *terminated {
+                    None
+                } else {
+                    if result.is_err() {
+                        *terminated = true;
+                    }
+                    Some(result)
+                };
 
-        let stream = stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.into_stream().map(|result| {
-                result.unwrap();
-                None
-            }),
-        )
-        .filter_map(|item| async move { item })
-        .scan(false, |terminated, result| {
-            let output = if *terminated {
-                None
-            } else {
-                if result.is_err() {
-                    *terminated = true;
-                }
-                Some(result)
-            };
-
-            async move { output }
-        })
-        .boxed();
+                async move { output }
+            })
+            .boxed();
 
         TryParUnfoldUnordered { stream }
     }

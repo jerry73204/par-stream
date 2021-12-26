@@ -861,7 +861,7 @@ where
         let (init_tx, init_rx) = oneshot::channel();
         let ready = Arc::new(AtomicBool::new(false));
 
-        let future = rt::spawn(async move {
+        rt::spawn(async move {
             let mut senders: Vec<mpsc::Sender<_>> = match init_rx.await {
                 Ok(senders) => senders,
                 Err(_) => return,
@@ -889,15 +889,12 @@ where
                     None => break,
                 }
             }
-        })
-        .map(|result| result.unwrap())
-        .boxed();
+        });
 
         BroadcastGuard {
             buf_size,
             ready,
             init_tx: Some(init_tx),
-            future: Arc::new(Mutex::new(Some(future))),
             senders: Some(vec![]),
         }
     }
@@ -1024,10 +1021,9 @@ where
         let phase_1_future = async move {
             let (input_tx, input_rx) = flume::bounded(buf_size);
 
-            let input_future = rt::spawn(async move {
+            rt::spawn(async move {
                 let _ = self.map(Ok).forward(input_tx.into_sink()).await;
-            })
-            .map(|result| result.unwrap());
+            });
 
             let reducer_futures = {
                 let reduce_fn = reduce_fn.clone();
@@ -1045,12 +1041,9 @@ where
 
                         Some(reduced)
                     })
-                    .map(|result| result.unwrap())
                 })
             };
-            let join_reducer_future = future::join_all(reducer_futures);
-
-            let ((), values) = future::join(input_future, join_reducer_future).await;
+            let values = future::join_all(reducer_futures).await;
 
             (values, reduce_fn)
         };
@@ -1089,10 +1082,9 @@ where
                         _ => unreachable!(),
                     }
                 })
-                .map(|result| result.unwrap())
             };
 
-            let reducer_futures = (0..num_workers).map(move |_| {
+            (0..num_workers).for_each(move |_| {
                 let pair_rx = pair_rx.clone();
                 let feedback_tx = feedback_tx.clone();
                 let mut reduce_fn = reduce_fn.clone();
@@ -1106,12 +1098,10 @@ where
                             .map_err(|_| ())
                             .unwrap();
                     }
-                })
-                .map(|result| result.unwrap())
+                });
             });
-            let join_reducer_future = future::join_all(reducer_futures);
 
-            let (output, _) = future::join(pairing_future, join_reducer_future).await;
+            let output = pairing_future.await;
 
             output
         };
@@ -1139,25 +1129,24 @@ where
         let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let (mut map_txs, map_futs): (Vec<_>, Vec<_>) = map_fns
+        let mut map_txs: Vec<_> = map_fns
             .iter()
             .map(|_| {
                 let (map_tx, map_rx) = flume::bounded(buf_size);
                 let reorder_tx = reorder_tx.clone();
 
-                let map_fut = rt::spawn(async move {
+                rt::spawn(async move {
                     while let Ok((counter, fut)) = map_rx.recv_async().await {
                         let output = fut.await;
                         if reorder_tx.send_async((counter, output)).await.is_err() {
                             break;
                         };
                     }
-                })
-                .map(|result| result.unwrap());
+                });
 
-                (map_tx, map_fut)
+                map_tx
             })
-            .unzip();
+            .collect();
 
         let routing_fut = async move {
             let mut counter = 0u64;
@@ -1202,7 +1191,7 @@ where
             }
         };
 
-        let join_fut = future::join3(routing_fut, reorder_fut, future::join_all(map_futs)).boxed();
+        let join_fut = future::join(routing_fut, reorder_fut).boxed();
 
         utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
@@ -1226,25 +1215,24 @@ where
 
         let (output_tx, output_rx) = flume::bounded(buf_size);
 
-        let (mut map_txs, map_futs): (Vec<_>, Vec<_>) = map_fns
+        let mut map_txs: Vec<_> = map_fns
             .iter()
             .map(|_| {
                 let (map_tx, map_rx) = flume::bounded(buf_size);
                 let output_tx = output_tx.clone();
 
-                let map_fut = rt::spawn(async move {
+                rt::spawn(async move {
                     while let Ok(fut) = map_rx.recv_async().await {
                         let output = fut.await;
                         if output_tx.send_async(output).await.is_err() {
                             break;
                         };
                     }
-                })
-                .map(|result| result.unwrap());
+                });
 
-                (map_tx, map_fut)
+                map_tx
             })
-            .unzip();
+            .collect();
 
         let routing_fut = async move {
             let mut stream = self.boxed();
@@ -1262,9 +1250,7 @@ where
             }
         };
 
-        let join_fut = future::join(routing_fut, future::join_all(map_futs));
-
-        utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
+        utils::join_future_stream(routing_fut, output_rx.into_stream()).boxed()
     }
 
     fn scatter(self) -> Scatter<Self::Item> {
@@ -1279,7 +1265,7 @@ where
         }
     }
 
-    fn par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
@@ -1292,30 +1278,15 @@ where
         let (map_tx, map_rx) = flume::bounded(buf_size);
 
         let map_fut = async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let fut = f(item);
-                if map_tx.send_async(fut).await.is_err() {
-                    break;
-                }
-            }
+            let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;
         };
 
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
+        let worker_futures = (0..num_workers).map(|_| {
+            let map_rx = map_rx.clone();
+            rt::spawn(map_rx.into_stream().for_each(|fut| fut))
+        });
 
-                let worker_fut = async move {
-                    while let Ok(fut) = map_rx.recv_async().await {
-                        fut.await;
-                    }
-                };
-                rt::spawn(worker_fut).map(|result| result.unwrap())
-            })
-            .collect();
-
-        future::join(map_fut, future::join_all(worker_futs))
+        future::join(map_fut, future::join_all(worker_futures))
             .map(|_| ())
             .boxed()
     }
@@ -1351,7 +1322,6 @@ where
                         job();
                     }
                 })
-                .map(|result| result.unwrap())
             })
             .collect();
 
@@ -1466,14 +1436,11 @@ mod broadcast {
     /// from the stream. The guard must be dropped, either by `guard.finish()` or
     /// `drop(guard)` before the receivers start consuming data. Otherwise, the
     /// receivers will receive panic.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
+    #[derive(Debug)]
     pub struct BroadcastGuard<T> {
         pub(super) buf_size: usize,
         pub(super) ready: Arc<AtomicBool>,
         pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
-        #[derivative(Debug = "ignore")]
-        pub(super) future: Arc<Mutex<Option<BoxFuture<'static, ()>>>>,
         pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
     }
 
@@ -1485,7 +1452,6 @@ mod broadcast {
         pub fn register(&mut self) -> BroadcastStream<T> {
             let Self {
                 buf_size,
-                ref future,
                 ref ready,
                 ref mut senders,
                 ..
@@ -1495,7 +1461,6 @@ mod broadcast {
             let (tx, rx) = mpsc::channel(buf_size);
             senders.push(tx);
 
-            let future = future.clone();
             let ready = ready.clone();
 
             let stream = stream::select(
@@ -1505,12 +1470,6 @@ mod broadcast {
                         ready.load(Acquire),
                         "please call guard.finish() before consuming this stream"
                     );
-
-                    let future = &mut *future.lock().await;
-                    if let Some(future_) = future {
-                        future_.await;
-                        *future = None;
-                    }
 
                     None
                 }
