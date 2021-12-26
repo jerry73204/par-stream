@@ -1204,7 +1204,7 @@ where
             .boxed()
     }
 
-    fn par_for_each_blocking<P, F, Func>(self, config: P, mut f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -1217,14 +1217,7 @@ where
         let (map_tx, map_rx) = flume::bounded(buf_size);
 
         let map_fut = async move {
-            let mut stream = self.boxed();
-
-            while let Some(item) = stream.next().await {
-                let fut = f(item);
-                if map_tx.send_async(fut).await.is_err() {
-                    break;
-                }
-            }
+            let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;
         };
 
         let worker_futs: Vec<_> = (0..num_workers)
