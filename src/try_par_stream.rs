@@ -65,13 +65,6 @@ where
         U: 'static + Send,
         P: IntoParStreamParams;
 
-    /// A fallible analogue to [tee](crate::ParStreamExt::tee) that stops sending items when
-    /// receiving an error.
-    fn try_tee(self, buf_size: impl Into<Option<usize>>) -> TryTee<Self::Ok, Self::Error>
-    where
-        Self::Ok: Clone,
-        Self::Error: Clone;
-
     /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
     fn try_par_then<P, U, F, Fut>(
         self,
@@ -416,69 +409,6 @@ where
         )
         .try_filter_map(|item| async move { Ok(item) })
         .boxed()
-    }
-
-    fn try_tee(self, buf_size: impl Into<Option<usize>>) -> TryTee<T, E>
-    where
-        T: Clone,
-        E: Clone,
-    {
-        let buf_size = buf_size.into();
-        let (tx, rx) = match buf_size {
-            Some(buf_size) => flume::bounded(buf_size),
-            None => flume::unbounded(),
-        };
-        let sender_set = Arc::new(flurry::HashSet::new());
-        let guard = sender_set.guard();
-        sender_set.insert(ByAddress(Arc::new(tx)), &guard);
-
-        let future = {
-            let sender_set = sender_set.clone();
-
-            let future = rt::spawn(async move {
-                let mut stream = self.boxed();
-
-                while let Some(item) = stream.next().await {
-                    let futures: Vec<_> = sender_set
-                        .pin()
-                        .iter()
-                        .map(|tx| {
-                            let tx = tx.clone();
-                            let item = item.clone();
-                            async move {
-                                let result = tx.send_async(item).await;
-                                (result, tx)
-                            }
-                        })
-                        .collect();
-
-                    let results = future::join_all(futures).await;
-                    let success_count = results
-                        .iter()
-                        .filter(|(result, tx)| {
-                            let ok = result.is_ok();
-                            if !ok {
-                                sender_set.pin().remove(tx);
-                            }
-                            ok
-                        })
-                        .count();
-
-                    if item.is_err() || success_count == 0 {
-                        break;
-                    }
-                }
-            });
-
-            Arc::new(Mutex::new(Some(future)))
-        };
-
-        TryTee {
-            future,
-            sender_set: Arc::downgrade(&sender_set),
-            receiver: rx,
-            buf_size,
-        }
     }
 
     fn try_par_then<P, U, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
@@ -1333,76 +1263,6 @@ where
                 })
         }
         .boxed()
-    }
-}
-
-// try_tee
-
-pub use try_tee::*;
-
-mod try_tee {
-    use super::*;
-
-    /// A fallible stream combinator returned from [try_tee()](TryParStreamExt::try_tee).
-    #[derive(Debug)]
-    pub struct TryTee<T, E> {
-        pub(super) buf_size: Option<usize>,
-        pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<Result<T, E>>>>>>,
-        pub(super) receiver: flume::Receiver<Result<T, E>>,
-    }
-
-    impl<T, E> Clone for TryTee<T, E>
-    where
-        T: 'static + Send,
-        E: 'static + Send,
-    {
-        fn clone(&self) -> Self {
-            let buf_size = self.buf_size;
-            let (tx, rx) = match buf_size {
-                Some(buf_size) => flume::bounded(buf_size),
-                None => flume::unbounded(),
-            };
-            let sender_set = self.sender_set.clone();
-
-            if let Some(sender_set) = sender_set.upgrade() {
-                let guard = sender_set.guard();
-                sender_set.insert(ByAddress(Arc::new(tx)), &guard);
-            }
-
-            Self {
-                future: self.future.clone(),
-                sender_set,
-                receiver: rx,
-                buf_size,
-            }
-        }
-    }
-
-    impl<T, E> Stream for TryTee<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            if let Ok(mut future_opt) = self.future.try_lock() {
-                if let Some(future) = &mut *future_opt {
-                    if Pin::new(future).poll(cx).is_ready() {
-                        *future_opt = None;
-                    }
-                }
-            }
-
-            match Pin::new(&mut self.receiver.recv_async()).poll(cx) {
-                Ready(Ok(output)) => {
-                    cx.waker().clone().wake();
-                    Ready(Some(output))
-                }
-                Ready(Err(_)) => Ready(None),
-                Pending => {
-                    cx.waker().clone().wake();
-                    Pending
-                }
-            }
-        }
     }
 }
 
