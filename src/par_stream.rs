@@ -130,7 +130,7 @@ where
     /// is full, the stream will halt until the blocking buffer spare the space.
     ///
     /// ```rust
-    /// use futures::prelude::*;
+    /// use futures::{prelude::*, join};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -144,7 +144,7 @@ where
     ///     let fut2 = rx2.map(|val| val * 2).collect();
     ///     let fut3 = rx3.map(|val| val * 3).collect();
     ///
-    ///     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+    ///     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
     /// }
     ///
     /// # #[cfg(feature = "runtime-async-std")]
@@ -178,7 +178,7 @@ where
     /// is full, the stream will halt until the blocking buffer spare the space.
     ///
     /// ```rust
-    /// use futures::prelude::*;
+    /// use futures::{prelude::*, join};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -188,7 +188,7 @@ where
     ///     guard.finish(); // drop the guard
     ///
     ///     let (ret1, ret2): (Vec<_>, Vec<_>) =
-    ///         futures::join!(rx1.take(100).collect(), rx2.take(100).collect());
+    ///         join!(rx1.take(100).collect(), rx2.take(100).collect());
     ///     let expect: Vec<_> = (0..100).collect();
     ///
     ///     assert_eq!(ret1, expect);
@@ -597,7 +597,7 @@ where
     /// It lets user to write custom workers that receive items from the same stream.
     ///
     /// ```rust
-    /// use futures::prelude::*;
+    /// use futures::{prelude::*, join};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -608,7 +608,7 @@ where
     ///     let rx2 = rx1.clone();
     ///
     ///     // collect the values concurrently
-    ///     let (values1, values2): (Vec<_>, Vec<_>) = futures::join!(rx1.collect(), rx2.collect());
+    ///     let (values1, values2): (Vec<_>, Vec<_>) = join!(rx1.collect(), rx2.collect());
     ///
     ///     // the total item count is equal to the original set
     ///     assert_eq!(values1.len() + values2.len(), 1000);
@@ -934,7 +934,7 @@ where
         let phase_1_future = async move {
             let (input_tx, input_rx) = flume::bounded(buf_size);
 
-            rt::spawn(async move {
+            let input_future = rt::spawn(async move {
                 let _ = self.map(Ok).forward(input_tx.into_sink()).await;
             });
 
@@ -956,7 +956,7 @@ where
                     })
                 })
             };
-            let values = future::join_all(reducer_futures).await;
+            let (values, ()) = join!(future::join_all(reducer_futures), input_future);
 
             (values, reduce_fn)
         };
@@ -997,7 +997,7 @@ where
                 })
             };
 
-            (0..num_workers).for_each(move |_| {
+            let worker_futures = (0..num_workers).map(move |_| {
                 let pair_rx = pair_rx.clone();
                 let feedback_tx = feedback_tx.clone();
                 let mut reduce_fn = reduce_fn.clone();
@@ -1011,10 +1011,10 @@ where
                             .map_err(|_| ())
                             .unwrap();
                     }
-                });
+                })
             });
 
-            let output = pairing_future.await;
+            let (output, _) = join!(pairing_future, future::join_all(worker_futures));
 
             output
         };
@@ -1436,7 +1436,7 @@ mod tests {
         guard.finish();
 
         let (ret1, ret2): (Vec<_>, Vec<_>) =
-            futures::join!(rx1.take(100).collect(), rx2.take(100).collect());
+            join!(rx1.take(100).collect(), rx2.take(100).collect());
 
         izip!(ret1, 0..100).for_each(|(lhs, rhs)| {
             assert_eq!(lhs, rhs);
@@ -1674,7 +1674,7 @@ mod tests {
             })
             .collect();
 
-        let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = futures::join!(fut1, fut2, fut3);
+        let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
 
         // the collected method is possibly losing some of first few elements
         let start1 = orig.len() - vec1.len();

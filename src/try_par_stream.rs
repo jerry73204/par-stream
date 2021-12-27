@@ -988,8 +988,7 @@ where
             .collect();
 
         async move {
-            let (map_result, worker_results) =
-                futures::join!(map_fut, future::join_all(worker_futs));
+            let (map_result, worker_results) = join!(map_fut, future::join_all(worker_futs));
 
             worker_results
                 .into_iter()
@@ -1076,8 +1075,7 @@ where
             .collect();
 
         async move {
-            let (input_result, worker_results) =
-                futures::join!(input_fut, future::join_all(worker_futs));
+            let (input_result, worker_results) = join!(input_fut, future::join_all(worker_futs));
 
             worker_results
                 .into_iter()
