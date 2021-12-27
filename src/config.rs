@@ -68,8 +68,7 @@ mod config {
                 }
                 Self::ScaleOfCpus { scale } => {
                     assert!(scale.is_finite() && scale > 0.0);
-                    let num_workers =
-                        cmp::max((*DEFAULT_NUM_WORKERS as f64 * scale).round() as usize, 1);
+                    let num_workers = scale_positive(*DEFAULT_NUM_WORKERS, scale);
                     let buf_size = Some(default_buf_size(num_workers));
 
                     ParParams {
@@ -110,6 +109,26 @@ mod config {
         }
     }
 
+    impl From<Option<usize>> for NumWorkers {
+        fn from(num_workers: Option<usize>) -> Self {
+            num_workers
+                .map(|value| Self::Fixed(value))
+                .unwrap_or(Self::Default)
+        }
+    }
+
+    impl From<usize> for NumWorkers {
+        fn from(value: usize) -> Self {
+            Self::Fixed(value)
+        }
+    }
+
+    impl From<f64> for NumWorkers {
+        fn from(scale: f64) -> Self {
+            Self::ScaleOfCpus(scale)
+        }
+    }
+
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum BufSize {
         Default,
@@ -128,6 +147,26 @@ mod config {
                 Self::ScaleOfWorkers(scale) => scale_positive(num_workers, scale).into(),
                 Self::Unbounded => None,
             }
+        }
+    }
+
+    impl From<Option<usize>> for BufSize {
+        fn from(value: Option<usize>) -> Self {
+            value
+                .map(|value| Self::Fixed(value))
+                .unwrap_or(Self::Default)
+        }
+    }
+
+    impl From<usize> for BufSize {
+        fn from(value: usize) -> Self {
+            Self::Fixed(value)
+        }
+    }
+
+    impl From<f64> for BufSize {
+        fn from(scale: f64) -> Self {
+            Self::ScaleOfCpus(scale)
         }
     }
 }
