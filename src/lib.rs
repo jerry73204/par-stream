@@ -173,6 +173,7 @@ pub mod prelude {
     };
 }
 
+mod builder;
 mod common;
 mod config;
 mod functions;
@@ -186,6 +187,7 @@ mod try_stream;
 mod utils;
 
 pub use crate::par_stream::*;
+pub use builder::*;
 pub use config::*;
 pub use functions::*;
 pub use index_stream::*;
