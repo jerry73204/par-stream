@@ -19,7 +19,7 @@ no-default-features = true
 futures = "0.3.17"
 num_cpus = "1.13.0"
 async-std = { version = "1.10.0", features = ["unstable"], optional = true }
-tokio = { version = "1.13.0", features = ["sync", "macros"] }
+tokio = { version = "1.13.0", features = ["sync"] }
 pin-project = "1.0.8"
 derivative = "2.2.0"
 flurry = "0.3.1"
@@ -39,5 +39,5 @@ tokio-stream = { version = "0.1.8", features = ["sync"] }
 [features]
 runtime-async-std = ["async-std"]
 runtime-tokio = ["tokio/rt-multi-thread"]
-runtime-smol = ["smol"]
-doc-only = ["runtime-tokio", "async-std", "smol"]
+# runtime-smol = ["smol"]
+doc-only = ["runtime-tokio", "async-std"]
