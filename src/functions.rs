@@ -1,8 +1,4 @@
-use crate::{
-    common::*,
-    config::{IntoParStreamParams, ParStreamParams},
-    rt, utils,
-};
+use crate::{common::*, config::ParParams, rt, utils};
 
 // iter_spawned
 
@@ -20,7 +16,7 @@ mod iter_spawned {
         I: 'static + IntoIterator + Send,
         I::Item: Send,
     {
-        let (tx, rx) = flume::bounded(buf_size);
+        let (tx, rx) = utils::channel(buf_size);
 
         rt::spawn_blocking(move || {
             for item in iter.into_iter() {
@@ -76,7 +72,7 @@ mod unfold_blocking {
         Item: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = flume::bounded(buf_size);
+        let (data_tx, data_rx) = utils::channel(buf_size);
 
         rt::spawn_blocking(move || {
             let mut state = init;
@@ -116,17 +112,17 @@ mod par_unfold {
         f: F,
     ) -> BoxStream<'static, Item>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(usize, Arc<State>) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Option<(Item, Arc<State>)>> + Send,
         Item: 'static + Send,
         State: 'static + Sync + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let state = Arc::new(state);
 
         (0..num_workers).for_each(|worker_index| {
@@ -157,16 +153,16 @@ mod par_unfold {
         f: F,
     ) -> BoxStream<'static, Item>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(usize, Arc<State>) -> Option<(Item, Arc<State>)> + Send + Clone,
         Item: 'static + Send,
         State: 'static + Send + Sync,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let state = Arc::new(state);
 
         (0..num_workers).for_each(|worker_index| {
@@ -270,8 +266,8 @@ mod sync {
         }
 
         let mut select_stream = stream::select_all(streams);
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         let input_future = async move {
             while let Some((index, item)) = select_stream.next().await {
@@ -440,8 +436,8 @@ mod try_sync {
         }
 
         let mut select_stream = stream::select_all(streams);
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         let input_future = async move {
             while let Some(result) = select_stream.next().await {
@@ -580,7 +576,7 @@ mod try_unfold_blocking {
         Error: 'static + Send,
     {
         let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = flume::bounded(buf_size);
+        let (data_tx, data_rx) = utils::channel(buf_size);
 
         rt::spawn_blocking(move || {
             let mut state = match init_f() {
@@ -652,13 +648,13 @@ mod try_par_unfold_unordered {
         State: Send,
         Item: 'static + Send,
         Error: 'static + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
 
         let worker_futs = (0..num_workers).map(move |worker_index| {
@@ -739,13 +735,13 @@ mod try_par_unfold_unordered {
         UF: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
         Item: 'static + Send,
         Error: 'static + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
 
         (0..num_workers).for_each(|worker_index| {

@@ -1,142 +1,168 @@
-/// A conversion trait that converts an input type to parallel stream parameters.
-pub trait IntoParStreamParams {
-    fn into_par_stream_params(self) -> ParStreamParams;
+use crate::common::*;
+
+pub const DEFAULT_BUF_SIZE_SCALE: f64 = 2.0;
+static BUF_SIZE_SCALE: OnceCell<f64> = OnceCell::new();
+static DEFAULT_NUM_WORKERS: Lazy<usize> = Lazy::new(|| {
+    let value = num_cpus::get();
+    assert!(value > 0);
+    value
+});
+
+pub fn set_buf_size_scale(scale: f64) -> bool {
+    assert!(scale.is_finite() && scale > 0.0);
+    BUF_SIZE_SCALE.set(scale).is_ok()
 }
 
-impl<T> IntoParStreamParams for T
-where
-    ParStreamConfig: From<T>,
-{
-    fn into_par_stream_params(self) -> ParStreamParams {
-        let config: ParStreamConfig = self.into();
-        let params: ParStreamParams = config.into();
-        params
+pub fn get_buf_size_scale() -> f64 {
+    *BUF_SIZE_SCALE.get_or_init(|| DEFAULT_BUF_SIZE_SCALE)
+}
+
+fn default_buf_size(num_workers: usize) -> usize {
+    scale_positive(num_workers, get_buf_size_scale())
+}
+
+fn scale_positive(value: usize, scale: f64) -> usize {
+    assert!(value > 0);
+    assert!(scale.is_finite() && scale > 0.0);
+    cmp::max((value as f64 * scale).round() as usize, 1)
+}
+
+pub use config::*;
+mod config {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ParParamsConfig {
+        Default,
+        FixedWorkers {
+            num_workers: usize,
+        },
+        ScaleOfCpus {
+            scale: f64,
+        },
+        Manual {
+            num_workers: NumWorkers,
+            buf_size: BufSize,
+        },
     }
-}
 
-/// Parallel stream configuration.
-#[derive(Debug, Clone)]
-pub struct ParStreamConfig {
-    pub num_workers: Count,
-    pub buf_size: Count,
-}
+    impl ParParamsConfig {
+        pub fn to_params(&self) -> ParParams {
+            match *self {
+                Self::Default => {
+                    let num_workers = *DEFAULT_NUM_WORKERS;
+                    let buf_size = Some(default_buf_size(num_workers));
 
-impl From<Option<usize>> for ParStreamConfig {
-    fn from(size: Option<usize>) -> Self {
-        match size {
-            Some(size) => ParStreamConfig {
-                num_workers: Count::Absolute(size),
-                buf_size: Count::Absolute(size),
-            },
-            None => ParStreamConfig {
-                num_workers: Count::Auto,
-                buf_size: Count::Auto,
-            },
-        }
-    }
-}
+                    ParParams {
+                        num_workers,
+                        buf_size,
+                    }
+                }
+                Self::FixedWorkers { num_workers } => {
+                    let buf_size = Some(default_buf_size(num_workers));
 
-impl From<usize> for ParStreamConfig {
-    fn from(size: usize) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Absolute(size),
-            buf_size: Count::Absolute(size),
-        }
-    }
-}
+                    ParParams {
+                        num_workers,
+                        buf_size,
+                    }
+                }
+                Self::ScaleOfCpus { scale } => {
+                    assert!(scale.is_finite() && scale > 0.0);
+                    let num_workers =
+                        cmp::max((*DEFAULT_NUM_WORKERS as f64 * scale).round() as usize, 1);
+                    let buf_size = Some(default_buf_size(num_workers));
 
-impl From<f64> for ParStreamConfig {
-    fn from(scale: f64) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Scale(scale),
-            buf_size: Count::Scale(scale),
-        }
-    }
-}
+                    ParParams {
+                        num_workers,
+                        buf_size,
+                    }
+                }
+                Self::Manual {
+                    num_workers,
+                    buf_size,
+                } => {
+                    let num_workers = num_workers.get();
+                    let buf_size = buf_size.get(num_workers);
 
-impl From<(usize, usize)> for ParStreamConfig {
-    fn from((num_workers, buf_size): (usize, usize)) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Absolute(num_workers),
-            buf_size: Count::Absolute(buf_size),
-        }
-    }
-}
-
-impl From<(f64, usize)> for ParStreamConfig {
-    fn from((num_workers, buf_size): (f64, usize)) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Scale(num_workers),
-            buf_size: Count::Absolute(buf_size),
-        }
-    }
-}
-
-impl From<(usize, f64)> for ParStreamConfig {
-    fn from((num_workers, buf_size): (usize, f64)) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Absolute(num_workers),
-            buf_size: Count::Scale(buf_size),
-        }
-    }
-}
-
-impl From<(f64, f64)> for ParStreamConfig {
-    fn from((num_workers, buf_size): (f64, f64)) -> Self {
-        ParStreamConfig {
-            num_workers: Count::Scale(num_workers),
-            buf_size: Count::Scale(buf_size),
-        }
-    }
-}
-
-/// Specifies an absolute value, a scaling factor, or a value determined in runtime.
-#[derive(Debug, Clone)]
-pub enum Count {
-    Auto,
-    Absolute(usize),
-    Scale(f64),
-}
-
-impl Count {
-    pub fn to_absolute(&self) -> usize {
-        match *self {
-            Self::Auto => num_cpus::get(),
-            Self::Absolute(val) => {
-                assert!(val > 0, "absolute value must be positive");
-                val
-            }
-            Self::Scale(scale) => {
-                assert!(
-                    scale.is_finite() && scale.is_sign_positive(),
-                    "scaling value must be positive finite"
-                );
-                (num_cpus::get() as f64 * scale).ceil() as usize
+                    ParParams {
+                        num_workers,
+                        buf_size,
+                    }
+                }
             }
         }
     }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum NumWorkers {
+        Default,
+        Fixed(usize),
+        ScaleOfCpus(f64),
+    }
+
+    impl NumWorkers {
+        pub fn get(&self) -> usize {
+            match *self {
+                Self::Default => *DEFAULT_NUM_WORKERS,
+                Self::Fixed(val) => val,
+                Self::ScaleOfCpus(scale) => scale_positive(*DEFAULT_NUM_WORKERS, scale),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum BufSize {
+        Default,
+        Fixed(usize),
+        ScaleOfCpus(f64),
+        ScaleOfWorkers(f64),
+        Unbounded,
+    }
+
+    impl BufSize {
+        pub fn get(&self, num_workers: usize) -> Option<usize> {
+            match *self {
+                Self::Default => default_buf_size(num_workers).into(),
+                Self::Fixed(val) => val.into(),
+                Self::ScaleOfCpus(scale) => scale_positive(*DEFAULT_NUM_WORKERS, scale).into(),
+                Self::ScaleOfWorkers(scale) => scale_positive(num_workers, scale).into(),
+                Self::Unbounded => None,
+            }
+        }
+    }
 }
 
-/// Parallel stream parameters.
-#[derive(Debug, Clone)]
-pub struct ParStreamParams {
-    pub(crate) num_workers: usize,
-    pub(crate) buf_size: usize,
-}
+pub use params::*;
+mod params {
+    use super::*;
 
-impl From<ParStreamConfig> for ParStreamParams {
-    fn from(from: ParStreamConfig) -> Self {
-        let ParStreamConfig {
-            num_workers,
-            buf_size,
-        } = from;
+    #[derive(Debug, Clone, PartialEq)]
+    pub struct ParParams {
+        pub num_workers: usize,
+        pub buf_size: Option<usize>,
+    }
 
-        let num_workers = num_workers.to_absolute();
-        let buf_size = buf_size.to_absolute();
+    impl Default for ParParams {
+        fn default() -> Self {
+            ParParamsConfig::Default.to_params()
+        }
+    }
 
-        Self {
-            num_workers,
-            buf_size,
+    impl From<Option<ParParamsConfig>> for ParParams {
+        fn from(config: Option<ParParamsConfig>) -> Self {
+            config.map(|config| config.to_params()).unwrap_or_default()
+        }
+    }
+
+    impl From<usize> for ParParams {
+        fn from(num_workers: usize) -> Self {
+            ParParamsConfig::FixedWorkers { num_workers }.to_params()
+        }
+    }
+
+    impl From<f64> for ParParams {
+        fn from(scale: f64) -> Self {
+            ParParamsConfig::ScaleOfCpus { scale }.to_params()
         }
     }
 }

@@ -1,8 +1,4 @@
-use crate::{
-    common::*,
-    config::{IntoParStreamParams, ParStreamParams},
-    rt,
-};
+use crate::{common::*, config::ParParams, rt, utils};
 use tokio::sync::{broadcast, Mutex};
 
 /// An extension trait that provides fallible combinators for parallel processing on streams.
@@ -30,7 +26,7 @@ where
         F: FnMut(usize, flume::Receiver<Self::Ok>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
         U: 'static + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
     fn try_par_then<P, U, F, Fut>(
@@ -39,7 +35,7 @@ where
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
@@ -54,7 +50,7 @@ where
         U: 'static + Send,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
     fn try_par_map<P, U, F, Func>(
@@ -63,7 +59,7 @@ where
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
@@ -75,7 +71,7 @@ where
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
@@ -88,7 +84,7 @@ where
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
@@ -99,7 +95,7 @@ where
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), Self::Error> + Send;
 }
@@ -174,18 +170,18 @@ where
         mut f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: FnMut(usize, flume::Receiver<T>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
+        } = config.into();
 
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         let input_fut = rt::spawn(async move {
             let mut stream = self.boxed();
@@ -246,19 +242,19 @@ where
 
     fn try_par_then<P, U, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
+        } = config.into();
 
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (reorder_tx, reorder_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 
         let input_future = {
@@ -445,14 +441,14 @@ where
         U: 'static + Send,
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 
         let input_future = {
@@ -585,19 +581,19 @@ where
 
     fn try_par_map<P, U, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
+        } = config.into();
 
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (reorder_tx, reorder_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 
         let input_future = {
@@ -781,17 +777,17 @@ where
         mut f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         U: 'static + Send,
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 
         let input_future = {
@@ -924,15 +920,15 @@ where
 
     fn try_par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (map_tx, map_rx) = utils::channel(buf_size);
         let (terminate_tx, _terminate_rx) = broadcast::channel(1);
 
         let map_fut = {
@@ -1006,15 +1002,15 @@ where
         mut f: F,
     ) -> BoxFuture<'static, Result<(), E>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (map_tx, map_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 
         let input_fut = {

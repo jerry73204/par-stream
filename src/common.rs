@@ -5,6 +5,8 @@ pub use futures::{
     join, ready,
     stream::{self, BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
 };
+pub use once_cell::sync::Lazy;
+pub use once_cell::sync::OnceCell;
 pub use pin_project::pin_project;
 pub use std::{
     cmp::{self, Ordering::*},

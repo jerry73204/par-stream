@@ -1,6 +1,6 @@
 use crate::{
     common::*,
-    config::{IntoParStreamParams, ParStreamParams},
+    config::ParParams,
     index_stream::IndexStreamExt,
     rt,
     utils::{self, TokioMpscReceiverExt as _},
@@ -118,7 +118,7 @@ where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
     ///
@@ -263,7 +263,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Computes new items from the stream asynchronously in parallel without respecting the input order.
     ///
@@ -316,7 +316,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Computes new items in a function in parallel with respect to the input order.
     ///
@@ -369,7 +369,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Computes new items in a function in parallel without respecting the input order.
     ///
@@ -424,7 +424,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Reduces the input items into single value in parallel.
     ///
@@ -477,7 +477,7 @@ where
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send;
 
@@ -638,7 +638,7 @@ where
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 
     /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
     /// Runs an blocking task on each element of an stream in parallel.
@@ -646,7 +646,7 @@ where
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        P: IntoParStreamParams;
+        P: Into<ParParams>;
 }
 
 impl<S> ParStreamExt for S
@@ -655,7 +655,7 @@ where
     S::Item: 'static + Send,
 {
     fn spawned(self, buf_size: usize) -> BoxStream<'static, Self::Item> {
-        let (tx, rx) = flume::bounded(buf_size);
+        let (tx, rx) = utils::channel(buf_size);
 
         rt::spawn(async move {
             let _ = self.map(Ok).forward(tx.into_sink()).await;
@@ -687,15 +687,15 @@ where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
+        } = config.into();
 
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         rt::spawn(async move {
             let _ = self.map(Ok).forward(input_tx.into_sink()).await;
@@ -817,7 +817,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
         let indexed_f = move |(index, item)| {
             let fut = f(item);
@@ -835,14 +835,14 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         rt::spawn(async move {
             let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
@@ -868,7 +868,7 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
         self.enumerate()
             .par_map_unordered(config, move |(index, item)| {
@@ -884,14 +884,14 @@ where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() -> T + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (input_tx, input_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (input_tx, input_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         rt::spawn(async move {
             let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
@@ -921,18 +921,18 @@ where
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
+        } = config.into();
 
         // phase 1
         let phase_1_future = async move {
-            let (input_tx, input_rx) = flume::bounded(buf_size);
+            let (input_tx, input_rx) = utils::channel(buf_size);
 
             let input_future = rt::spawn(async move {
                 let _ = self.map(Ok).forward(input_tx.into_sink()).await;
@@ -965,7 +965,7 @@ where
         let phase_2_future = async move {
             let (values, reduce_fn) = phase_1_future.await;
 
-            let (pair_tx, pair_rx) = flume::bounded(buf_size);
+            let (pair_tx, pair_rx) = utils::channel(buf_size);
             let (feedback_tx, feedback_rx) = flume::bounded(num_workers);
 
             let mut count = 0;
@@ -1039,13 +1039,13 @@ where
             Some(size) => size,
         };
 
-        let (reorder_tx, reorder_rx) = flume::bounded(buf_size);
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (reorder_tx, reorder_rx) = utils::channel(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         let mut map_txs: Vec<_> = map_fns
             .iter()
             .map(|_| {
-                let (map_tx, map_rx) = flume::bounded(buf_size);
+                let (map_tx, map_rx) = utils::channel(buf_size);
                 let reorder_tx = reorder_tx.clone();
 
                 rt::spawn(async move {
@@ -1126,12 +1126,12 @@ where
             Some(size) => size,
         };
 
-        let (output_tx, output_rx) = flume::bounded(buf_size);
+        let (output_tx, output_rx) = utils::channel(buf_size);
 
         let mut map_txs: Vec<_> = map_fns
             .iter()
             .map(|_| {
-                let (map_tx, map_rx) = flume::bounded(buf_size);
+                let (map_tx, map_rx) = utils::channel(buf_size);
                 let output_tx = output_tx.clone();
 
                 rt::spawn(async move {
@@ -1182,13 +1182,13 @@ where
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (map_tx, map_rx) = utils::channel(buf_size);
 
         let map_fut = async move {
             let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;
@@ -1208,13 +1208,13 @@ where
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        P: IntoParStreamParams,
+        P: Into<ParParams>,
     {
-        let ParStreamParams {
+        let ParParams {
             num_workers,
             buf_size,
-        } = config.into_par_stream_params();
-        let (map_tx, map_rx) = flume::bounded(buf_size);
+        } = config.into();
+        let (map_tx, map_rx) = utils::channel(buf_size);
 
         let map_fut = async move {
             let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;

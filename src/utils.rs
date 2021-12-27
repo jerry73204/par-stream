@@ -1,7 +1,11 @@
 use crate::common::*;
 
-// pub(crate) type BoxedFuture<T> = BoxFuture<'static, T>;
-// pub(crate) type BoxedStream<T> = BoxStream<'static, T>;
+pub fn channel<T>(capacity: impl Into<Option<usize>>) -> (flume::Sender<T>, flume::Receiver<T>) {
+    match capacity.into() {
+        Some(capacity) => flume::bounded(capacity),
+        None => flume::unbounded(),
+    }
+}
 
 pub fn join_future_stream<F, S>(future: F, stream: S) -> impl Stream<Item = S::Item>
 where
