@@ -116,7 +116,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_batching_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -690,7 +690,7 @@ where
         utils::join_future_stream(batching_future, output_rx.into_stream()).boxed()
     }
 
-    fn par_batching_unordered<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
+    fn par_batching<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -1488,12 +1488,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn par_batching_unordered_test() {
+    async fn par_batching_test() {
         let mut rng = rand::thread_rng();
         let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
         let sums: Vec<_> = stream::iter(data)
-            .par_batching_unordered(None, |_, input, output| async move {
+            .par_batching(None, |_, input, output| async move {
                 let mut sum = 0;
 
                 while let Ok(val) = input.recv_async().await {

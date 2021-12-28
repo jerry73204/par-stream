@@ -16,8 +16,8 @@ where
         F: FnOnce(flume::Receiver<Self::Ok>, flume::Sender<U>) -> Fut,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
-    /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
-    fn try_par_batching_unordered<U, P, F, Fut>(
+    /// A fallible analogue to [par_batching](crate::ParStreamExt::par_batching).
+    fn try_par_batching<U, P, F, Fut>(
         self,
         params: P,
         f: F,
@@ -164,11 +164,7 @@ where
         .boxed()
     }
 
-    fn try_par_batching_unordered<U, P, F, Fut>(
-        self,
-        params: P,
-        mut f: F,
-    ) -> BoxStream<'static, Result<U, E>>
+    fn try_par_batching<U, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
         P: Into<ParParams>,
         U: 'static + Send,
@@ -1094,11 +1090,11 @@ mod tests {
     use rand::prelude::*;
 
     #[tokio::test]
-    async fn try_par_batching_unordered_test() {
+    async fn try_par_batching_test() {
         {
             let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
-                .try_par_batching_unordered::<(), _, _, _>(None, |_, _, _| async move {
+                .try_par_batching::<(), _, _, _>(None, |_, _, _| async move {
                     Result::<(), _>::Err("init error")
                 });
 
@@ -1109,7 +1105,7 @@ mod tests {
         {
             let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
-                .try_par_batching_unordered(None, |_, input, output| async move {
+                .try_par_batching(None, |_, input, output| async move {
                     let mut sum = 0;
 
                     while let Ok(val) = input.recv_async().await {
@@ -1144,7 +1140,7 @@ mod tests {
         {
             let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
-                .try_par_batching_unordered(None, |_, input, output| async move {
+                .try_par_batching(None, |_, input, output| async move {
                     let mut sum = 0;
 
                     while let Ok(val) = input.recv_async().await {
