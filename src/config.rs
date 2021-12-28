@@ -109,6 +109,12 @@ mod config {
         }
     }
 
+    impl Default for NumWorkers {
+        fn default() -> Self {
+            Self::Default
+        }
+    }
+
     impl From<Option<usize>> for NumWorkers {
         fn from(num_workers: Option<usize>) -> Self {
             num_workers
@@ -147,6 +153,12 @@ mod config {
                 Self::ScaleOfWorkers(scale) => scale_positive(num_workers, scale).into(),
                 Self::Unbounded => None,
             }
+        }
+    }
+
+    impl Default for BufSize {
+        fn default() -> Self {
+            Self::Default
         }
     }
 
