@@ -4,6 +4,8 @@ pub trait StreamExt
 where
     Self: Stream,
 {
+    fn fold1<F, Fut>(self, f: F) -> Fold1<Self, F, Fut>;
+
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
     /// The function f([receiver](flume::Receiver), [sender](flume::Sender)) takes one or more elements
@@ -72,6 +74,15 @@ impl<S> StreamExt for S
 where
     S: Stream,
 {
+    fn fold1<F, Fut>(self, f: F) -> Fold1<Self, F, Fut> {
+        Fold1 {
+            fold: None,
+            f,
+            future: None,
+            stream: self,
+        }
+    }
+
     fn batching<T, F, Fut>(self, f: F) -> Batching<Self, T, F, Fut> {
         Batching {
             f,
@@ -260,9 +271,82 @@ mod stateful_map {
     }
 }
 
+use fold1::*;
+mod fold1 {
+    use super::*;
+
+    #[pin_project]
+    pub struct Fold1<St, F, Fut>
+    where
+        St: ?Sized + Stream,
+    {
+        pub(super) fold: Option<St::Item>,
+        pub(super) f: F,
+        #[pin]
+        pub(super) future: Option<Fut>,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St, F, Fut> Future for Fold1<St, F, Fut>
+    where
+        St: Stream,
+        F: FnMut(St::Item, St::Item) -> Fut,
+        Fut: Future<Output = St::Item>,
+    {
+        type Output = Option<St::Item>;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            let mut this = self.project();
+
+            Ready(loop {
+                if let Some(mut future) = this.future.as_mut().as_pin_mut() {
+                    let fold = ready!(future.poll_unpin(cx));
+                    this.future.set(None);
+                    *this.fold = Some(fold);
+                } else if let Some(item) = ready!(this.stream.poll_next_unpin(cx)) {
+                    if let Some(fold) = this.fold.take() {
+                        let future = (this.f)(fold, item);
+                        this.future.set(Some(future));
+                    } else {
+                        *this.fold = Some(item);
+                    }
+                } else {
+                    break this.fold.take();
+                }
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn fold1_test() {
+        {
+            let output = stream::iter(1..=10)
+                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .await;
+            assert_eq!(output, Some(55));
+        }
+
+        {
+            let output = future::ready(1)
+                .into_stream()
+                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .await;
+            assert_eq!(output, Some(1));
+        }
+
+        {
+            let output = stream::empty::<usize>()
+                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .await;
+            assert_eq!(output, None);
+        }
+    }
 
     #[tokio::test]
     async fn stateful_then_test() {
