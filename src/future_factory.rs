@@ -1,9 +1,4 @@
 use crate::common::*;
-use crate::config::BufSize;
-use crate::config::NumWorkers;
-use crate::config::ParParams;
-use crate::par_stream::ParStreamExt as _;
-use crate::rt;
 
 pub type BoxFutureFactory<In, Out> = Box<dyn FnMut(In) -> BoxFuture<'static, Out> + Send>;
 

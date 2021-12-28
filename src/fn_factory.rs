@@ -1,5 +1,3 @@
-use crate::common::*;
-
 pub type BoxFnFactory<In, Out> = Box<dyn FnMut(In) -> Box<dyn FnOnce() -> Out + Send> + Send>;
 
 pub trait FnFactory<In, Out, Func>

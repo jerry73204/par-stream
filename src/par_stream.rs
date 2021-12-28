@@ -2,10 +2,9 @@ use crate::{
     common::*,
     config::{self, BufSize, ParParams},
     index_stream::IndexStreamExt,
-    rt,
-    utils::{self, TokioMpscReceiverExt as _},
+    rt, utils,
 };
-use tokio::sync::{mpsc, oneshot, watch, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
 
 /// An extension trait that provides parallel processing combinators on streams.
 pub trait ParStreamExt
@@ -1306,7 +1305,6 @@ pub use tee::*;
 
 mod tee {
     use super::*;
-    use tokio_stream::wrappers::ReceiverStream;
 
     /// A stream combinator returned from [tee()](ParStreamExt::tee).
     #[derive(Derivative)]

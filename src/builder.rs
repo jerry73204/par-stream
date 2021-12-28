@@ -1,10 +1,8 @@
 use crate::common::*;
 use crate::config::BufSize;
 use crate::config::NumWorkers;
-use crate::config::ParParams;
 use crate::fn_factory::{BoxFnFactory, FnFactory};
 use crate::future_factory::{BoxFutureFactory, FutureFactory};
-use crate::par_stream::ParStreamExt as _;
 use crate::rt;
 use crate::utils;
 
@@ -136,7 +134,7 @@ where
     Fac: 'static + Send + FnMut(St::Item) -> Fut,
     Fut: 'static + Send + Future<Output = ()>,
 {
-    async fn for_each(self) {
+    pub async fn for_each(self) {
         let Self {
             input_buf_size,
             num_workers,
@@ -244,7 +242,7 @@ where
     Fac: 'static + Send + FnMut(St::Item) -> Func,
     Func: 'static + Send + FnOnce() -> (),
 {
-    async fn for_each(self) {
+    pub async fn for_each(self) {
         let Self {
             input_buf_size,
             num_workers,

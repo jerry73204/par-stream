@@ -1,5 +1,5 @@
 use crate::{common::*, config::ParParams, rt, utils};
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::broadcast;
 
 /// An extension trait that provides fallible combinators for parallel processing on streams.
 pub trait TryParStreamExt
