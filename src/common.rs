@@ -3,6 +3,8 @@ pub use derivative::Derivative;
 pub use futures::{
     future::{self, BoxFuture, Either, FutureExt as _},
     join, ready,
+    sink::Sink,
+    sink::SinkExt as _,
     stream::{self, BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
 };
 pub use once_cell::sync::Lazy;
@@ -28,3 +30,5 @@ pub use std::{
     task::{Context, Poll, Poll::*},
     time::Duration,
 };
+
+pub type BoxSink<T, E> = Pin<Box<dyn Sink<T, Error = E> + Send>>;

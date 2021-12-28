@@ -786,7 +786,7 @@ where
 
         rt::spawn(async move {
             // wait for receiver list to be ready
-            let mut senders: Vec<flume::Sender<_>> = match senders_rx.await {
+            let senders: Vec<flume::Sender<_>> = match senders_rx.await {
                 Ok(senders) => senders,
                 Err(_) => return,
             };
@@ -803,28 +803,25 @@ where
                 let sender = senders.into_iter().next().unwrap();
                 let _ = self.map(Ok).forward(sender.into_sink()).await;
             } else {
-                let mut stream = self.boxed();
+                debug_assert!(!senders.is_empty());
 
-                while let Some(item) = stream.next().await {
-                    let sending_futures = senders.into_iter().map(move |tx| {
-                        let item = item.clone();
-                        async move {
-                            tx.send_async(item).await.ok()?;
-                            Some(tx)
-                        }
-                    });
-                    let senders_: Option<Vec<_>> = future::join_all(sending_futures)
-                        .await
-                        .into_iter()
-                        .collect();
+                // merge senders into single fanout sink
+                let fanout = {
+                    let mut sinks = senders.into_iter().map(
+                        |tx| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {
+                            Box::pin(tx.into_sink())
+                        },
+                    );
+                    let first = sinks.next().unwrap();
+                    sinks.fold(
+                        first,
+                        |fanout, sink| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {
+                            Box::pin(fanout.fanout(sink))
+                        },
+                    )
+                };
 
-                    match senders_ {
-                        Some(senders_) => {
-                            senders = senders_;
-                        }
-                        None => break,
-                    }
-                }
+                let _ = self.map(Ok).forward(fanout).await;
             }
         });
 
