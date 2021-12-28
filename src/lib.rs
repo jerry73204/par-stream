@@ -176,7 +176,9 @@ pub mod prelude {
 mod builder;
 mod common;
 mod config;
+mod fn_factory;
 mod functions;
+mod future_factory;
 mod index_stream;
 mod par_stream;
 mod rt;
