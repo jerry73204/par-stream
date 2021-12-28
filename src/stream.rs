@@ -4,6 +4,65 @@ pub trait StreamExt
 where
     Self: Stream,
 {
+    /// A combinator that consumes as many elements as it likes, and produces the next stream element.
+    ///
+    /// The function f([receiver](flume::Receiver), [sender](flume::Sender)) takes one or more elements
+    /// by calling `receiver.recv().await`,
+    /// It returns `Some(item)` if an input element is available, otherwise it returns `None`.
+    /// Calling `sender.send(item).await` will produce an output element. It returns `Ok(())` when success,
+    /// or returns `Err(item)` if the output stream is closed.
+    ///
+    /// ```rust
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::mem;
+    ///
+    /// async fn main_async() {
+    ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
+    ///     let mut stream = stream::iter(data)
+    ///         .batching(|mut stream| async move {
+    ///             let mut buffer = vec![];
+    ///             while let Some(value) = stream.next().await {
+    ///                 buffer.push(value);
+    ///                 if value < 0 {
+    ///                     break;
+    ///                 }
+    ///             }
+    ///
+    ///             (!buffer.is_empty()).then(|| (buffer, stream))
+    ///         })
+    ///         .boxed();
+    ///
+    ///     assert_eq!(stream.next().await, Some(vec![1, 2, -3]));
+    ///     assert_eq!(stream.next().await, Some(vec![4, 5, -6]));
+    ///     assert_eq!(stream.next().await, Some(vec![7, 8]));
+    ///     assert!(stream.next().await.is_none());
+    /// }
+    ///
+    /// # #[cfg(feature = "runtime-async-std")]
+    /// # #[async_std::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-tokio")]
+    /// # #[tokio::main]
+    /// # async fn main() {
+    /// #     main_async().await
+    /// # }
+    /// #
+    /// # #[cfg(feature = "runtime-smol")]
+    /// # fn main() {
+    /// #     smol::block_on(main_async())
+    /// # }
+    /// ```
+    fn batching<T, F, Fut>(self, f: F) -> Batching<Self, T, F, Fut>
+    where
+        Self: Sized,
+        F: 'static + Send + FnMut(Self) -> Fut,
+        Fut: 'static + Future<Output = Option<(T, Self)>> + Send,
+        T: 'static + Send;
+
     fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>;
 
     fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>;
@@ -13,6 +72,15 @@ impl<S> StreamExt for S
 where
     S: Stream,
 {
+    fn batching<T, F, Fut>(self, f: F) -> Batching<Self, T, F, Fut> {
+        Batching {
+            f,
+            future: None,
+            stream: Some(self),
+            _phantom: PhantomData,
+        }
+    }
+
     fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut> {
         StatefulThen {
             stream: self,
@@ -29,6 +97,53 @@ where
             state: Some(init),
             f,
             _phantom: PhantomData,
+        }
+    }
+}
+
+pub use batching::*;
+mod batching {
+    use super::*;
+
+    /// Stream for the [`batching`](super::StreamExt::batching) method.
+    #[pin_project]
+    pub struct Batching<St, T, F, Fut> {
+        pub(super) f: F,
+        #[pin]
+        pub(super) future: Option<Fut>,
+        pub(super) stream: Option<St>,
+        pub(super) _phantom: PhantomData<T>,
+    }
+
+    impl<St, T, F, Fut> Stream for Batching<St, T, F, Fut>
+    where
+        F: FnMut(St) -> Fut,
+        Fut: Future<Output = Option<(T, St)>>,
+    {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut this = self.project();
+
+            if let Some(stream) = this.stream.take() {
+                let new_future = (this.f)(stream);
+                this.future.set(Some(new_future));
+            }
+
+            Ready(loop {
+                if let Some(mut future) = this.future.as_pin_mut() {
+                    match ready!(future.poll_unpin(cx)) {
+                        Some((item, stream)) => {
+                            let new_future = (this.f)(stream);
+                            future.set(new_future);
+                            break Some(item);
+                        }
+                        None => break None,
+                    }
+                } else {
+                    break None;
+                }
+            })
         }
     }
 }
@@ -169,5 +284,27 @@ mod tests {
             .await;
 
         assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[tokio::test]
+    async fn batching_test() {
+        let sums: Vec<_> = stream::iter(0..10)
+            .batching(|mut stream| async move {
+                let mut sum = 0;
+
+                while let Some(val) = stream.next().await {
+                    sum += val;
+
+                    if sum >= 10 {
+                        return Some((sum, stream));
+                    }
+                }
+
+                None
+            })
+            .collect()
+            .await;
+
+        assert_eq!(sums, vec![10, 11, 15]);
     }
 }

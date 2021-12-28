@@ -16,67 +16,6 @@ where
     where
         B: Into<BufSize>;
 
-    /// A combinator that consumes as many elements as it likes, and produces the next stream element.
-    ///
-    /// The function f([receiver](flume::Receiver), [sender](flume::Sender)) takes one or more elements
-    /// by calling `receiver.recv().await`,
-    /// It returns `Some(item)` if an input element is available, otherwise it returns `None`.
-    /// Calling `sender.send(item).await` will produce an output element. It returns `Ok(())` when success,
-    /// or returns `Err(item)` if the output stream is closed.
-    ///
-    /// ```rust
-    /// use futures::prelude::*;
-    /// use par_stream::prelude::*;
-    /// use std::mem;
-    ///
-    /// async fn main_async() {
-    ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     let mut stream = stream::iter(data).batching(None, |mut stream, mut tx| async move {
-    ///         let mut buffer = vec![];
-    ///         while let Some(value) = stream.next().await {
-    ///             buffer.push(value);
-    ///             if value < 0 {
-    ///                 let result = tx.send_async(mem::take(&mut buffer)).await;
-    ///                 if result.is_err() {
-    ///                     return;
-    ///                 }
-    ///             }
-    ///         }
-    ///
-    ///         let _ = tx.send_async(mem::take(&mut buffer)).await;
-    ///     });
-    ///
-    ///     assert_eq!(stream.next().await, Some(vec![1, 2, -3]));
-    ///     assert_eq!(stream.next().await, Some(vec![4, 5, -6]));
-    ///     assert_eq!(stream.next().await, Some(vec![7, 8]));
-    ///     assert!(stream.next().await.is_none());
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
-    /// ```
-    fn batching<T, B, F, Fut>(self, buf_size: B, f: F) -> BoxStream<'static, T>
-    where
-        Self: Sized,
-        F: FnOnce(Self, flume::Sender<T>) -> Fut,
-        Fut: 'static + Future<Output = ()> + Send,
-        T: 'static + Send,
-        B: Into<BufSize>;
-
     /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
     /// and produces the next stream element.
     ///
@@ -87,8 +26,8 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     stream::iter(data).batching(None, |mut stream, mut tx| async move {
-    ///         while let Some(value) = stream.next().await {
+    ///     stream::iter(data).par_batching(None, |_worker_index, mut rx, mut tx| async move {
+    ///         while let Ok(value) = rx.recv_async().await {
     ///             if value > 0 {
     ///                 let result = tx.send_async(value).await;
     ///                 if result.is_err() {
@@ -674,20 +613,6 @@ where
         });
 
         rx.into_stream().boxed()
-    }
-
-    fn batching<T, B, F, Fut>(self, buf_size: B, f: F) -> BoxStream<'static, T>
-    where
-        F: FnOnce(Self, flume::Sender<T>) -> Fut,
-        Fut: 'static + Future<Output = ()> + Send,
-        T: 'static + Send,
-        B: Into<BufSize>,
-    {
-        let buf_size = buf_size.into().get();
-        let (output_tx, output_rx) = utils::channel(buf_size);
-        let batching_future = f(self, output_tx);
-
-        utils::join_future_stream(batching_future, output_rx.into_stream()).boxed()
     }
 
     fn par_batching<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
@@ -1514,33 +1439,6 @@ mod tests {
             .await;
 
         assert!(sums.iter().all(|&sum| sum >= 1000));
-    }
-
-    #[tokio::test]
-    async fn batching_test() {
-        let sums: Vec<_> = stream::iter(0..10)
-            .batching(None, |mut stream, output| async move {
-                let mut sum = 0;
-
-                while let Some(val) = stream.next().await {
-                    let new_sum = sum + val;
-
-                    if new_sum >= 10 {
-                        sum = 0;
-
-                        let result = output.send_async(new_sum).await;
-                        if result.is_err() {
-                            break;
-                        }
-                    } else {
-                        sum = new_sum;
-                    }
-                }
-            })
-            .collect()
-            .await;
-
-        assert_eq!(sums, vec![10, 11, 15]);
     }
 
     #[tokio::test]
