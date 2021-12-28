@@ -4,16 +4,16 @@ pub trait StreamExt
 where
     Self: Stream,
 {
-    fn stateful_then<B, T, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>;
+    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>;
 
-    fn stateful_map<B, T, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>;
+    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>;
 }
 
 impl<S> StreamExt for S
 where
     S: Stream,
 {
-    fn stateful_then<B, T, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut> {
+    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut> {
         StatefulThen {
             stream: self,
             future: None,
@@ -23,7 +23,7 @@ where
         }
     }
 
-    fn stateful_map<B, T, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F> {
+    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F> {
         StatefulMap {
             stream: self,
             state: Some(init),

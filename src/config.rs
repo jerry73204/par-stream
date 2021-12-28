@@ -21,7 +21,7 @@ fn default_buf_size() -> usize {
     scale_positive(*DEFAULT_NUM_WORKERS, get_buf_size_scale())
 }
 
-fn scale_positive(value: usize, scale: f64) -> usize {
+pub(crate) fn scale_positive(value: usize, scale: f64) -> usize {
     assert!(value > 0);
     assert!(scale.is_finite() && scale > 0.0);
     cmp::max((value as f64 * scale).round() as usize, 1)

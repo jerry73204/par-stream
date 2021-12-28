@@ -1,7 +1,7 @@
 pub use by_address::ByAddress;
 pub use derivative::Derivative;
 pub use futures::{
-    future::{self, BoxFuture, FutureExt as _},
+    future::{self, BoxFuture, Either, FutureExt as _},
     join, ready,
     stream::{self, BoxStream, FusedStream, Stream, StreamExt as _, TryStream, TryStreamExt as _},
 };

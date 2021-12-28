@@ -19,7 +19,7 @@ where
     /// A fallible analogue to [par_batching_unordered](crate::ParStreamExt::par_batching_unordered).
     fn try_par_batching_unordered<U, P, F, Fut>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
@@ -29,9 +29,9 @@ where
         P: Into<ParParams>;
 
     /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
-    fn try_par_then<P, U, F, Fut>(
+    fn try_par_then<U, P, F, Fut>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
@@ -41,9 +41,9 @@ where
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
 
     /// A fallible analogue to [par_then_unordered](crate::ParStreamExt::par_then_unordered).
-    fn try_par_then_unordered<P, U, F, Fut>(
+    fn try_par_then_unordered<U, P, F, Fut>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
@@ -53,9 +53,9 @@ where
         P: Into<ParParams>;
 
     /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
-    fn try_par_map<P, U, F, Func>(
+    fn try_par_map<U, P, F, Func>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
@@ -65,9 +65,9 @@ where
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
     /// A fallible analogue to [par_map_unordered](crate::ParStreamExt::par_map_unordered).
-    fn try_par_map_unordered<P, U, F, Func>(
+    fn try_par_map_unordered<U, P, F, Func>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxStream<'static, Result<U, Self::Error>>
     where
@@ -80,7 +80,7 @@ where
     /// in parallel.
     fn try_par_for_each<P, F, Fut>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
@@ -91,7 +91,7 @@ where
     /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
     fn try_par_for_each_blocking<P, F, Func>(
         self,
-        config: P,
+        params: P,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
@@ -166,7 +166,7 @@ where
 
     fn try_par_batching_unordered<U, P, F, Fut>(
         self,
-        config: P,
+        params: P,
         mut f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
@@ -178,7 +178,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
 
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
@@ -240,7 +240,7 @@ where
         .boxed()
     }
 
-    fn try_par_then<P, U, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
+    fn try_par_then<U, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
         P: Into<ParParams>,
         U: 'static + Send,
@@ -250,7 +250,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
 
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (reorder_tx, reorder_rx) = utils::channel(buf_size);
@@ -432,9 +432,9 @@ where
         .boxed()
     }
 
-    fn try_par_then_unordered<P, U, F, Fut>(
+    fn try_par_then_unordered<U, P, F, Fut>(
         self,
-        config: P,
+        params: P,
         mut f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
@@ -446,7 +446,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
@@ -579,7 +579,7 @@ where
         .boxed()
     }
 
-    fn try_par_map<P, U, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, Result<U, E>>
+    fn try_par_map<U, P, F, Func>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
         P: Into<ParParams>,
         U: 'static + Send,
@@ -589,7 +589,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
 
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (reorder_tx, reorder_rx) = utils::channel(buf_size);
@@ -771,9 +771,9 @@ where
         .boxed()
     }
 
-    fn try_par_map_unordered<P, U, F, Func>(
+    fn try_par_map_unordered<U, P, F, Func>(
         self,
-        config: P,
+        params: P,
         mut f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
@@ -785,7 +785,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
@@ -918,7 +918,7 @@ where
         .boxed()
     }
 
-    fn try_par_for_each<P, F, Fut>(self, config: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
+    fn try_par_for_each<P, F, Fut>(self, params: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
     where
         P: Into<ParParams>,
         F: 'static + FnMut(T) -> Fut + Send,
@@ -927,7 +927,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (map_tx, map_rx) = utils::channel(buf_size);
         let (terminate_tx, _terminate_rx) = broadcast::channel(1);
 
@@ -998,7 +998,7 @@ where
 
     fn try_par_for_each_blocking<P, F, Func>(
         self,
-        config: P,
+        params: P,
         mut f: F,
     ) -> BoxFuture<'static, Result<(), E>>
     where
@@ -1009,7 +1009,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (map_tx, map_rx) = utils::channel(buf_size);
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
 

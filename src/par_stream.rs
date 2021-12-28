@@ -1,11 +1,11 @@
 use crate::{
     common::*,
-    config::ParParams,
+    config::{self, BufSize, ParParams},
     index_stream::IndexStreamExt,
     rt,
     utils::{self, TokioMpscReceiverExt as _},
 };
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{mpsc, oneshot, watch, Mutex};
 
 /// An extension trait that provides parallel processing combinators on streams.
 pub trait ParStreamExt
@@ -13,7 +13,9 @@ where
     Self: 'static + Send + Stream,
     Self::Item: 'static + Send,
 {
-    fn spawned(self, buf_size: usize) -> BoxStream<'static, Self::Item>;
+    fn spawned<B>(self, buf_size: B) -> BoxStream<'static, Self::Item>
+    where
+        B: Into<BufSize>;
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
@@ -30,9 +32,9 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     let mut stream = stream::iter(data).batching(|mut rx, mut tx| async move {
+    ///     let mut stream = stream::iter(data).batching(None, |mut stream, mut tx| async move {
     ///         let mut buffer = vec![];
-    ///         while let Ok(value) = rx.recv_async().await {
+    ///         while let Some(value) = stream.next().await {
     ///             buffer.push(value);
     ///             if value < 0 {
     ///                 let result = tx.send_async(mem::take(&mut buffer)).await;
@@ -68,11 +70,13 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
+    fn batching<T, B, F, Fut>(self, buf_size: B, f: F) -> BoxStream<'static, T>
     where
-        F: FnOnce(flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
+        Self: Sized,
+        F: FnOnce(Self, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
-        T: 'static + Send;
+        T: 'static + Send,
+        B: Into<BufSize>;
 
     /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
     /// and produces the next stream element.
@@ -84,8 +88,8 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     stream::iter(data).batching(|mut rx, mut tx| async move {
-    ///         while let Ok(value) = rx.recv_async().await {
+    ///     stream::iter(data).batching(None, |mut stream, mut tx| async move {
+    ///         while let Some(value) = stream.next().await {
     ///             if value > 0 {
     ///                 let result = tx.send_async(value).await;
     ///                 if result.is_err() {
@@ -113,7 +117,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_batching_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_batching_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -164,9 +168,10 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn tee(self, buf_size: usize) -> Tee<Self::Item>
+    fn tee<B>(self, buf_size: B) -> Tee<Self::Item>
     where
-        Self::Item: Clone;
+        Self::Item: Clone,
+        B: Into<BufSize>;
 
     /// Converts to a [guard](BroadcastGuard) that can create receivers,
     /// each receiving cloned elements from this stream.
@@ -212,9 +217,10 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn broadcast(self, buf_size: usize) -> BroadcastGuard<Self::Item>
+    fn broadcast<B>(self, buf_size: B) -> BroadcastGuard<Self::Item>
     where
-        Self::Item: Clone;
+        Self::Item: Clone,
+        B: Into<BufSize>;
 
     /// Computes new items from the stream asynchronously in parallel with respect to the input order.
     ///
@@ -258,7 +264,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_then<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send + Clone,
@@ -311,7 +317,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -364,7 +370,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_map<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -419,7 +425,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -473,7 +479,7 @@ where
     /// ```
     fn par_reduce<P, F, Fut>(
         self,
-        config: P,
+        params: P,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
@@ -553,9 +559,9 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_routing<F1, F2, Fut, T>(
+    fn par_routing<T, B, F1, F2, Fut>(
         self,
-        buf_size: impl Into<Option<usize>>,
+        buf_size: B,
         routing_fn: F1,
         map_fns: Vec<F2>,
     ) -> BoxStream<'static, T>
@@ -563,7 +569,8 @@ where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        T: 'static + Send;
+        T: 'static + Send,
+        B: Into<BufSize>;
 
     /// Distributes input items to specific workers and compute new items without respecting the input order.
     ///
@@ -575,9 +582,9 @@ where
     /// `routing_fn` is executed on the calling thread.
     ///
     /// `map_fns` is a vector of mapping functions, each of which produces an asynchronous closure.
-    fn par_routing_unordered<F1, F2, Fut, T>(
+    fn par_routing_unordered<T, B, F1, F2, Fut>(
         self,
-        buf_size: impl Into<Option<usize>>,
+        buf_size: B,
         routing_fn: F1,
         map_fns: Vec<F2>,
     ) -> BoxStream<'static, T>
@@ -585,7 +592,8 @@ where
         F1: 'static + FnMut(&Self::Item) -> usize + Send,
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
-        T: 'static + Send;
+        T: 'static + Send,
+        B: Into<BufSize>;
 
     /// Splits the stream into a receiver and a future.
     ///
@@ -604,7 +612,7 @@ where
     ///     let orig = stream::iter(1isize..=1000);
     ///
     ///     // scatter the items
-    ///     let rx1 = orig.scatter();
+    ///     let rx1 = orig.scatter(None);
     ///     let rx2 = rx1.clone();
     ///
     ///     // collect the values concurrently
@@ -631,10 +639,12 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn scatter(self) -> Scatter<Self::Item>;
+    fn scatter<B>(self, buf_size: B) -> Scatter<Self::Item>
+    where
+        B: Into<BufSize>;
 
     /// Runs an asynchronous task on each element of an stream in parallel.
-    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
@@ -642,7 +652,7 @@ where
 
     /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
     /// Runs an blocking task on each element of an stream in parallel.
-    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -654,8 +664,11 @@ where
     S: 'static + Send + Stream,
     S::Item: 'static + Send,
 {
-    fn spawned(self, buf_size: usize) -> BoxStream<'static, Self::Item> {
-        let (tx, rx) = utils::channel(buf_size);
+    fn spawned<B>(self, buf_size: B) -> BoxStream<'static, Self::Item>
+    where
+        B: Into<BufSize>,
+    {
+        let (tx, rx) = utils::channel(buf_size.into().get());
 
         rt::spawn(async move {
             let _ = self.map(Ok).forward(tx.into_sink()).await;
@@ -664,25 +677,21 @@ where
         rx.into_stream().boxed()
     }
 
-    fn batching<T, F, Fut>(self, f: F) -> BoxStream<'static, T>
+    fn batching<T, B, F, Fut>(self, buf_size: B, f: F) -> BoxStream<'static, T>
     where
-        F: FnOnce(flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
+        F: FnOnce(Self, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
         T: 'static + Send,
+        B: Into<BufSize>,
     {
-        let (input_tx, input_rx) = flume::bounded(0);
-        let (output_tx, output_rx) = flume::bounded(0);
+        let buf_size = buf_size.into().get();
+        let (output_tx, output_rx) = utils::channel(buf_size);
+        let batching_future = f(self, output_tx);
 
-        let input_future = async move {
-            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
-        };
-        let batching_future = f(input_rx, output_tx);
-        let join_future = future::join(input_future, batching_future);
-
-        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
+        utils::join_future_stream(batching_future, output_rx.into_stream()).boxed()
     }
 
-    fn par_batching_unordered<P, T, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, T>
+    fn par_batching_unordered<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
     where
         F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
         Fut: 'static + Future<Output = ()> + Send,
@@ -692,7 +701,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
 
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
@@ -709,12 +718,13 @@ where
         output_rx.into_stream().boxed()
     }
 
-    fn tee(self, buf_size: usize) -> Tee<Self::Item>
+    fn tee<B>(self, buf_size: B) -> Tee<Self::Item>
     where
         Self::Item: Clone,
+        B: Into<BufSize>,
     {
-        let buf_size = buf_size.into();
-        let (tx, rx) = mpsc::channel(buf_size);
+        let buf_size = buf_size.into().get();
+        let (tx, rx) = utils::channel(buf_size);
         let sender_set = Arc::new(flurry::HashSet::new());
         let guard = sender_set.guard();
         sender_set.insert(ByAddress(Arc::new(tx)), &guard);
@@ -732,7 +742,7 @@ where
                             let tx = tx.clone();
                             let item = item.clone();
                             async move {
-                                let result = tx.send(item).await;
+                                let result = tx.send_async(item).await;
                                 (result, tx)
                             }
                         })
@@ -767,52 +777,67 @@ where
         }
     }
 
-    fn broadcast(self, buf_size: usize) -> BroadcastGuard<Self::Item>
+    fn broadcast<B>(self, buf_size: B) -> BroadcastGuard<Self::Item>
     where
         Self::Item: Clone,
+        B: Into<BufSize>,
     {
-        let (init_tx, init_rx) = oneshot::channel();
-        let ready = Arc::new(AtomicBool::new(false));
+        let (senders_tx, senders_rx) = oneshot::channel();
+        let (ready_tx, ready_rx) = watch::channel(());
 
         rt::spawn(async move {
-            let mut senders: Vec<mpsc::Sender<_>> = match init_rx.await {
+            // wait for receiver list to be ready
+            let mut senders: Vec<flume::Sender<_>> = match senders_rx.await {
                 Ok(senders) => senders,
                 Err(_) => return,
             };
 
-            let mut stream = self.boxed();
+            // tell subscribers to be ready
+            if ready_tx.send(()).is_err() {
+                // return if there is not subscribers
+                debug_assert!(senders.is_empty());
+                return;
+            }
 
-            while let Some(item) = stream.next().await {
-                let sending_futures = senders.into_iter().map(move |tx| {
-                    let item = item.clone();
-                    async move {
-                        tx.send(item).await.ok()?;
-                        Some(tx)
-                    }
-                });
-                let senders_: Option<Vec<_>> = future::join_all(sending_futures)
-                    .await
-                    .into_iter()
-                    .collect();
+            if senders.len() == 1 {
+                // fast path for single sender
+                let sender = senders.into_iter().next().unwrap();
+                let _ = self.map(Ok).forward(sender.into_sink()).await;
+            } else {
+                let mut stream = self.boxed();
 
-                match senders_ {
-                    Some(senders_) => {
-                        senders = senders_;
+                while let Some(item) = stream.next().await {
+                    let sending_futures = senders.into_iter().map(move |tx| {
+                        let item = item.clone();
+                        async move {
+                            tx.send_async(item).await.ok()?;
+                            Some(tx)
+                        }
+                    });
+                    let senders_: Option<Vec<_>> = future::join_all(sending_futures)
+                        .await
+                        .into_iter()
+                        .collect();
+
+                    match senders_ {
+                        Some(senders_) => {
+                            senders = senders_;
+                        }
+                        None => break,
                     }
-                    None => break,
                 }
             }
         });
 
         BroadcastGuard {
-            buf_size,
-            ready,
-            init_tx: Some(init_tx),
+            buf_size: buf_size.into().get(),
+            ready_rx,
+            senders_tx: Some(senders_tx),
             senders: Some(vec![]),
         }
     }
 
-    fn par_then<P, T, F, Fut>(self, config: P, mut f: F) -> BoxStream<'static, T>
+    fn par_then<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -825,12 +850,12 @@ where
         };
 
         self.enumerate()
-            .par_then_unordered(config, indexed_f)
+            .par_then_unordered(params, indexed_f)
             .reorder_enumerated()
             .boxed()
     }
 
-    fn par_then_unordered<P, T, F, Fut>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -840,7 +865,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
@@ -863,7 +888,7 @@ where
         output_rx.into_stream().boxed()
     }
 
-    fn par_map<P, T, F, Func>(self, config: P, mut f: F) -> BoxStream<'static, T>
+    fn par_map<T, P, F, Func>(self, params: P, mut f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -871,7 +896,7 @@ where
         P: Into<ParParams>,
     {
         self.enumerate()
-            .par_map_unordered(config, move |(index, item)| {
+            .par_map_unordered(params, move |(index, item)| {
                 let job = f(item);
                 move || (index, job())
             })
@@ -879,7 +904,7 @@ where
             .boxed()
     }
 
-    fn par_map_unordered<P, T, F, Func>(self, config: P, f: F) -> BoxStream<'static, T>
+    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -889,7 +914,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
@@ -917,7 +942,7 @@ where
 
     fn par_reduce<P, F, Fut>(
         self,
-        config: P,
+        params: P,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
@@ -928,7 +953,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
 
         // phase 1
         let phase_1_future = async move {
@@ -1022,9 +1047,9 @@ where
         phase_2_future.boxed()
     }
 
-    fn par_routing<F1, F2, Fut, T>(
+    fn par_routing<T, B, F1, F2, Fut>(
         self,
-        buf_size: impl Into<Option<usize>>,
+        buf_size: B,
         mut routing_fn: F1,
         mut map_fns: Vec<F2>,
     ) -> BoxStream<'static, T>
@@ -1033,10 +1058,15 @@ where
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         T: 'static + Send,
+        B: Into<BufSize>,
     {
-        let buf_size = match buf_size.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(size) => size,
+        let buf_size = buf_size.into();
+        let buf_size = match buf_size {
+            BufSize::Default => Some(config::scale_positive(
+                map_fns.len(),
+                config::get_buf_size_scale(),
+            )),
+            _ => buf_size.get(),
         };
 
         let (reorder_tx, reorder_rx) = utils::channel(buf_size);
@@ -1109,9 +1139,9 @@ where
         utils::join_future_stream(join_fut, output_rx.into_stream()).boxed()
     }
 
-    fn par_routing_unordered<F1, F2, Fut, T>(
+    fn par_routing_unordered<T, B, F1, F2, Fut>(
         self,
-        buf_size: impl Into<Option<usize>>,
+        buf_size: B,
         mut routing_fn: F1,
         mut map_fns: Vec<F2>,
     ) -> BoxStream<'static, T>
@@ -1120,10 +1150,15 @@ where
         F2: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         T: 'static + Send,
+        B: Into<BufSize>,
     {
-        let buf_size = match buf_size.into() {
-            None | Some(0) => num_cpus::get(),
-            Some(size) => size,
+        let buf_size = buf_size.into();
+        let buf_size = match buf_size {
+            BufSize::Default => Some(config::scale_positive(
+                map_fns.len(),
+                config::get_buf_size_scale(),
+            )),
+            _ => buf_size.get(),
         };
 
         let (output_tx, output_rx) = utils::channel(buf_size);
@@ -1166,8 +1201,11 @@ where
         utils::join_future_stream(routing_fut, output_rx.into_stream()).boxed()
     }
 
-    fn scatter(self) -> Scatter<Self::Item> {
-        let (tx, rx) = flume::bounded(0);
+    fn scatter<B>(self, buf_size: B) -> Scatter<Self::Item>
+    where
+        B: Into<BufSize>,
+    {
+        let (tx, rx) = utils::channel(buf_size.into().get());
 
         rt::spawn(async move {
             let _ = self.map(Ok).forward(tx.into_sink()).await;
@@ -1178,7 +1216,7 @@ where
         }
     }
 
-    fn par_for_each<P, F, Fut>(self, config: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
@@ -1187,7 +1225,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (map_tx, map_rx) = utils::channel(buf_size);
 
         let map_fut = async move {
@@ -1204,7 +1242,7 @@ where
             .boxed()
     }
 
-    fn par_for_each_blocking<P, F, Func>(self, config: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
@@ -1213,7 +1251,7 @@ where
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (map_tx, map_rx) = utils::channel(buf_size);
 
         let map_fut = async move {
@@ -1271,12 +1309,17 @@ mod tee {
     use tokio_stream::wrappers::ReceiverStream;
 
     /// A stream combinator returned from [tee()](ParStreamExt::tee).
-    #[derive(Debug)]
-    pub struct Tee<T> {
-        pub(super) buf_size: usize,
+    #[derive(Derivative)]
+    #[derivative(Debug)]
+    pub struct Tee<T>
+    where
+        T: 'static,
+    {
+        pub(super) buf_size: Option<usize>,
         pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<mpsc::Sender<T>>>>>,
-        pub(super) stream: ReceiverStream<T>,
+        pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<T>>>>>,
+        #[derivative(Debug = "ignore")]
+        pub(super) stream: flume::r#async::RecvStream<'static, T>,
     }
 
     impl<T> Clone for Tee<T>
@@ -1285,7 +1328,7 @@ mod tee {
     {
         fn clone(&self) -> Self {
             let buf_size = self.buf_size;
-            let (tx, rx) = mpsc::channel(buf_size);
+            let (tx, rx) = utils::channel(buf_size);
             let sender_set = self.sender_set.clone();
 
             if let Some(sender_set) = sender_set.upgrade() {
@@ -1344,10 +1387,10 @@ mod broadcast {
     /// receivers will receive panic.
     #[derive(Debug)]
     pub struct BroadcastGuard<T> {
-        pub(super) buf_size: usize,
-        pub(super) ready: Arc<AtomicBool>,
-        pub(super) init_tx: Option<oneshot::Sender<Vec<mpsc::Sender<T>>>>,
-        pub(super) senders: Option<Vec<mpsc::Sender<T>>>,
+        pub(super) buf_size: Option<usize>,
+        pub(super) ready_rx: watch::Receiver<()>,
+        pub(super) senders_tx: Option<oneshot::Sender<Vec<flume::Sender<T>>>>,
+        pub(super) senders: Option<Vec<flume::Sender<T>>>,
     }
 
     impl<T> BroadcastGuard<T>
@@ -1358,30 +1401,34 @@ mod broadcast {
         pub fn register(&mut self) -> BroadcastStream<T> {
             let Self {
                 buf_size,
-                ref ready,
+                ref ready_rx,
                 ref mut senders,
                 ..
             } = *self;
             let senders = senders.as_mut().unwrap();
+            let mut ready_rx = ready_rx.clone();
 
-            let (tx, rx) = mpsc::channel(buf_size);
+            let (tx, rx) = utils::channel(buf_size);
             senders.push(tx);
 
-            let ready = ready.clone();
+            let stream = async move {
+                let ok = ready_rx.changed().await.is_ok();
+                Either::Left(ok)
+            }
+            .into_stream()
+            .chain(rx.into_stream().map(Either::Right))
+            .take_while(|either| {
+                let ok = !matches!(either, Either::Left(false));
+                future::ready(ok)
+            })
+            .filter_map(|either| async move {
+                use Either::*;
 
-            let stream = stream::select(
-                rx.into_stream().map(Some),
-                async move {
-                    assert!(
-                        ready.load(Acquire),
-                        "please call guard.finish() before consuming this stream"
-                    );
-
-                    None
+                match either {
+                    Left(_) => None,
+                    Right(item) => Some(item),
                 }
-                .into_stream(),
-            )
-            .filter_map(|item| async move { item })
+            })
             .boxed();
 
             BroadcastStream { stream }
@@ -1395,10 +1442,9 @@ mod broadcast {
 
     impl<T> Drop for BroadcastGuard<T> {
         fn drop(&mut self) {
-            let init_tx = self.init_tx.take().unwrap();
+            let senders_tx = self.senders_tx.take().unwrap();
             let senders = self.senders.take().unwrap();
-            let _ = init_tx.send(senders);
-            self.ready.store(true, Release);
+            let _ = senders_tx.send(senders);
         }
     }
 
@@ -1478,10 +1524,10 @@ mod tests {
     #[tokio::test]
     async fn batching_test() {
         let sums: Vec<_> = stream::iter(0..10)
-            .batching(|input, output| async move {
+            .batching(None, |mut stream, output| async move {
                 let mut sum = 0;
 
-                while let Ok(val) = input.recv_async().await {
+                while let Some(val) = stream.next().await {
                     let new_sum = sum + val;
 
                     if new_sum >= 10 {

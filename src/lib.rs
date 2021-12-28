@@ -56,7 +56,7 @@
 //!     let orig = futures::stream::iter(0..1000);
 //!
 //!     // scatter stream items to two receivers
-//!     let rx1 = orig.scatter();
+//!     let rx1 = orig.scatter(None);
 //!     let rx2 = rx1.clone();
 //!
 //!     // gather back from two receivers
