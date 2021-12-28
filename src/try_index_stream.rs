@@ -18,7 +18,7 @@ where
         TryReorderEnumerated {
             stream: self,
             commit: 0,
-            fused: false,
+            is_terminated: false,
             buffer: HashMap::new(),
             _phantom: PhantomData,
         }
@@ -41,15 +41,15 @@ mod try_reorder_enumerated {
     use super::*;
 
     /// A fallible stream combinator returned from [try_reorder_enumerated()](TryIndexStreamExt::try_reorder_enumerated).
-    #[pin_project(project = TryReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
+    #[pin_project]
     pub struct TryReorderEnumerated<S, T, E>
     where
         S: ?Sized,
     {
         pub(super) commit: usize,
-        pub(super) fused: bool,
+        pub(super) is_terminated: bool,
         pub(super) buffer: HashMap<usize, T>,
         pub(super) _phantom: PhantomData<E>,
         #[pin]
@@ -64,55 +64,48 @@ mod try_reorder_enumerated {
         type Item = Result<T, E>;
 
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let TryReorderEnumeratedProj {
-                fused,
-                stream,
-                commit,
-                buffer,
-                ..
-            } = self.project();
+            let mut this = self.project();
 
-            if *fused {
-                return Ready(None);
-            }
-
-            if let Some(item) = buffer.remove(commit) {
-                *commit += 1;
-                cx.waker().clone().wake();
-                return Ready(Some(Ok(item)));
-            }
-
-            match stream.poll_next(cx) {
-                Ready(Some(Ok((index, item)))) => match (*commit).cmp(&index) {
-                    Less => match buffer.entry(index) {
-                        hash_map::Entry::Occupied(_) => {
-                            panic!("the index number {} appears more than once", index);
+            Ready(loop {
+                if *this.is_terminated {
+                    break None;
+                } else if let Some(item) = this.buffer.remove(this.commit) {
+                    *this.commit += 1;
+                    break Some(Ok(item));
+                } else {
+                    match ready!(Pin::new(&mut this.stream).poll_next(cx)) {
+                        Some(Ok((index, item))) => match (*this.commit).cmp(&index) {
+                            Less => {
+                                let prev = this.buffer.insert(index, item);
+                                assert!(
+                                    prev.is_none(),
+                                    "the index number {} appears more than once",
+                                    index
+                                );
+                            }
+                            Equal => {
+                                *this.commit += 1;
+                                break Some(Ok(item));
+                            }
+                            Greater => {
+                                panic!("the index number {} appears more than once", index);
+                            }
+                        },
+                        Some(Err(err)) => {
+                            *this.is_terminated = true;
+                            break Some(Err(err));
                         }
-                        hash_map::Entry::Vacant(entry) => {
-                            entry.insert(item);
-                            cx.waker().clone().wake();
-                            Pending
+                        None => {
+                            assert!(
+                                this.buffer.is_empty(),
+                                "the item for index number {} is missing",
+                                this.commit
+                            );
+                            break None;
                         }
-                    },
-                    Equal => {
-                        *commit += 1;
-                        cx.waker().clone().wake();
-                        Ready(Some(Ok(item)))
                     }
-                    Greater => {
-                        panic!("the index number {} appears more than once", index);
-                    }
-                },
-                Ready(Some(Err(err))) => {
-                    *fused = true;
-                    Ready(Some(Err(err)))
                 }
-                Ready(None) => {
-                    assert!(buffer.is_empty(), "the index numbers are not contiguous");
-                    Ready(None)
-                }
-                Pending => Pending,
-            }
+            })
         }
     }
 
@@ -121,7 +114,7 @@ mod try_reorder_enumerated {
         Self: Stream,
     {
         fn is_terminated(&self) -> bool {
-            self.fused
+            self.is_terminated
         }
     }
 }

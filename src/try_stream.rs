@@ -230,9 +230,9 @@ mod try_enumerate {
     use super::*;
 
     /// A fallible stream combinator returned from [try_enumerate()](crate::try_stream::TryStreamExt::try_enumerate).
-    #[pin_project(project = TryEnumerateProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
+    #[pin_project]
     pub struct TryEnumerate<S, T, E>
     where
         S: ?Sized,
@@ -252,31 +252,26 @@ mod try_enumerate {
         type Item = Result<(usize, T), E>;
 
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let TryEnumerateProj {
-                stream,
-                fused,
-                counter,
-                ..
-            } = self.project();
+            let mut this = self.project();
 
-            if *fused {
-                return Ready(None);
-            }
-
-            let poll = stream.poll_next(cx);
-            match poll {
-                Ready(Some(Ok(item))) => {
-                    let index = *counter;
-                    *counter += 1;
-                    Ready(Some(Ok((index, item))))
+            Ready({
+                if *this.fused {
+                    None
+                } else {
+                    match ready!(Pin::new(&mut this.stream).poll_next(cx)) {
+                        Some(Ok(item)) => {
+                            let index = *this.counter;
+                            *this.counter += 1;
+                            Some(Ok((index, item)))
+                        }
+                        Some(Err(err)) => {
+                            *this.fused = true;
+                            Some(Err(err))
+                        }
+                        None => None,
+                    }
                 }
-                Ready(Some(Err(err))) => {
-                    *fused = true;
-                    Ready(Some(Err(err)))
-                }
-                Ready(None) => Ready(None),
-                Pending => Pending,
-            }
+            })
         }
     }
 

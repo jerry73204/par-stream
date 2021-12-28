@@ -86,9 +86,9 @@ mod reorder_enumerated {
     use super::*;
 
     /// A stream combinator returned from [reorder_enumerated()](IndexStreamExt::reorder_enumerated).
-    #[pin_project(project = ReorderEnumeratedProj)]
     #[derive(Derivative)]
     #[derivative(Debug)]
+    #[pin_project]
     pub struct ReorderEnumerated<S, T>
     where
         S: ?Sized,
@@ -106,45 +106,42 @@ mod reorder_enumerated {
         type Item = T;
 
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
-            let ReorderEnumeratedProj {
-                stream,
-                commit,
-                buffer,
-            } = self.project();
+            let mut this = self.project();
 
-            if let Some(item) = buffer.remove(commit) {
-                *commit += 1;
-                cx.waker().clone().wake();
-                return Ready(Some(item));
-            }
-
-            match stream.poll_next(cx) {
-                Ready(Some((index, item))) => match (*commit).cmp(&index) {
-                    Less => match buffer.entry(index) {
-                        hash_map::Entry::Occupied(_) => {
-                            panic!("the index number {} appears more than once", index);
+            Ready(loop {
+                if let Some(item) = this.buffer.remove(&*this.commit) {
+                    *this.commit += 1;
+                    break Some(item);
+                } else {
+                    match ready!(Pin::new(&mut this.stream).poll_next(cx)) {
+                        Some((index, item)) => match (*this.commit).cmp(&index) {
+                            Less => {
+                                let prev = this.buffer.insert(index, item);
+                                assert!(
+                                    prev.is_none(),
+                                    "the index number {} appears more than once",
+                                    index
+                                );
+                            }
+                            Equal => {
+                                *this.commit += 1;
+                                break Some(item);
+                            }
+                            Greater => {
+                                panic!("the index number {} appears more than once", index);
+                            }
+                        },
+                        None => {
+                            assert!(
+                                this.buffer.is_empty(),
+                                "the item for index number {} is missing",
+                                this.commit
+                            );
+                            break None;
                         }
-                        hash_map::Entry::Vacant(entry) => {
-                            entry.insert(item);
-                            cx.waker().clone().wake();
-                            Pending
-                        }
-                    },
-                    Equal => {
-                        *commit += 1;
-                        cx.waker().clone().wake();
-                        Ready(Some(item))
                     }
-                    Greater => {
-                        panic!("the index number {} appears more than once", index);
-                    }
-                },
-                Ready(None) => {
-                    assert!(buffer.is_empty(), "the index numbers are not contiguous");
-                    Ready(None)
                 }
-                Pending => Pending,
-            }
+            })
         }
     }
 }
