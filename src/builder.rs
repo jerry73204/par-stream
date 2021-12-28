@@ -1,222 +1,279 @@
-// use crate::common::*;
-// use crate::par_stream::ParStreamExt as _;
-// use crate::rt;
+use crate::common::*;
+use crate::config::BufSize;
+use crate::config::NumWorkers;
+use crate::config::ParParams;
+use crate::fn_factory::{BoxFnFactory, FnFactory};
+use crate::future_factory::{BoxFutureFactory, FutureFactory};
+use crate::par_stream::ParStreamExt as _;
+use crate::rt;
+use crate::utils;
 
-// type BoxFactory<In, Out> = Box<dyn Factory<In, Out, BoxFuture<'static, Out>>>;
+pub struct ParBuilder<St>
+where
+    St: ?Sized,
+{
+    pub input_buf_size: BufSize,
+    pub num_workers: NumWorkers,
+    pub stream: St,
+}
 
-// pub trait Factory<In, Out, Fut>
-// where
-//     Self: 'static,
-//     In: 'static + Send,
-//     Out: 'static + Send,
-//     Fut: 'static + Send,
-// {
-//     fn generate(&self, input: In) -> Fut;
+impl<St> ParBuilder<St>
+where
+    St: Stream,
+{
+    pub fn map_async<Fac, Fut>(self, fac: Fac) -> ParAsyncBuilder<St, Fac>
+    where
+        Fac: FnMut(St::Item) -> Fut,
+        Fut: Future,
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            stream,
+        } = self;
 
-//     fn boxed(self) -> BoxFactory<In, Out>;
+        ParAsyncBuilder {
+            input_buf_size,
+            num_workers,
+            fac,
+            stream,
+        }
+    }
 
-//     fn chain<GOut, G, GFut>(self, other: G) -> BoxFactory<In, GOut>
-//     where
-//         Self: Sized + Send + Clone,
-//         G: Send + Clone + Factory<Out, GOut, GFut>,
-//         GOut: 'static + Send,
-//         GFut: 'static + Send + Future<Output = GOut>;
-// }
+    pub fn map_blocking<Fac, Func>(self, fac: Fac) -> ParBlockingBuilder<St, Fac>
+    where
+        Fac: FnMut(St::Item) -> Func,
+        Func: FnOnce(),
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            stream,
+        } = self;
 
-// impl<F, In, Out, Fut> Factory<In, Out, Fut> for F
-// where
-//     F: 'static + Fn(In) -> Fut,
-//     Fut: 'static + Send + Future<Output = Out>,
-//     In: 'static + Send,
-//     Out: 'static + Send,
-// {
-//     fn generate(&self, input: In) -> Fut {
-//         self(input)
-//     }
+        ParBlockingBuilder {
+            input_buf_size,
+            num_workers,
+            fac,
+            stream,
+        }
+    }
+}
 
-//     fn boxed(self) -> BoxFactory<In, Out> {
-//         Box::new(move |input: In| self.generate(input).boxed())
-//     }
+pub struct ParAsyncBuilder<St, Fac>
+where
+    St: ?Sized,
+{
+    pub input_buf_size: BufSize,
+    pub num_workers: NumWorkers,
+    pub fac: Fac,
+    pub stream: St,
+}
 
-//     fn chain<GOut, G, GFut>(self, other: G) -> BoxFactory<In, GOut>
-//     where
-//         Self: Sized + Send + Clone,
-//         G: Send + Clone + Factory<Out, GOut, GFut>,
-//         GOut: 'static + Send,
-//         GFut: 'static + Send + Future<Output = GOut>,
-//     {
-//         Box::new(move |input: In| {
-//             let f = self.clone();
-//             let g = other.clone();
+impl<St, Fac, Fut> ParAsyncBuilder<St, Fac>
+where
+    St: Stream,
+    St::Item: 'static + Send,
+    Fac: 'static + Send + FnMut(St::Item) -> Fut,
+    Fut: 'static + Send + Future,
+    Fut::Output: 'static + Send,
+{
+    pub fn map_async<NewOut, NewFac, NewFut>(
+        self,
+        new_fac: NewFac,
+    ) -> ParAsyncBuilder<St, BoxFutureFactory<St::Item, NewFut::Output>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(Fut::Output) -> NewFut,
+        NewFut: 'static + Send + Future,
+        NewFut::Output: 'static + Send,
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac,
+            stream,
+        } = self;
 
-//             async move {
-//                 let fut1 = f.generate(input);
-//                 let mid = fut1.await;
-//                 let fut2 = g.generate(mid);
-//                 let out = fut2.await;
-//                 out
-//             }
-//             .boxed()
-//         })
-//     }
-// }
+        ParAsyncBuilder {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac.chain(new_fac),
+            stream,
+        }
+    }
 
-// pub struct ParBuilder<St, In, Out, Fac, Fut>
-// where
-//     St: ?Sized,
-// {
-//     factory: Fac,
-//     _phantom: PhantomData<(In, Out, Fut)>,
-//     stream: St,
-// }
+    pub fn map_blocking<NewOut, NewFac, NewFunc>(
+        self,
+        mut new_fac: NewFac,
+    ) -> ParAsyncBuilder<St, BoxFutureFactory<St::Item, NewFunc::Output>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(Fut::Output) -> NewFunc,
+        NewFunc: 'static + Send + FnOnce(),
+        NewFunc::Output: 'static + Send,
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac,
+            stream,
+        } = self;
 
-// impl<St, Fac, In, Out, Fut> ParBuilder<St, In, Out, Fac, Fut>
-// where
-//     St: ?Sized + Stream<Item = In>,
-//     Fac: Factory<In, Out, Fut>,
-//     In: 'static + Send,
-//     Out: 'static + Send,
-//     Fut: 'static + Send + Future<Output = Out>,
-// {
-//     // pub fn into_stream(self) -> impl Stream<Item = Out>
-//     // where
-//     //     St: Sized,
-//     //     Fac: FnMut(In) -> Fut,
-//     // {
-//     //     let Self {stream, factory, ..} = self;
-//     //     stream.then(factory)
-//     // }
+        let new_fac_async = move |input: Fut::Output| rt::spawn_blocking(new_fac(input));
 
-//     // pub fn spawn_single(self, buf_size: usize) -> impl Stream<Item = Out>
-//     // where
-//     //     St: 'static + Sized + Send,
-//     //     Fac: Send + FnMut(In) -> Fut,
-//     // {
-//     //     let Self {stream, factory, ..} = self;
-//     //     stream.then(factory).spawned(buf_size)
-//     // }
+        ParAsyncBuilder {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac.chain(new_fac_async),
+            stream,
+        }
+    }
+}
 
-//     pub fn map<FOut, F>(
-//         self,
-//         f: F,
-//     ) -> ParBuilder<
-//         St,
-//         In,
-//         FOut,
-//         impl Factory<In, FOut, BoxFuture<'static, FOut>>,
-//         BoxFuture<'static, FOut>,
-//     >
-//     where
-//         St: Sized,
-//         F: 'static + Send + Clone + Fn(Out) -> FOut,
-//         Fac: Send + Clone,
-//         FOut: 'static + Send,
-//     {
-//         let Self {
-//             factory, stream, ..
-//         } = self;
+impl<St, Fac, Fut> ParAsyncBuilder<St, Fac>
+where
+    St: 'static + Send + Stream,
+    St::Item: 'static + Send,
+    Fac: 'static + Send + FnMut(St::Item) -> Fut,
+    Fut: 'static + Send + Future<Output = ()>,
+{
+    async fn for_each(self) {
+        let Self {
+            input_buf_size,
+            num_workers,
+            mut fac,
+            stream,
+        } = self;
+        let num_workers = num_workers.get();
+        let (tx, rx) = utils::channel(input_buf_size.get());
 
-//         let new_factory = move |input: In| {
-//             let factory = factory.clone();
-//             let f = f.clone();
+        let input_future = rt::spawn(async move {
+            let _ = stream
+                .map(|item| {
+                    let fut = fac(item);
+                    Ok(fut)
+                })
+                .forward(tx.into_sink())
+                .await;
+        });
 
-//             async move {
-//                 let fut = factory.generate(input);
-//                 let out = fut.await;
-//                 let fout = f(out);
-//                 fout
-//             }
-//             .boxed()
-//         };
+        let worker_futures = (0..num_workers).map(|_| {
+            let rx = rx.clone();
 
-//         ParBuilder {
-//             factory: new_factory,
-//             _phantom: PhantomData,
-//             stream,
-//         }
-//     }
+            rt::spawn(async move {
+                rx.into_stream().for_each(|fut| fut).await;
+            })
+        });
 
-//     pub fn then<FOut, F, FFut>(
-//         self,
-//         f: F,
-//     ) -> ParBuilder<
-//         St,
-//         In,
-//         FOut,
-//         impl Factory<In, FOut, BoxFuture<'static, FOut>>,
-//         BoxFuture<'static, FOut>,
-//     >
-//     where
-//         St: Sized,
-//         F: 'static + Send + Clone + Fn(Out) -> FFut,
-//         FFut: Send + Future<Output = FOut>,
-//         Fac: Send + Clone,
-//         FOut: 'static + Send,
-//     {
-//         let Self {
-//             factory, stream, ..
-//         } = self;
+        join!(input_future, future::join_all(worker_futures));
+    }
+}
 
-//         let new_factory = move |input: In| {
-//             let factory = factory.clone();
-//             let f = f.clone();
+pub struct ParBlockingBuilder<St, Fac>
+where
+    St: ?Sized,
+{
+    pub input_buf_size: BufSize,
+    pub num_workers: NumWorkers,
+    pub fac: Fac,
+    pub stream: St,
+}
 
-//             async move {
-//                 let fut = factory.generate(input);
-//                 let out = fut.await;
-//                 let ffut = f(out);
-//                 let fout = ffut.await;
-//                 fout
-//             }
-//             .boxed()
-//         };
+impl<St, Fac, Func> ParBlockingBuilder<St, Fac>
+where
+    St: Stream,
+    St::Item: 'static + Send,
+    Fac: 'static + Send + FnMut(St::Item) -> Func,
+    Func: 'static + Send + FnOnce(),
+    Func::Output: 'static + Send,
+{
+    pub fn map_async<NewFac, NewFut>(
+        self,
+        new_fac: NewFac,
+    ) -> ParAsyncBuilder<St, BoxFutureFactory<St::Item, NewFut::Output>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFut,
+        NewFut: 'static + Send + Future,
+        NewFut::Output: 'static + Send,
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            fac: mut orig_fac,
+            stream,
+        } = self;
 
-//         ParBuilder {
-//             factory: new_factory,
-//             _phantom: PhantomData,
-//             stream,
-//         }
-//     }
+        let orig_fac_async = move |input: St::Item| rt::spawn_blocking(orig_fac(input));
 
-//     pub fn block<FOut, F, FFn>(
-//         self,
-//         f: F,
-//     ) -> ParBuilder<
-//         St,
-//         In,
-//         FOut,
-//         impl Factory<In, FOut, BoxFuture<'static, FOut>>,
-//         BoxFuture<'static, FOut>,
-//     >
-//     where
-//         St: Sized,
-//         F: 'static + Send + Clone + Fn(Out) -> FFn,
-//         FFn: 'static + Send + FnOnce() -> FOut,
-//         Fac: Send + Clone,
-//         FOut: 'static + Send,
-//     {
-//         let Self {
-//             factory, stream, ..
-//         } = self;
+        ParAsyncBuilder {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac_async.chain(new_fac),
+            stream,
+        }
+    }
 
-//         let new_factory = move |input: In| {
-//             let factory = factory.clone();
-//             let f = f.clone();
+    pub fn map_blocking<NewFac, NewFunc>(
+        self,
+        new_fac: NewFac,
+    ) -> ParBlockingBuilder<St, BoxFnFactory<St::Item, NewFunc::Output>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFunc,
+        NewFunc: 'static + Send + FnOnce(),
+        NewFunc::Output: 'static + Send,
+    {
+        let Self {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac,
+            stream,
+        } = self;
 
-//             async move {
-//                 let fut = factory.generate(input);
-//                 let out = fut.await;
-//                 let ffn = f(out);
-//                 let fout = rt::spawn_blocking(ffn).await;
-//                 fout
-//             }
-//             .boxed()
-//         };
+        ParBlockingBuilder {
+            input_buf_size,
+            num_workers,
+            fac: orig_fac.chain(new_fac),
+            stream,
+        }
+    }
+}
 
-//         ParBuilder {
-//             factory: new_factory,
-//             _phantom: PhantomData,
-//             stream,
-//         }
-//     }
-// }
+impl<St, Fac, Func> ParBlockingBuilder<St, Fac>
+where
+    St: 'static + Send + Stream,
+    St::Item: 'static + Send,
+    Fac: 'static + Send + FnMut(St::Item) -> Func,
+    Func: 'static + Send + FnOnce() -> (),
+{
+    async fn for_each(self) {
+        let Self {
+            input_buf_size,
+            num_workers,
+            mut fac,
+            stream,
+        } = self;
+        let num_workers = num_workers.get();
+        let (tx, rx) = utils::channel(input_buf_size.get());
+
+        let input_future = rt::spawn(async move {
+            let _ = stream
+                .map(|item| {
+                    let func = fac(item);
+                    Ok(func)
+                })
+                .forward(tx.into_sink())
+                .await;
+        });
+
+        let worker_futures = (0..num_workers).map(|_| {
+            let rx = rx.clone();
+
+            rt::spawn_blocking(move || {
+                while let Ok(func) = rx.recv() {
+                    func();
+                }
+            })
+        });
+
+        join!(input_future, future::join_all(worker_futures));
+    }
+}
