@@ -3,9 +3,9 @@ use crate::common::*;
 /// An extension trait that controls ordering of stream items.
 pub trait IndexStreamExt
 where
-    Self: Stream<Item = (usize, Self::IndexItem)>,
+    Self: Stream<Item = (usize, Self::IndexedItem)>,
 {
-    type IndexItem;
+    type IndexedItem;
 
     /// Reorder the input items paired with a iteration count.
     ///
@@ -59,7 +59,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexItem>
+    fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexedItem>
     where
         Self: Sized,
     {
@@ -75,7 +75,7 @@ impl<S, T> IndexStreamExt for S
 where
     S: Stream<Item = (usize, T)>,
 {
-    type IndexItem = T;
+    type IndexedItem = T;
 }
 
 // reorder_enumerated
