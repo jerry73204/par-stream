@@ -72,7 +72,7 @@ where
     /// is full, the stream will halt until the blocking buffer spare the space.
     ///
     /// ```rust
-    /// use futures::{prelude::*, join};
+    /// use futures::{join, prelude::*};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -121,7 +121,7 @@ where
     /// is full, the stream will halt until the blocking buffer spare the space.
     ///
     /// ```rust
-    /// use futures::{prelude::*, join};
+    /// use futures::{join, prelude::*};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -543,7 +543,7 @@ where
     /// It lets user to write custom workers that receive items from the same stream.
     ///
     /// ```rust
-    /// use futures::{prelude::*, join};
+    /// use futures::{join, prelude::*};
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
@@ -650,8 +650,7 @@ where
         let buf_size = buf_size.into().get();
         let (tx, rx) = utils::channel(buf_size);
         let sender_set = Arc::new(flurry::HashSet::new());
-        let guard = sender_set.guard();
-        sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+        sender_set.pin().insert(ByAddress(Arc::new(tx)));
 
         let future = {
             let sender_set = sender_set.clone();
@@ -730,7 +729,7 @@ where
             } else {
                 debug_assert!(!senders.is_empty());
 
-                // merge senders into single fanout sink
+                // merge senders into a fanout sink
                 let fanout = {
                     let mut sinks = senders.into_iter().map(
                         |tx| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {

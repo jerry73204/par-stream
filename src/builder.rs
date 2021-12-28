@@ -1,10 +1,10 @@
-use crate::common::*;
-use crate::config::BufSize;
-use crate::config::NumWorkers;
-use crate::fn_factory::{BoxFnFactory, FnFactory};
-use crate::future_factory::{BoxFutureFactory, FutureFactory};
-use crate::rt;
-use crate::utils;
+use crate::{
+    common::*,
+    config::{BufSize, NumWorkers},
+    fn_factory::{BoxFnFactory, FnFactory},
+    future_factory::{BoxFutureFactory, FutureFactory},
+    rt, utils,
+};
 
 pub struct ParBuilder<St>
 where

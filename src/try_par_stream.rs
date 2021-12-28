@@ -1085,8 +1085,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::try_index_stream::TryIndexStreamExt as _;
-    use crate::try_stream::TryStreamExt as _;
+    use crate::{try_index_stream::TryIndexStreamExt as _, try_stream::TryStreamExt as _};
     use rand::prelude::*;
 
     #[tokio::test]
