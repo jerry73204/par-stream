@@ -4,7 +4,7 @@ pub trait StreamExt
 where
     Self: Stream,
 {
-    fn fold1<F, Fut>(self, f: F) -> Fold1<Self, F, Fut>;
+    fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut>;
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
     ///
@@ -74,8 +74,8 @@ impl<S> StreamExt for S
 where
     S: Stream,
 {
-    fn fold1<F, Fut>(self, f: F) -> Fold1<Self, F, Fut> {
-        Fold1 {
+    fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut> {
+        Reduce {
             fold: None,
             f,
             future: None,
@@ -271,12 +271,12 @@ mod stateful_map {
     }
 }
 
-use fold1::*;
-mod fold1 {
+use reduce::*;
+mod reduce {
     use super::*;
 
     #[pin_project]
-    pub struct Fold1<St, F, Fut>
+    pub struct Reduce<St, F, Fut>
     where
         St: ?Sized + Stream,
     {
@@ -288,7 +288,7 @@ mod fold1 {
         pub(super) stream: St,
     }
 
-    impl<St, F, Fut> Future for Fold1<St, F, Fut>
+    impl<St, F, Fut> Future for Reduce<St, F, Fut>
     where
         St: Stream,
         F: FnMut(St::Item, St::Item) -> Fut,
@@ -324,10 +324,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn fold1_test() {
+    async fn reduce_test() {
         {
             let output = stream::iter(1..=10)
-                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .reduce(|lhs, rhs| async move { lhs + rhs })
                 .await;
             assert_eq!(output, Some(55));
         }
@@ -335,14 +335,14 @@ mod tests {
         {
             let output = future::ready(1)
                 .into_stream()
-                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .reduce(|lhs, rhs| async move { lhs + rhs })
                 .await;
             assert_eq!(output, Some(1));
         }
 
         {
             let output = stream::empty::<usize>()
-                .fold1(|lhs, rhs| async move { lhs + rhs })
+                .reduce(|lhs, rhs| async move { lhs + rhs })
                 .await;
             assert_eq!(output, None);
         }
