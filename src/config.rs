@@ -17,8 +17,8 @@ pub fn get_buf_size_scale() -> f64 {
     *BUF_SIZE_SCALE.get_or_init(|| DEFAULT_BUF_SIZE_SCALE)
 }
 
-fn default_buf_size(num_workers: usize) -> usize {
-    scale_positive(num_workers, get_buf_size_scale())
+fn default_buf_size() -> usize {
+    scale_positive(*DEFAULT_NUM_WORKERS, get_buf_size_scale())
 }
 
 fn scale_positive(value: usize, scale: f64) -> usize {
@@ -51,7 +51,7 @@ mod config {
             match *self {
                 Self::Default => {
                     let num_workers = *DEFAULT_NUM_WORKERS;
-                    let buf_size = Some(default_buf_size(num_workers));
+                    let buf_size = Some(scale_positive(num_workers, get_buf_size_scale()));
 
                     ParParams {
                         num_workers,
@@ -59,7 +59,7 @@ mod config {
                     }
                 }
                 Self::FixedWorkers { num_workers } => {
-                    let buf_size = Some(default_buf_size(num_workers));
+                    let buf_size = Some(scale_positive(num_workers, get_buf_size_scale()));
 
                     ParParams {
                         num_workers,
@@ -67,9 +67,8 @@ mod config {
                     }
                 }
                 Self::ScaleOfCpus { scale } => {
-                    assert!(scale.is_finite() && scale > 0.0);
                     let num_workers = scale_positive(*DEFAULT_NUM_WORKERS, scale);
-                    let buf_size = Some(default_buf_size(num_workers));
+                    let buf_size = Some(scale_positive(num_workers, get_buf_size_scale()));
 
                     ParParams {
                         num_workers,
@@ -81,7 +80,7 @@ mod config {
                     buf_size,
                 } => {
                     let num_workers = num_workers.get();
-                    let buf_size = buf_size.get(num_workers);
+                    let buf_size = buf_size.get();
 
                     ParParams {
                         num_workers,
@@ -140,17 +139,15 @@ mod config {
         Default,
         Fixed(usize),
         ScaleOfCpus(f64),
-        ScaleOfWorkers(f64),
         Unbounded,
     }
 
     impl BufSize {
-        pub fn get(&self, num_workers: usize) -> Option<usize> {
+        pub fn get(&self) -> Option<usize> {
             match *self {
-                Self::Default => default_buf_size(num_workers).into(),
+                Self::Default => default_buf_size().into(),
                 Self::Fixed(val) => val.into(),
                 Self::ScaleOfCpus(scale) => scale_positive(*DEFAULT_NUM_WORKERS, scale).into(),
-                Self::ScaleOfWorkers(scale) => scale_positive(num_workers, scale).into(),
                 Self::Unbounded => None,
             }
         }
