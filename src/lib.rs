@@ -7,7 +7,6 @@
 //!
 //! - `runtime-tokio` enables the [tokio] multi-threaded runtime.
 //! - `runtime-async-std` enables the [async-std](async_std) default runtime.
-//! - `runtime-smol` enables the [smol] default runtime.
 //!
 //! # Combinators
 //!

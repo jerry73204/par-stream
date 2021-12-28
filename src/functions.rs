@@ -56,7 +56,7 @@ mod par_unfold {
     }
 
     /// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
-    /// [par_unfold_unordered()].
+    /// [par_unfold()].
     pub fn par_unfold_blocking<Item, State, P, F>(
         config: P,
         state: State,
@@ -412,7 +412,7 @@ pub use try_par_unfold::*;
 mod try_par_unfold {
     use super::*;
 
-    /// A fallible analogue to [par_unfold_unordered](super::par_unfold_unordered()).
+    /// A fallible analogue to [par_unfold()](super::par_unfold()).
     pub fn try_par_unfold<Item, Error, State, P, F, Fut>(
         config: P,
         state: State,
@@ -490,7 +490,7 @@ mod try_par_unfold {
         .boxed()
     }
 
-    /// A fallible analogue to [par_unfold_blocking_unordered](super::par_unfold_blocking_unordered).
+    /// A fallible analogue to [par_unfold_blocking()](super::par_unfold_blocking).
     pub fn try_par_unfold_blocking<Item, Error, State, P, F>(
         config: P,
         state: State,
