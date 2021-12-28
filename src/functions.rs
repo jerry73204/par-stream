@@ -1,96 +1,6 @@
 use crate::{common::*, config::ParParams, rt, utils};
 
-// iter_spawned
-
-pub use iter_spawned::*;
-
-mod iter_spawned {
-    use super::*;
-
-    /// Converts an [Iterator] into a [Stream] by consuming the iterator in a blocking thread.
-    ///
-    /// It is useful when consuming the iterator is computationally expensive and involves blocking code.
-    /// It prevents blocking the asynchronous context when consuming the returned stream.
-    pub fn iter_spawned<I>(buf_size: usize, iter: I) -> IterSpawned<I::Item>
-    where
-        I: 'static + IntoIterator + Send,
-        I::Item: Send,
-    {
-        let (tx, rx) = utils::channel(buf_size);
-
-        rt::spawn_blocking(move || {
-            for item in iter.into_iter() {
-                if tx.send(item).is_err() {
-                    break;
-                }
-            }
-        });
-
-        IterSpawned {
-            stream: rx.into_stream(),
-        }
-    }
-
-    /// Stream for the [iter_spawned()] function.
-    #[derive(Clone)]
-    pub struct IterSpawned<T>
-    where
-        T: 'static,
-    {
-        stream: flume::r#async::RecvStream<'static, T>,
-    }
-
-    impl<T> Stream for IterSpawned<T> {
-        type Item = T;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// unfold_blocking
-
-pub use unfold_blocking::*;
-
-mod unfold_blocking {
-    use super::*;
-
-    /// Creates a stream with elements produced by a function.
-    ///
-    /// The `init_f` function creates an initial state. Then `unfold_f` consumes the state
-    /// and is called repeatedly. If `unfold_f` returns `Some(output, state)`, it produces
-    /// the output as stream element and updates the state, until it returns `None`.
-    pub fn unfold_blocking<F, State, Item>(
-        buf_size: impl Into<Option<usize>>,
-        init: State,
-        mut unfold_f: F,
-    ) -> BoxStream<'static, Item>
-    where
-        F: 'static + FnMut(State) -> Option<(Item, State)> + Send,
-        State: 'static + Send,
-        Item: 'static + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = utils::channel(buf_size);
-
-        rt::spawn_blocking(move || {
-            let mut state = init;
-
-            while let Some((item, new_state)) = unfold_f(state) {
-                let result = data_tx.send(item);
-                if result.is_err() {
-                    break;
-                }
-                state = new_state;
-            }
-        });
-
-        data_rx.into_stream().boxed()
-    }
-}
-
-// par_unfold_unordered
+// par_unfold
 
 pub use par_unfold::*;
 
@@ -106,7 +16,7 @@ mod par_unfold {
     ///
     /// The output elements collected from workers can be arbitrary ordered. There is no
     /// ordering guarantee respecting to the order of function callings and worker indexes.
-    pub fn par_unfold<P, F, Fut, State, Item>(
+    pub fn par_unfold<Item, State, P, F, Fut>(
         config: P,
         state: State,
         f: F,
@@ -147,7 +57,7 @@ mod par_unfold {
 
     /// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
     /// [par_unfold_unordered()].
-    pub fn par_unfold_blocking<P, F, State, Item>(
+    pub fn par_unfold_blocking<Item, State, P, F>(
         config: P,
         state: State,
         f: F,
@@ -185,23 +95,6 @@ mod par_unfold {
 
         output_rx.into_stream().boxed()
     }
-
-    /// A stream combinator returned from [par_unfold_unordered()](super::par_unfold_unordered())
-    /// and  [par_unfold_blocking_unordered()](super::par_unfold_blocking_unordered()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct ParUnfoldUnordered<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, T>,
-    }
-
-    impl<T> Stream for ParUnfoldUnordered<T> {
-        type Item = T;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
 }
 
 // sync
@@ -234,7 +127,7 @@ mod sync {
         buf_size: impl Into<Option<usize>>,
         key_fn: F,
         streams: I,
-    ) -> Sync<S::Item>
+    ) -> BoxStream<'static, Result<(usize, S::Item), (usize, S::Item)>>
     where
         I: IntoIterator<Item = S>,
         S: 'static + Stream + Send,
@@ -253,14 +146,10 @@ mod sync {
 
         match num_streams {
             0 => {
-                return Sync {
-                    stream: stream::empty().boxed(),
-                };
+                return stream::empty().boxed();
             }
             1 => {
-                return Sync {
-                    stream: streams.into_iter().next().unwrap().map(Ok).boxed(),
-                };
+                return streams.into_iter().next().unwrap().map(Ok).boxed();
             }
             _ => {}
         }
@@ -343,25 +232,7 @@ mod sync {
 
         let join_future = future::join(input_future, sync_future);
 
-        let stream = utils::join_future_stream(join_future, output_rx.into_stream()).boxed();
-
-        Sync { stream }
-    }
-
-    /// A stream combinator returned from [sync_by_key()](super::sync_by_key()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct Sync<T> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<(usize, T), (usize, T)>>,
-    }
-
-    impl<T> Stream for Sync<T> {
-        type Item = Result<(usize, T), (usize, T)>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
+        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
     }
 }
 
@@ -398,7 +269,7 @@ mod try_sync {
         buf_size: impl Into<Option<usize>>,
         key_fn: F,
         streams: I,
-    ) -> TrySync<T, E>
+    ) -> BoxStream<'static, Result<Result<(usize, T), (usize, T)>, E>>
     where
         I: IntoIterator<Item = S>,
         S: 'static + Stream<Item = Result<T, E>> + Send,
@@ -418,19 +289,15 @@ mod try_sync {
 
         match num_streams {
             0 => {
-                return TrySync {
-                    stream: stream::empty().boxed(),
-                };
+                return stream::empty().boxed();
             }
             1 => {
-                return TrySync {
-                    stream: streams
-                        .into_iter()
-                        .next()
-                        .unwrap()
-                        .and_then(|item| async move { Ok(Ok(item)) })
-                        .boxed(),
-                };
+                return streams
+                    .into_iter()
+                    .next()
+                    .unwrap()
+                    .and_then(|item| async move { Ok(Ok(item)) })
+                    .boxed();
             }
             _ => {}
         }
@@ -529,126 +396,35 @@ mod try_sync {
 
         let join_future = future::join(input_future, sync_future);
 
-        let stream = stream::select(
+        stream::select(
             join_future.into_stream().map(|_| None),
             output_rx.into_stream().map(|item| Some(item)),
         )
         .filter_map(|item| async move { item })
-        .boxed();
-
-        TrySync { stream }
-    }
-
-    /// A stream combinator returned from [try_sync_by_key()](super::try_sync_by_key()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TrySync<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<Result<(usize, T), (usize, T)>, E>>,
-    }
-
-    impl<T, E> Stream for TrySync<T, E> {
-        type Item = Result<Result<(usize, T), (usize, T)>, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
+        .boxed()
     }
 }
 
-// try_unfold_blocking
+// try_par_unfold
 
-pub use try_unfold_blocking::*;
+pub use try_par_unfold::*;
 
-mod try_unfold_blocking {
-    use super::*;
-
-    /// A fallible analogue to [unfold_blocking](super::unfold_blocking).
-    pub fn try_unfold_blocking<IF, UF, State, Item, Error>(
-        buf_size: impl Into<Option<usize>>,
-        mut init_f: IF,
-        mut unfold_f: UF,
-    ) -> TryUnfoldBlocking<Item, Error>
-    where
-        IF: 'static + FnMut() -> Result<State, Error> + Send,
-        UF: 'static + FnMut(State) -> Result<Option<(Item, State)>, Error> + Send,
-        Item: 'static + Send,
-        Error: 'static + Send,
-    {
-        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
-        let (data_tx, data_rx) = utils::channel(buf_size);
-
-        rt::spawn_blocking(move || {
-            let mut state = match init_f() {
-                Ok(state) => state,
-                Err(err) => {
-                    let _ = data_tx.send(Err(err));
-                    return;
-                }
-            };
-
-            loop {
-                match unfold_f(state) {
-                    Ok(Some((item, new_state))) => {
-                        let result = data_tx.send(Ok(item));
-                        if result.is_err() {
-                            break;
-                        }
-                        state = new_state;
-                    }
-                    Ok(None) => break,
-                    Err(err) => {
-                        let _ = data_tx.send(Err(err));
-                        break;
-                    }
-                }
-            }
-        });
-
-        let stream = data_rx.into_stream().boxed();
-
-        TryUnfoldBlocking { stream }
-    }
-
-    /// A fallible stream combinator returned from [try_unfold_blocking()](super::try_unfold_blocking()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryUnfoldBlocking<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryUnfoldBlocking<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
-    }
-}
-
-// try_par_unfold_unordered
-
-pub use try_par_unfold_unordered::*;
-
-mod try_par_unfold_unordered {
+mod try_par_unfold {
     use super::*;
 
     /// A fallible analogue to [par_unfold_unordered](super::par_unfold_unordered()).
-    pub fn try_par_unfold_unordered<P, IF, UF, IFut, UFut, State, Item, Error>(
+    pub fn try_par_unfold<Item, Error, State, P, F, Fut>(
         config: P,
-        mut init_f: IF,
-        unfold_f: UF,
-    ) -> TryParUnfoldUnordered<Item, Error>
+        state: State,
+        f: F,
+    ) -> BoxStream<'static, Result<Item, Error>>
     where
-        IF: 'static + FnMut(usize) -> IFut,
-        UF: 'static + FnMut(usize, State) -> UFut + Send + Clone,
-        IFut: 'static + Future<Output = Result<State, Error>> + Send,
-        UFut: 'static + Future<Output = Result<Option<(Item, State)>, Error>> + Send,
-        State: Send,
+        P: Into<ParParams>,
+        F: 'static + FnMut(usize, Arc<State>) -> Fut + Send + Clone,
+        Fut: 'static + Future<Output = Result<Option<(Item, Arc<State>)>, Error>> + Send,
+        State: 'static + Sync + Send,
         Item: 'static + Send,
         Error: 'static + Send,
-        P: Into<ParParams>,
     {
         let ParParams {
             num_workers,
@@ -656,29 +432,21 @@ mod try_par_unfold_unordered {
         } = config.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(state);
 
         let worker_futs = (0..num_workers).map(move |worker_index| {
-            let init_fut = init_f(worker_index);
-            let mut unfold_f = unfold_f.clone();
+            let mut f = f.clone();
+            let mut state = state.clone();
             let output_tx = output_tx.clone();
             let terminate = terminate.clone();
 
             rt::spawn(async move {
-                let mut state = match init_fut.await {
-                    Ok(state) => state,
-                    Err(err) => {
-                        let _ = output_tx.send_async(Err(err)).await;
-                        terminate.store(true, Release);
-                        return;
-                    }
-                };
-
                 loop {
                     if terminate.load(Acquire) {
                         break;
                     }
 
-                    match unfold_f(worker_index, state).await {
+                    match f(worker_index, state).await {
                         Ok(Some((item, new_state))) => {
                             let result = output_tx.send_async(Ok(item)).await;
                             if result.is_err() {
@@ -701,7 +469,7 @@ mod try_par_unfold_unordered {
 
         let join_future = future::join_all(worker_futs);
 
-        let stream = stream::select(
+        stream::select(
             output_rx.into_stream().map(Some),
             join_future.map(|_| None).into_stream(),
         )
@@ -719,22 +487,23 @@ mod try_par_unfold_unordered {
             async move { output }
         })
         .fuse()
-        .boxed();
-
-        TryParUnfoldUnordered { stream }
+        .boxed()
     }
 
     /// A fallible analogue to [par_unfold_blocking_unordered](super::par_unfold_blocking_unordered).
-    pub fn try_par_unfold_blocking_unordered<P, IF, UF, State, Item, Error>(
+    pub fn try_par_unfold_blocking<Item, Error, State, P, F>(
         config: P,
-        init_f: IF,
-        unfold_f: UF,
-    ) -> TryParUnfoldUnordered<Item, Error>
+        state: State,
+        f: F,
+    ) -> BoxStream<'static, Result<Item, Error>>
     where
-        IF: 'static + FnMut(usize) -> Result<State, Error> + Send + Clone,
-        UF: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
+        F: 'static
+            + FnMut(usize, Arc<State>) -> Result<Option<(Item, Arc<State>)>, Error>
+            + Send
+            + Clone,
         Item: 'static + Send,
         Error: 'static + Send,
+        State: 'static + Sync + Send,
         P: Into<ParParams>,
     {
         let ParParams {
@@ -743,50 +512,40 @@ mod try_par_unfold_unordered {
         } = config.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
+        let state = Arc::new(state);
 
         (0..num_workers).for_each(|worker_index| {
-            let mut init_f = init_f.clone();
-            let mut unfold_f = unfold_f.clone();
+            let mut f = f.clone();
+            let mut state = state.clone();
             let output_tx = output_tx.clone();
             let terminate = terminate.clone();
 
-            rt::spawn_blocking(move || {
-                let mut state = match init_f(worker_index) {
-                    Ok(state) => state,
+            rt::spawn_blocking(move || loop {
+                if terminate.load(Acquire) {
+                    break;
+                }
+
+                match f(worker_index, state) {
+                    Ok(Some((item, new_state))) => {
+                        let result = output_tx.send(Ok(item));
+                        if result.is_err() {
+                            break;
+                        }
+                        state = new_state;
+                    }
+                    Ok(None) => {
+                        break;
+                    }
                     Err(err) => {
                         let _ = output_tx.send(Err(err));
                         terminate.store(true, Release);
-                        return;
-                    }
-                };
-
-                loop {
-                    if terminate.load(Acquire) {
                         break;
-                    }
-
-                    match unfold_f(worker_index, state) {
-                        Ok(Some((item, new_state))) => {
-                            let result = output_tx.send(Ok(item));
-                            if result.is_err() {
-                                break;
-                            }
-                            state = new_state;
-                        }
-                        Ok(None) => {
-                            break;
-                        }
-                        Err(err) => {
-                            let _ = output_tx.send(Err(err));
-                            terminate.store(true, Release);
-                            break;
-                        }
                     }
                 }
             });
         });
 
-        let stream = output_rx
+        output_rx
             .into_stream()
             .scan(false, |terminated, result| {
                 let output = if *terminated {
@@ -800,32 +559,14 @@ mod try_par_unfold_unordered {
 
                 async move { output }
             })
-            .boxed();
-
-        TryParUnfoldUnordered { stream }
-    }
-
-    /// A stream combinator returned from [try_par_unfold_unordered()](super::try_par_unfold_unordered())
-    /// and  [try_par_unfold_blocking_unordered()](super::try_par_unfold_blocking_unordered()).
-    #[derive(Derivative)]
-    #[derivative(Debug)]
-    pub struct TryParUnfoldUnordered<T, E> {
-        #[derivative(Debug = "ignore")]
-        pub(super) stream: BoxStream<'static, Result<T, E>>,
-    }
-
-    impl<T, E> Stream for TryParUnfoldUnordered<T, E> {
-        type Item = Result<T, E>;
-
-        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            Pin::new(&mut self.stream).poll_next(cx)
-        }
+            .boxed()
     }
 }
 
-#[cfg(tests)]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use rand::prelude::*;
 
     #[tokio::test]
     async fn sync_test() {
@@ -874,111 +615,39 @@ mod tests {
 
     #[tokio::test]
     async fn par_unfold_test() {
-        let numbers: Vec<_> = super::par_unfold_unordered(
-            4,
-            |index| async move { (index + 1) * 100 },
-            |index, quota| async move {
-                (quota > 0).then(|| {
-                    let mut rng = rand::thread_rng();
-                    let val = rng.gen_range(0..10) + index * 100;
-                    (val, quota - 1)
-                })
-            },
-        )
-        .collect()
+        let max_quota = 100;
+
+        let count = super::par_unfold(4, AtomicUsize::new(0), move |_, quota| async move {
+            let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+            enough.then(|| {
+                let mut rng = rand::thread_rng();
+                let val = rng.gen_range(0..10);
+                (val, quota)
+            })
+        })
+        .count()
         .await;
 
-        let counts = numbers
-            .iter()
-            .map(|val| {
-                let worker_index = val / 100;
-                let number = val - worker_index * 100;
-                assert!(number < 10);
-                (worker_index, 1)
-            })
-            .into_grouping_map()
-            .sum();
-
-        assert_eq!(counts.len(), 4);
-        assert!((0..4).all(|worker_index| counts[&worker_index] == (worker_index + 1) * 100));
+        assert_eq!(count, max_quota);
     }
     #[tokio::test]
     async fn par_unfold_blocking_test() {
-        let numbers: Vec<_> = super::par_unfold_blocking_unordered(
-            4,
-            |index| {
-                let rng = rand::thread_rng();
-                let quota = (index + 1) * 100;
-                (rng, quota)
-            },
-            |index, (mut rng, quota)| {
-                (quota > 0).then(|| {
-                    let val = rng.gen_range(0..10) + index * 100;
-                    (val, (rng, quota - 1))
-                })
-            },
-        )
-        .collect()
+        let max_quota = 100;
+
+        let count = super::par_unfold_blocking(4, AtomicUsize::new(0), move |_, quota| {
+            let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+            enough.then(|| {
+                let mut rng = rand::thread_rng();
+                let val = rng.gen_range(0..10);
+                (val, quota)
+            })
+        })
+        .count()
         .await;
 
-        let counts = numbers
-            .iter()
-            .map(|val| {
-                let worker_index = val / 100;
-                let number = val - worker_index * 100;
-                assert!(number < 10);
-                (worker_index, 1)
-            })
-            .into_grouping_map()
-            .sum();
-
-        assert_eq!(counts.len(), 4);
-        assert!((0..4).all(|worker_index| counts[&worker_index] == (worker_index + 1) * 100));
-    }
-
-    #[tokio::test]
-    async fn unfold_blocking_test() {
-        {
-            let numbers: Vec<_> = super::unfold_blocking(
-                None,
-                || 0,
-                move |count| {
-                    let output = count;
-                    if output < 1000 {
-                        Some((output, count + 1))
-                    } else {
-                        None
-                    }
-                },
-            )
-            .collect()
-            .await;
-
-            let expect: Vec<_> = (0..1000).collect();
-
-            assert_eq!(numbers, expect);
-        }
-
-        {
-            let numbers: Vec<_> = super::unfold_blocking(
-                None,
-                || (0, rand::thread_rng()),
-                move |(acc, mut rng)| {
-                    let val = rng.gen_range(1..=10);
-                    let acc = acc + val;
-                    if acc < 100 {
-                        Some((acc, (acc, rng)))
-                    } else {
-                        None
-                    }
-                },
-            )
-            .collect()
-            .await;
-
-            assert!(numbers.iter().all(|&val| val < 100));
-            assert!(izip!(&numbers, numbers.iter().skip(1)).all(|(&prev, &next)| prev < next));
-        }
+        assert_eq!(count, max_quota);
     }
 
     #[tokio::test]
@@ -1018,66 +687,21 @@ mod tests {
             assert_eq!(stream.next().await, None);
         }
     }
-    #[tokio::test]
-    async fn try_unfold_blocking_test() {
-        {
-            let mut stream =
-                super::try_unfold_blocking(None, || Err("init error"), |()| Ok(Some(((), ()))));
-            assert_eq!(stream.next().await, Some(Err("init error")));
-            assert!(stream.next().await.is_none());
-        }
-
-        {
-            let mut stream = super::try_unfold_blocking(
-                None,
-                || Ok(0),
-                |count| {
-                    if count < 3 {
-                        Ok(Some(((), count + 1)))
-                    } else {
-                        Err("exceed")
-                    }
-                },
-            );
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert_eq!(stream.next().await, Some(Err("exceed")));
-            assert!(stream.next().await.is_none());
-        }
-
-        {
-            let mut stream = super::try_unfold_blocking(
-                None,
-                || Result::<_, ()>::Ok(0),
-                |count| {
-                    if count < 3 {
-                        Ok(Some(((), count + 1)))
-                    } else {
-                        Ok(None)
-                    }
-                },
-            );
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert_eq!(stream.next().await, Some(Ok(())));
-            assert!(stream.next().await.is_none());
-        }
-    }
 
     #[tokio::test]
     async fn try_par_unfold_test() {
-        let mut stream = super::try_par_unfold_unordered(
-            4,
-            |_index| async move { Ok(5) },
-            |index, quota| async move {
-                if quota > 0 {
-                    Ok(Some((index, quota - 1)))
+        let max_quota = 100;
+
+        let mut stream =
+            super::try_par_unfold(None, AtomicUsize::new(0), move |index, quota| async move {
+                let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+                if enough {
+                    Ok(Some((index, quota)))
                 } else {
                     Err("out of quota")
                 }
-            },
-        );
+            });
 
         let mut counts = HashMap::new();
 
@@ -1098,22 +722,24 @@ mod tests {
         }
 
         assert!(stream.next().await.is_none());
-        assert!(counts.values().all(|&count| count <= 5));
+        assert!(counts.values().all(|&count| count <= max_quota));
+        assert!(counts.values().cloned().sum::<usize>() <= max_quota);
     }
 
     #[tokio::test]
     async fn try_par_unfold_blocking_test() {
-        let mut stream = super::try_par_unfold_blocking_unordered(
-            4,
-            |_index| Ok(5),
-            |index, quota| {
-                if quota > 0 {
-                    Ok(Some((index, quota - 1)))
+        let max_quota = 100;
+
+        let mut stream =
+            super::try_par_unfold_blocking(None, AtomicUsize::new(0), move |index, quota| {
+                let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+                if enough {
+                    Ok(Some((index, quota)))
                 } else {
                     Err("out of quota")
                 }
-            },
-        );
+            });
 
         let mut counts = HashMap::new();
 
@@ -1134,6 +760,7 @@ mod tests {
         }
 
         assert!(stream.next().await.is_none());
-        assert!(counts.values().all(|&count| count <= 5));
+        assert!(counts.values().all(|&count| count <= max_quota));
+        assert!(counts.values().cloned().sum::<usize>() <= max_quota);
     }
 }
