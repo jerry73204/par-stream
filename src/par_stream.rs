@@ -1,6 +1,6 @@
 use crate::{
     common::*,
-    config::{self, BufSize, ParParams},
+    config::{self, BufSize, NumWorkers, ParParams},
     index_stream::IndexStreamExt as _,
     rt,
     shared_stream::Shared,
@@ -583,19 +583,19 @@ where
         B: Into<BufSize>;
 
     /// Runs an asynchronous task on each element of an stream in parallel.
-    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        P: Into<ParParams>;
+        N: Into<NumWorkers>;
 
     /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
     /// Runs an blocking task on each element of an stream in parallel.
-    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<N, F, Func>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        P: Into<ParParams>;
+        N: Into<NumWorkers>;
 }
 
 impl<S> ParStreamExt for S
@@ -638,14 +638,11 @@ where
 
             rt::spawn(async move {
                 let _ = stream::repeat(())
-                    .stateful_then(
-                        (stream, f),
-                        |(stream, mut f): (Shared<Self>, F), ()| async move {
-                            f(worker_index, stream)
-                                .await
-                                .map(move |(item, stream)| ((stream, f), item))
-                        },
-                    )
+                    .stateful_then((stream, f), |(stream, mut f), ()| async move {
+                        f(worker_index, stream)
+                            .await
+                            .map(move |(item, stream)| ((stream, f), item))
+                    })
                     .map(Ok)
                     .forward(output_tx.into_sink())
                     .await;
@@ -796,19 +793,20 @@ where
             num_workers,
             buf_size,
         } = params.into();
-        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
+        let stream = self
+            .stateful_map(f, |mut f, item| {
+                let fut = f(item);
+                Some((f, fut))
+            })
+            .shared();
 
-        rt::spawn(async move {
-            let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
-        });
-        (0..num_workers).for_each(|_| {
-            let input_rx = input_rx.clone();
+        (0..num_workers).for_each(move |_| {
+            let stream = stream.clone();
             let output_tx = output_tx.clone();
 
             rt::spawn(async move {
-                let _ = input_rx
-                    .into_stream()
+                let _ = stream
                     .then(|fut| fut)
                     .map(Ok)
                     .forward(output_tx.into_sink())
@@ -845,19 +843,20 @@ where
             num_workers,
             buf_size,
         } = params.into();
-        let (input_tx, input_rx) = utils::channel(buf_size);
+        let stream = self
+            .stateful_map(f, |mut f, item| {
+                let func = f(item);
+                Some((f, func))
+            })
+            .shared();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
-        rt::spawn(async move {
-            let _ = self.map(f).map(Ok).forward(input_tx.into_sink()).await;
-        });
-
-        (0..num_workers).for_each(|_| {
-            let input_rx = input_rx.clone();
+        (0..num_workers).for_each(move |_| {
+            let mut stream = stream.clone();
             let output_tx = output_tx.clone();
 
             rt::spawn_blocking(move || {
-                while let Ok(job) = input_rx.recv() {
+                while let Some(job) = rt::block_on(stream.next()) {
                     let output = job();
                     let result = output_tx.send(output);
                     if result.is_err() {
@@ -884,34 +883,23 @@ where
             num_workers,
             buf_size,
         } = params.into();
+        let stream = self.shared();
 
         // phase 1
         let phase_1_future = async move {
-            let (input_tx, input_rx) = utils::channel(buf_size);
-
-            let input_future = rt::spawn(async move {
-                let _ = self.map(Ok).forward(input_tx.into_sink()).await;
-            });
-
             let reducer_futures = {
                 let reduce_fn = reduce_fn.clone();
 
                 (0..num_workers).map(move |_| {
-                    let input_rx = input_rx.clone();
+                    let stream = stream.clone();
                     let mut reduce_fn = reduce_fn.clone();
 
-                    rt::spawn(async move {
-                        let mut reduced = input_rx.recv_async().await.ok()?;
-
-                        while let Ok(item) = input_rx.recv_async().await {
-                            reduced = reduce_fn(reduced, item).await;
-                        }
-
-                        Some(reduced)
-                    })
+                    rt::spawn(
+                        async move { stream.reduce(|fold, item| reduce_fn(fold, item)).await },
+                    )
                 })
             };
-            let (values, ()) = join!(future::join_all(reducer_futures), input_future);
+            let values = future::join_all(reducer_futures).await;
 
             (values, reduce_fn)
         };
@@ -1146,62 +1134,53 @@ where
         }
     }
 
-    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (map_tx, map_rx) = utils::channel(buf_size);
+        let num_workers = num_workers.into().get();
+        let stream = self
+            .stateful_map(f, |mut f, item| {
+                let fut = f(item);
+                Some((f, fut))
+            })
+            .shared();
 
-        let map_fut = async move {
-            let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;
-        };
+        let worker_futures =
+            (0..num_workers).map(move |_| rt::spawn(stream.clone().for_each(|fut| fut)));
 
-        let worker_futures = (0..num_workers).map(|_| {
-            let map_rx = map_rx.clone();
-            rt::spawn(map_rx.into_stream().for_each(|fut| fut))
-        });
-
-        future::join(map_fut, future::join_all(worker_futures))
-            .map(|_| ())
-            .boxed()
+        future::join_all(worker_futures).map(|_| ()).boxed()
     }
 
-    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<N, F, Func>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (map_tx, map_rx) = utils::channel(buf_size);
-
-        let map_fut = async move {
-            let _ = self.map(f).map(Ok).forward(map_tx.into_sink()).await;
-        };
+        let num_workers = num_workers.into().get();
+        let stream = self
+            .stateful_map(f, |mut f, item| {
+                let func = f(item);
+                Some((f, func))
+            })
+            .shared();
 
         let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
+            .map(move |_| {
+                let mut stream = stream.clone();
+
                 rt::spawn_blocking(move || {
-                    while let Ok(job) = map_rx.recv() {
+                    while let Some(job) = rt::block_on(stream.next()) {
                         job();
                     }
                 })
             })
             .collect();
 
-        future::join(map_fut, future::join_all(worker_futs))
-            .map(|_| ())
-            .boxed()
+        future::join_all(worker_futs).map(|_| ()).boxed()
     }
 }
 

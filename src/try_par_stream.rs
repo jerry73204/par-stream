@@ -1,4 +1,13 @@
-use crate::{common::*, config::ParParams, rt, utils};
+use crate::{
+    common::*,
+    config::{NumWorkers, ParParams},
+    par_stream::ParStreamExt as _,
+    rt,
+    stream::StreamExt as _,
+    try_index_stream::TryIndexStreamExt as _,
+    try_stream::TryStreamExt as _,
+    utils,
+};
 use tokio::sync::broadcast;
 
 /// An extension trait that provides fallible combinators for parallel processing on streams.
@@ -78,24 +87,24 @@ where
 
     /// Runs this stream to completion, executing asynchronous closure for each element on the stream
     /// in parallel.
-    fn try_par_for_each<P, F, Fut>(
+    fn try_par_for_each<N, F, Fut>(
         self,
-        params: P,
+        num_workers: N,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
     /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
-    fn try_par_for_each_blocking<P, F, Func>(
+    fn try_par_for_each_blocking<N, F, Func>(
         self,
-        params: P,
+        num_workers: N,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), Self::Error> + Send;
 }
@@ -243,195 +252,24 @@ where
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, E>> + Send,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
+        self.take_until_error()
+            .enumerate()
+            .par_then_unordered(params, move |(index, input)| {
+                let fut = input.map(|input| f(input));
 
-        let (input_tx, input_rx) = utils::channel(buf_size);
-        let (reorder_tx, reorder_rx) = utils::channel(buf_size);
-        let (output_tx, output_rx) = utils::channel(buf_size);
-        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
-
-        let input_future = {
-            rt::spawn(async move {
-                let mut stream = self.boxed();
-                let mut index = 0;
-
-                loop {
-                    let item = tokio::select! {
-                        item = stream.try_next() => item.map_err(|err| (index, err))?,
-                        _ = terminate_rx.recv() => break,
-                    };
-
-                    match item {
-                        Some(item) => {
-                            let future = f(item);
-                            if input_tx.send_async((index, future)).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-
-                    index += 1;
+                async move {
+                    let output = fut?.await?;
+                    Ok((index, output))
                 }
-
-                Ok(())
             })
-        };
-
-        let mut worker_futures: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let reorder_tx = reorder_tx.clone();
-                let terminate_tx = terminate_tx.clone();
-
-                rt::spawn(async move {
-                    loop {
-                        let (index, future) = match input_rx.recv_async().await {
-                            Ok(item) => item,
-                            Err(_) => {
-                                break;
-                            }
-                        };
-                        match future.await {
-                            Ok(item) => {
-                                if reorder_tx.send_async((index, item)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = terminate_tx.send(());
-                                return Err((index, err));
-                            }
-                        }
-                    }
-
-                    Ok(())
-                })
-                .boxed()
-            })
-            .collect();
-
-        let select_worker_future = async move {
-            let mut errors = vec![];
-
-            while !worker_futures.is_empty() {
-                let (result, index, _) = future::select_all(&mut worker_futures).await;
-                worker_futures.remove(index);
-
-                if let Err((index, error)) = result {
-                    errors.push((index, error));
-                }
-            }
-
-            errors
-        };
-
-        let reorder_future = rt::spawn(async move {
-            let mut map = HashMap::new();
-            let mut commit = 0;
-
-            'outer: loop {
-                let (index, item) = match reorder_rx.recv_async().await {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
-
-                match commit.cmp(&index) {
-                    Less => {
-                        map.insert(index, item);
-                    }
-                    Equal => {
-                        if output_tx.send_async(item).await.is_err() {
-                            break 'outer;
-                        }
-                        commit += 1;
-
-                        'inner: loop {
-                            match map.remove(&commit) {
-                                Some(item) => {
-                                    if output_tx.send_async(item).await.is_err() {
-                                        break 'outer;
-                                    };
-                                    commit += 1;
-                                }
-                                None => break 'inner,
-                            }
-                        }
-                    }
-                    Greater => panic!("duplicated index number {}", index),
-                }
-            }
-        });
-
-        let join_all_future = async move {
-            let (input_result, mut worker_results, ()) =
-                future::join3(input_future, select_worker_future, reorder_future).await;
-
-            if let Err((_, err)) = input_result {
-                return Err(err);
-            }
-
-            worker_results.sort_by_cached_key(|&(index, _)| index);
-            if let Some((_, err)) = worker_results.into_iter().next() {
-                return Err(err);
-            }
-
-            Ok(())
-        };
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_all_future
-                .map(|result| result.map(|()| None))
-                .into_stream(),
-        )
-        .boxed();
-
-        stream::unfold(
-            (Some(select_stream), None),
-            |(mut select_stream, mut error)| async move {
-                if let Some(stream) = &mut select_stream {
-                    match stream.next().await {
-                        Some(Ok(Some(item))) => {
-                            let output = Ok(item);
-                            let state = (select_stream, error);
-                            return Some((Some(output), state));
-                        }
-                        Some(Ok(None)) => {
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        Some(Err(err)) => {
-                            error = Some(err);
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        None => {
-                            // select_stream = None;
-                        }
-                    }
-                }
-
-                if let Some(err) = error {
-                    let output = Err(err);
-                    let state = (None, None);
-                    return Some((Some(output), state));
-                }
-
-                None
-            },
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+            .try_reorder_enumerated()
+            .boxed()
     }
 
     fn try_par_then_unordered<U, P, F, Fut>(
         self,
         params: P,
-        mut f: F,
+        f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
         U: 'static + Send,
@@ -439,139 +277,17 @@ where
         Fut: 'static + Future<Output = Result<U, E>> + Send,
         P: Into<ParParams>,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (input_tx, input_rx) = utils::channel(buf_size);
-        let (output_tx, output_rx) = utils::channel(buf_size);
-        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+        let (input_stream, input_error) = self.catch_error();
+        let output_stream = input_stream.par_then_unordered(params, f);
 
-        let input_future = {
-            async move {
-                let mut stream = self.boxed();
-
-                loop {
-                    let item = tokio::select! {
-                        item = stream.try_next() => item?,
-                        _ = terminate_rx.recv() => break
-                    };
-
-                    match item {
-                        Some(item) => {
-                            let fut = f(item);
-                            let result = input_tx.send_async(fut).await;
-                            if result.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-                }
-
-                Ok(())
-            }
-        };
-
-        let mut worker_futures: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
-                let terminate_tx = terminate_tx.clone();
-
-                rt::spawn(async move {
-                    loop {
-                        let output = match input_rx.recv_async().await {
-                            Ok(fut) => fut.await,
-                            Err(_) => break,
-                        };
-                        match output {
-                            Ok(output) => {
-                                if output_tx.send_async(output).await.is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = terminate_tx.send(());
-                                return Err(err);
-                            }
-                        }
-                    }
-
-                    Ok(())
-                })
-                .boxed()
-            })
-            .collect();
-
-        let select_worker_future = async move {
-            while !worker_futures.is_empty() {
-                let (result, index, _) = future::select_all(&mut worker_futures).await;
-                worker_futures.remove(index);
-
-                if let Err(error) = result {
-                    let _ = future::join_all(worker_futures).await;
-                    return Err(error);
-                }
-            }
-
-            Ok(())
-        };
-
-        let join_all_future = async move {
-            let (input_result, worker_result) =
-                future::join(input_future, select_worker_future).await;
-
-            match (input_result, worker_result) {
-                (Err(err), _) => Err(err),
-                (Ok(_), Err(err)) => Err(err),
-                _ => Ok(()),
-            }
-        };
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_all_future
+        stream::select(
+            input_error
                 .map(|result| result.map(|()| None))
                 .into_stream(),
+            output_stream.map(|result| result.map(Some)),
         )
-        .boxed();
-
-        stream::unfold(
-            (Some(select_stream), None),
-            |(mut select_stream, mut error)| async move {
-                if let Some(stream) = &mut select_stream {
-                    match stream.next().await {
-                        Some(Ok(Some(item))) => {
-                            let output = Ok(item);
-                            let state = (select_stream, error);
-                            return Some((Some(output), state));
-                        }
-                        Some(Ok(None)) => {
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        Some(Err(err)) => {
-                            error = Some(err);
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        None => {
-                            // select_stream = None;
-                        }
-                    }
-                }
-
-                if let Some(err) = error {
-                    let output = Err(err);
-                    let state = (None, None);
-                    return Some((Some(output), state));
-                }
-
-                None
-            },
-        )
-        .filter_map(|item| async move { item })
+        .try_filter_map(|item| future::ok(item))
+        .take_until_error()
         .boxed()
     }
 
@@ -582,195 +298,24 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
+        self.take_until_error()
+            .enumerate()
+            .par_map_unordered(params, move |(index, input)| {
+                let func = input.map(|input| f(input));
 
-        let (input_tx, input_rx) = utils::channel(buf_size);
-        let (reorder_tx, reorder_rx) = utils::channel(buf_size);
-        let (output_tx, output_rx) = utils::channel(buf_size);
-        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
-
-        let input_future = {
-            rt::spawn(async move {
-                let mut stream = self.boxed();
-                let mut index = 0;
-
-                loop {
-                    let item = tokio::select! {
-                        item = stream.try_next() => item.map_err(|err| (index, err))?,
-                        _ = terminate_rx.recv() => break,
-                    };
-
-                    match item {
-                        Some(item) => {
-                            let future = f(item);
-                            if input_tx.send_async((index, future)).await.is_err() {
-                                break;
-                            }
-                        }
-                        None => break,
-                    }
-
-                    index += 1;
+                move || {
+                    let output = (func?)()?;
+                    Ok((index, output))
                 }
-
-                Ok(())
             })
-        };
-
-        let mut worker_futures: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let reorder_tx = reorder_tx.clone();
-                let terminate_tx = terminate_tx.clone();
-
-                rt::spawn_blocking(move || {
-                    loop {
-                        let (index, job) = match input_rx.recv() {
-                            Ok(item) => item,
-                            Err(_) => {
-                                break;
-                            }
-                        };
-                        match job() {
-                            Ok(item) => {
-                                if reorder_tx.send((index, item)).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = terminate_tx.send(());
-                                return Err((index, err));
-                            }
-                        }
-                    }
-
-                    Ok(())
-                })
-                .boxed()
-            })
-            .collect();
-
-        let select_worker_future = async move {
-            let mut errors = vec![];
-
-            while !worker_futures.is_empty() {
-                let (result, index, _) = future::select_all(&mut worker_futures).await;
-                worker_futures.remove(index);
-
-                if let Err((index, error)) = result {
-                    errors.push((index, error));
-                }
-            }
-
-            errors
-        };
-
-        rt::spawn(async move {
-            let mut map = HashMap::new();
-            let mut commit = 0;
-
-            'outer: loop {
-                let (index, item) = match reorder_rx.recv_async().await {
-                    Ok(tuple) => tuple,
-                    Err(_) => break,
-                };
-
-                match commit.cmp(&index) {
-                    Less => {
-                        map.insert(index, item);
-                    }
-                    Equal => {
-                        if output_tx.send_async(item).await.is_err() {
-                            break 'outer;
-                        }
-                        commit += 1;
-
-                        'inner: loop {
-                            match map.remove(&commit) {
-                                Some(item) => {
-                                    if output_tx.send_async(item).await.is_err() {
-                                        break 'outer;
-                                    };
-                                    commit += 1;
-                                }
-                                None => break 'inner,
-                            }
-                        }
-                    }
-                    Greater => panic!("duplicated index number {}", index),
-                }
-            }
-        });
-
-        let join_all_future = async move {
-            let (input_result, mut worker_results) =
-                future::join(input_future, select_worker_future).await;
-
-            if let Err((_, err)) = input_result {
-                return Err(err);
-            }
-
-            worker_results.sort_by_cached_key(|&(index, _)| index);
-            if let Some((_, err)) = worker_results.into_iter().next() {
-                return Err(err);
-            }
-
-            Ok(())
-        };
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_all_future
-                .map(|result| result.map(|()| None))
-                .into_stream(),
-        )
-        .boxed();
-
-        stream::unfold(
-            (Some(select_stream), None),
-            |(mut select_stream, mut error)| async move {
-                if let Some(stream) = &mut select_stream {
-                    match stream.next().await {
-                        Some(Ok(Some(item))) => {
-                            let output = Ok(item);
-                            let state = (select_stream, error);
-                            return Some((Some(output), state));
-                        }
-                        Some(Ok(None)) => {
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        Some(Err(err)) => {
-                            error = Some(err);
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        None => {
-                            // select_stream = None;
-                        }
-                    }
-                }
-
-                if let Some(err) = error {
-                    let output = Err(err);
-                    let state = (None, None);
-                    return Some((Some(output), state));
-                }
-
-                None
-            },
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+            .try_reorder_enumerated()
+            .boxed()
     }
 
     fn try_par_map_unordered<U, P, F, Func>(
         self,
         params: P,
-        mut f: F,
+        f: F,
     ) -> BoxStream<'static, Result<U, E>>
     where
         P: Into<ParParams>,
@@ -778,30 +323,105 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (input_tx, input_rx) = utils::channel(buf_size);
-        let (output_tx, output_rx) = utils::channel(buf_size);
+        let (input_stream, input_error) = self.catch_error();
+        let output_stream = input_stream.par_map_unordered(params, f);
+
+        stream::select(
+            input_error
+                .map(|result| result.map(|()| None))
+                .into_stream(),
+            output_stream.map(|result| result.map(Some)),
+        )
+        .try_filter_map(|item| future::ok(item))
+        .take_until_error()
+        .boxed()
+    }
+
+    fn try_par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, Result<(), E>>
+    where
+        N: Into<NumWorkers>,
+        F: 'static + FnMut(T) -> Fut + Send,
+        Fut: 'static + Future<Output = Result<(), E>> + Send,
+    {
+        let num_workers = num_workers.into().get();
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+        let input_stream = self
+            .take_until_error()
+            .take_until(async move {
+                let _ = terminate_rx.recv().await;
+            })
+            .stateful_map(f, |mut f, item| {
+                let fut = item.map(|item| f(item));
+                Some((f, fut))
+            })
+            .shared();
 
-        let input_future = {
-            async move {
-                let mut stream = self.boxed();
+        let worker_futures = (0..num_workers).map(move |_| {
+            let terminate_tx = terminate_tx.clone();
 
+            rt::spawn(
+                input_stream
+                    .clone()
+                    .stateful_then(terminate_tx, |terminate_tx, fut| async move {
+                        let result = async move {
+                            fut?.await?;
+                            Ok(())
+                        }
+                        .await;
+
+                        if result.is_err() {
+                            let _ = terminate_tx.send(());
+                        }
+
+                        Some((terminate_tx, result))
+                    })
+                    .try_for_each(|()| future::ok(())),
+            )
+        });
+
+        future::try_join_all(worker_futures)
+            .map(|result| result.map(|_| ()))
+            .boxed()
+    }
+
+    fn try_par_for_each_blocking<N, F, Func>(
+        self,
+        num_workers: N,
+        f: F,
+    ) -> BoxFuture<'static, Result<(), E>>
+    where
+        N: Into<NumWorkers>,
+        F: 'static + FnMut(T) -> Func + Send,
+        Func: 'static + FnOnce() -> Result<(), E> + Send,
+    {
+        let num_workers = num_workers.into().get();
+        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+        let stream = self
+            .take_until_error()
+            .take_until(async move {
+                let _ = terminate_rx.recv().await;
+            })
+            .stateful_map(f, |mut f, item| {
+                let fut = item.map(|item| f(item));
+                Some((f, fut))
+            })
+            .shared();
+
+        let worker_futures = (0..num_workers).map(|_| {
+            let mut stream = stream.clone();
+            let terminate_tx = terminate_tx.clone();
+
+            rt::spawn_blocking(move || {
                 loop {
-                    let item = tokio::select! {
-                        item = stream.try_next() => item?,
-                        _ = terminate_rx.recv() => break
-                    };
-
-                    match item {
-                        Some(item) => {
-                            let fut = f(item);
-                            let result = input_tx.send_async(fut).await;
-                            if result.is_err() {
-                                break;
+                    match rt::block_on(stream.next()) {
+                        Some(func) => {
+                            let result = (move || {
+                                (func?)()?;
+                                Ok(())
+                            })();
+                            if let Err(err) = result {
+                                let _result = terminate_tx.send(()); // shutdown workers
+                                return Err(err); // return error
                             }
                         }
                         None => break,
@@ -809,274 +429,12 @@ where
                 }
 
                 Ok(())
-            }
-        };
-
-        let mut worker_futures: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let input_rx = input_rx.clone();
-                let output_tx = output_tx.clone();
-                let terminate_tx = terminate_tx.clone();
-
-                rt::spawn_blocking(move || {
-                    loop {
-                        let output = match input_rx.recv() {
-                            Ok(job) => job(),
-                            Err(_) => break,
-                        };
-                        match output {
-                            Ok(output) => {
-                                if output_tx.send(output).is_err() {
-                                    break;
-                                }
-                            }
-                            Err(err) => {
-                                let _ = terminate_tx.send(());
-                                return Err(err);
-                            }
-                        }
-                    }
-
-                    Ok(())
-                })
-                .boxed()
             })
-            .collect();
+        });
 
-        let select_worker_future = async move {
-            while !worker_futures.is_empty() {
-                let (result, index, _) = future::select_all(&mut worker_futures).await;
-                worker_futures.remove(index);
-
-                if let Err(error) = result {
-                    let _ = future::join_all(worker_futures).await;
-                    return Err(error);
-                }
-            }
-
-            Ok(())
-        };
-
-        let join_all_future = async move {
-            let (input_result, worker_result) =
-                future::join(input_future, select_worker_future).await;
-
-            match (input_result, worker_result) {
-                (Err(err), _) => Err(err),
-                (Ok(_), Err(err)) => Err(err),
-                _ => Ok(()),
-            }
-        };
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_all_future
-                .map(|result| result.map(|()| None))
-                .into_stream(),
-        )
-        .boxed();
-
-        stream::unfold(
-            (Some(select_stream), None),
-            |(mut select_stream, mut error)| async move {
-                if let Some(stream) = &mut select_stream {
-                    match stream.next().await {
-                        Some(Ok(Some(item))) => {
-                            let output = Ok(item);
-                            let state = (select_stream, error);
-                            return Some((Some(output), state));
-                        }
-                        Some(Ok(None)) => {
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        Some(Err(err)) => {
-                            error = Some(err);
-                            let state = (select_stream, error);
-                            return Some((None, state));
-                        }
-                        None => {
-                            // select_stream = None;
-                        }
-                    }
-                }
-
-                if let Some(err) = error {
-                    let output = Err(err);
-                    let state = (None, None);
-                    return Some((Some(output), state));
-                }
-
-                None
-            },
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
-    }
-
-    fn try_par_for_each<P, F, Fut>(self, params: P, mut f: F) -> BoxFuture<'static, Result<(), E>>
-    where
-        P: Into<ParParams>,
-        F: 'static + FnMut(T) -> Fut + Send,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
-    {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (map_tx, map_rx) = utils::channel(buf_size);
-        let (terminate_tx, _terminate_rx) = broadcast::channel(1);
-
-        let map_fut = {
-            let terminate_tx = terminate_tx.clone();
-
-            async move {
-                let mut stream = self.boxed();
-
-                loop {
-                    match stream.try_next().await {
-                        Ok(Some(item)) => {
-                            let fut = f(item);
-                            if map_tx.send_async(fut).await.is_err() {
-                                break Ok(());
-                            }
-                        }
-                        Ok(None) => break Ok(()),
-                        Err(err) => {
-                            let _result = terminate_tx.send(()); // shutdown workers
-                            break Err(err); // output error
-                        }
-                    }
-                }
-            }
-        };
-
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let terminate_tx = terminate_tx.clone();
-                let mut terminate_rx = terminate_tx.subscribe();
-
-                let worker_fut = async move {
-                    loop {
-                        tokio::select! {
-                            result = map_rx.recv_async() => {
-                                let fut = match result {
-                                    Ok(fut) => fut,
-                                    Err(_) => break Ok(()),
-                                };
-
-                                if let Err(err) = fut.await {
-                                    let _result = terminate_tx.send(()); // shutdown workers
-                                    break Err(err); // return error
-                                }
-                            }
-                            _ = terminate_rx.recv() => break Ok(()),
-                        }
-                    }
-                };
-                rt::spawn(worker_fut)
-            })
-            .collect();
-
-        async move {
-            let (map_result, worker_results) = join!(map_fut, future::join_all(worker_futs));
-
-            worker_results
-                .into_iter()
-                .fold(map_result, |folded, result| {
-                    // the order takes the latest error
-                    result.and(folded)
-                })
-        }
-        .boxed()
-    }
-
-    fn try_par_for_each_blocking<P, F, Func>(
-        self,
-        params: P,
-        mut f: F,
-    ) -> BoxFuture<'static, Result<(), E>>
-    where
-        P: Into<ParParams>,
-        F: 'static + FnMut(T) -> Func + Send,
-        Func: 'static + FnOnce() -> Result<(), E> + Send,
-    {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let (map_tx, map_rx) = utils::channel(buf_size);
-        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
-
-        let input_fut = {
-            let terminate_tx = terminate_tx.clone();
-
-            async move {
-                let mut stream = self.boxed();
-
-                loop {
-                    tokio::select! {
-                        item = stream.try_next() => {
-                            match item {
-                                Ok(Some(item)) => {
-                                    let fut = f(item);
-                                    if map_tx.send_async(fut).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                Ok(None) => break,
-                                Err(err) => {
-                                    let _ = terminate_tx.send(()); // shutdown workers
-                                    return Err(err); // output error
-                                }
-                            }
-                        }
-                        _ = terminate_rx.recv() => {
-                            break
-                        }
-                    }
-                }
-
-                Ok(())
-            }
-        };
-
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let map_rx = map_rx.clone();
-                let terminate_tx = terminate_tx.clone();
-
-                rt::spawn_blocking(move || {
-                    loop {
-                        match map_rx.recv() {
-                            Ok(job) => {
-                                let result = job();
-                                if let Err(err) = result {
-                                    let _result = terminate_tx.send(()); // shutdown workers
-                                    return Err(err); // return error
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-
-                    Ok(())
-                })
-            })
-            .collect();
-
-        async move {
-            let (input_result, worker_results) = join!(input_fut, future::join_all(worker_futs));
-
-            worker_results
-                .into_iter()
-                .fold(input_result, |folded, result| {
-                    // the order takes the latest error
-                    result.and(folded)
-                })
-        }
-        .boxed()
+        future::try_join_all(worker_futures)
+            .map(|result| result.map(|_| ()))
+            .boxed()
     }
 }
 
@@ -1085,7 +443,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{try_index_stream::TryIndexStreamExt as _, try_stream::TryStreamExt as _};
     use rand::prelude::*;
 
     #[tokio::test]
@@ -1329,7 +686,7 @@ mod tests {
     async fn try_par_then_test() {
         {
             let mut stream = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                .try_par_then(None, |value| async move { Ok(value) });
+                .try_par_then(None, |value| future::ok(value));
 
             assert_eq!(stream.try_next().await, Ok(Some(1usize)));
             assert_eq!(stream.try_next().await, Ok(Some(2usize)));
