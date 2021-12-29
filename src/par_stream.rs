@@ -206,7 +206,7 @@ where
     fn par_then<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
         T: 'static + Send,
-        F: 'static + FnMut(Self::Item) -> Fut + Send + Clone,
+        F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = T> + Send,
         P: Into<ParParams>;
 
