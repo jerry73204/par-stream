@@ -730,20 +730,17 @@ where
                 debug_assert!(!senders.is_empty());
 
                 // merge senders into a fanout sink
-                let fanout = {
-                    let mut sinks = senders.into_iter().map(
-                        |tx| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {
-                            Box::pin(tx.into_sink())
-                        },
-                    );
-                    let first = sinks.next().unwrap();
-                    sinks.fold(
-                        first,
+                let fanout = senders
+                    .into_iter()
+                    .map(|tx| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {
+                        Box::pin(tx.into_sink())
+                    })
+                    .reduce(
                         |fanout, sink| -> BoxSink<Self::Item, flume::SendError<Self::Item>> {
                             Box::pin(fanout.fanout(sink))
                         },
                     )
-                };
+                    .unwrap();
 
                 let _ = self.map(Ok).forward(fanout).await;
             }

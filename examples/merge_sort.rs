@@ -1,5 +1,5 @@
 use concurrent_slice::{Chunk, ConcurrentSlice};
-use futures::{stream, stream::StreamExt};
+use futures::{stream, stream::StreamExt as _};
 use itertools::izip;
 use par_stream::prelude::*;
 use rand::prelude::*;

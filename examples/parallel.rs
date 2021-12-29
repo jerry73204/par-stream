@@ -1,5 +1,5 @@
-use futures::stream::StreamExt;
-use par_stream::ParStreamExt;
+use futures::stream::StreamExt as _;
+use par_stream::ParStreamExt as _;
 
 async fn main_async() {
     // the variable will be captured by parallel workers

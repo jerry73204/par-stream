@@ -1,6 +1,6 @@
-use futures::stream::StreamExt;
+use futures::stream::StreamExt as _;
 use itertools::izip;
-use par_stream::ParStreamExt;
+use par_stream::ParStreamExt as _;
 
 async fn main_async() {
     let rx1 = futures::stream::iter(1isize..=10).tee(2);

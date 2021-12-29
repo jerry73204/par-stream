@@ -5,7 +5,7 @@
 //! https://arxiv.org/abs/1508.03167
 
 use concurrent_slice::{Chunk, ConcurrentSlice};
-use futures::{stream, stream::StreamExt};
+use futures::{stream, stream::StreamExt as _};
 use par_stream::prelude::*;
 use rand::prelude::*;
 use std::{mem, time::Instant};

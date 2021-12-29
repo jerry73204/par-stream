@@ -1,4 +1,4 @@
-use futures::stream::StreamExt;
+use futures::stream::StreamExt as _;
 use par_stream::prelude::*;
 
 async fn main_async() {

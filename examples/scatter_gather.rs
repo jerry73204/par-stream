@@ -1,5 +1,5 @@
 use futures::stream::{self, StreamExt as _};
-use par_stream::ParStreamExt;
+use par_stream::ParStreamExt as _;
 
 async fn main_async() {
     let rx1 = futures::stream::iter(1isize..=1000).scatter(None);
