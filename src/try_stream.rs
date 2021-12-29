@@ -10,6 +10,8 @@ where
     /// The count wraps to zero if the count overflows.
     fn try_enumerate(self) -> TryEnumerate<Self, Self::Ok, Self::Error>;
 
+    fn take_until_error(self) -> TakeUntilError<Self, Self::Ok, Self::Error>;
+
     fn catch_error(
         self,
     ) -> (
@@ -43,6 +45,14 @@ where
             counter: 0,
             fused: false,
             _phantom: PhantomData,
+            stream: self,
+        }
+    }
+
+    fn take_until_error(self) -> TakeUntilError<Self, T, E> {
+        TakeUntilError {
+            _phantom: PhantomData,
+            is_terminated: false,
             stream: self,
         }
     }
@@ -94,6 +104,49 @@ where
         });
 
         (stream.boxed(), future.boxed())
+    }
+}
+
+pub use take_until_error::*;
+mod take_until_error {
+    use super::*;
+
+    #[pin_project]
+    pub struct TakeUntilError<St, T, E>
+    where
+        St: ?Sized,
+    {
+        pub(super) _phantom: PhantomData<(T, E)>,
+        pub(super) is_terminated: bool,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St, T, E> Stream for TakeUntilError<St, T, E>
+    where
+        St: Stream<Item = Result<T, E>>,
+    {
+        type Item = Result<T, E>;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let this = self.project();
+
+            Ready({
+                if *this.is_terminated {
+                    None
+                } else {
+                    if let Some(result) = ready!(this.stream.poll_next(cx)) {
+                        if result.is_err() {
+                            *this.is_terminated = true;
+                        }
+                        Some(result)
+                    } else {
+                        *this.is_terminated = true;
+                        None
+                    }
+                }
+            })
+        }
     }
 }
 
@@ -221,10 +274,7 @@ mod try_stateful_map {
     }
 }
 
-// try_enumerate
-
 pub use try_enumerate::*;
-
 mod try_enumerate {
     use super::*;
 
@@ -287,6 +337,30 @@ mod try_enumerate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn take_until_error_test() {
+        {
+            let vec: Vec<Result<(), ()>> = stream::empty().take_until_error().collect().await;
+            assert_eq!(vec, []);
+        }
+
+        {
+            let vec: Vec<Result<_, ()>> = stream::iter([Ok(0), Ok(1), Ok(2), Ok(3)])
+                .take_until_error()
+                .collect()
+                .await;
+            assert_eq!(vec, [Ok(0), Ok(1), Ok(2), Ok(3)]);
+        }
+
+        {
+            let vec: Vec<Result<_, _>> = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)])
+                .take_until_error()
+                .collect()
+                .await;
+            assert_eq!(vec, [Ok(0), Ok(1), Err(2),]);
+        }
+    }
 
     #[tokio::test]
     async fn try_stateful_then_test() {
