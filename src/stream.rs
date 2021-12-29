@@ -144,8 +144,8 @@ mod batching {
         pub(super) f: F,
         #[pin]
         pub(super) future: Option<Fut>,
-        pub(super) stream: Option<St>,
         pub(super) _phantom: PhantomData<T>,
+        pub(super) stream: Option<St>,
     }
 
     impl<St, T, F, Fut> Stream for Batching<St, T, F, Fut>
@@ -163,18 +163,18 @@ mod batching {
                 this.future.set(Some(new_future));
             }
 
-            Ready(loop {
+            Ready({
                 if let Some(mut future) = this.future.as_pin_mut() {
                     match ready!(future.poll_unpin(cx)) {
                         Some((item, stream)) => {
                             let new_future = (this.f)(stream);
                             future.set(new_future);
-                            break Some(item);
+                            Some(item)
                         }
-                        None => break None,
+                        None => None,
                     }
                 } else {
-                    break None;
+                    None
                 }
             })
         }
