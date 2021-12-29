@@ -1,8 +1,11 @@
 use crate::{
     common::*,
     config::{self, BufSize, ParParams},
-    index_stream::IndexStreamExt,
-    rt, utils,
+    index_stream::IndexStreamExt as _,
+    rt,
+    shared_stream::Shared,
+    stream::StreamExt as _,
+    utils,
 };
 use tokio::sync::{oneshot, watch, Mutex};
 
@@ -26,15 +29,13 @@ where
     ///
     /// async fn main_async() {
     ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     stream::iter(data).par_batching(None, |_worker_index, mut rx, mut tx| async move {
-    ///         while let Ok(value) = rx.recv_async().await {
+    ///     stream::iter(data).par_batching(None, |_worker_index, mut stream| async move {
+    ///         while let Some(value) = stream.next().await {
     ///             if value > 0 {
-    ///                 let result = tx.send_async(value).await;
-    ///                 if result.is_err() {
-    ///                     return;
-    ///                 }
+    ///                 return Some((value, stream));
     ///             }
     ///         }
+    ///         None
     ///     });
     /// }
     ///
@@ -57,8 +58,8 @@ where
     /// ```
     fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
-        F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
-        Fut: 'static + Future<Output = ()> + Send,
+        F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
+        Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
         T: 'static + Send,
         P: Into<ParParams>;
 
@@ -615,10 +616,10 @@ where
         rx.into_stream().boxed()
     }
 
-    fn par_batching<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
+    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
     where
-        F: FnMut(usize, flume::Receiver<Self::Item>, flume::Sender<T>) -> Fut,
-        Fut: 'static + Future<Output = ()> + Send,
+        F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
+        Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
         T: 'static + Send,
         P: Into<ParParams>,
     {
@@ -627,16 +628,28 @@ where
             buf_size,
         } = params.into();
 
-        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
+        let stream = self.shared();
 
-        rt::spawn(async move {
-            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
-        });
+        (0..num_workers).for_each(move |worker_index| {
+            let output_tx = output_tx.clone();
+            let f = f.clone();
+            let stream = stream.clone();
 
-        (0..num_workers).for_each(|worker_index| {
-            let fut = f(worker_index, input_rx.clone(), output_tx.clone());
-            rt::spawn(fut);
+            rt::spawn(async move {
+                let _ = stream::repeat(())
+                    .stateful_then(
+                        (stream, f),
+                        |(stream, mut f): (Shared<Self>, F), ()| async move {
+                            f(worker_index, stream)
+                                .await
+                                .map(move |(item, stream)| ((stream, f), item))
+                        },
+                    )
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
+            });
         });
 
         output_rx.into_stream().boxed()
@@ -1414,22 +1427,18 @@ mod tests {
         let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
         let sums: Vec<_> = stream::iter(data)
-            .par_batching(None, |_, input, output| async move {
+            .par_batching(None, |_, mut stream| async move {
                 let mut sum = 0;
 
-                while let Ok(val) = input.recv_async().await {
-                    let new_sum = sum + val;
+                while let Some(val) = stream.next().await {
+                    sum += val;
 
-                    if new_sum >= 1000 {
-                        sum = 0;
-                        let result = output.send_async(new_sum).await;
-                        if result.is_err() {
-                            break;
-                        }
-                    } else {
-                        sum = new_sum
+                    if sum >= 1000 {
+                        break;
                     }
                 }
+
+                Some((sum, stream))
             })
             .collect()
             .await;
