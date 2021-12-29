@@ -25,6 +25,7 @@ where
         TryReorderEnumerated {
             stream: self,
             commit: 0,
+            pending_error: None,
             is_terminated: false,
             buffer: HashMap::new(),
             _phantom: PhantomData,
@@ -49,6 +50,7 @@ mod try_reorder_enumerated {
     {
         pub(super) commit: usize,
         pub(super) is_terminated: bool,
+        pub(super) pending_error: Option<E>,
         pub(super) buffer: HashMap<usize, T>,
         pub(super) _phantom: PhantomData<E>,
         #[pin]
@@ -68,6 +70,15 @@ mod try_reorder_enumerated {
             Ready(loop {
                 if *this.is_terminated {
                     break None;
+                } else if let Some(err) = this.pending_error.take() {
+                    if let Some(item) = this.buffer.remove(this.commit) {
+                        *this.pending_error = Some(err);
+                        *this.commit += 1;
+                        break Some(Ok(item));
+                    } else {
+                        *this.is_terminated = true;
+                        break Some(Err(err));
+                    }
                 } else if let Some(item) = this.buffer.remove(this.commit) {
                     *this.commit += 1;
                     break Some(Ok(item));
@@ -91,8 +102,7 @@ mod try_reorder_enumerated {
                             }
                         },
                         Some(Err(err)) => {
-                            *this.is_terminated = true;
-                            break Some(Err(err));
+                            *this.pending_error = Some(err);
                         }
                         None => {
                             assert!(
