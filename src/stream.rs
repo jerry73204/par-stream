@@ -1,9 +1,13 @@
-use crate::common::*;
+use crate::{common::*, shared_stream::Shared};
 
 pub trait StreamExt
 where
     Self: Stream,
 {
+    fn shared(self) -> Shared<Self>
+    where
+        Self: Sized;
+
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut>;
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
@@ -74,6 +78,13 @@ impl<S> StreamExt for S
 where
     S: Stream,
 {
+    fn shared(self) -> Shared<Self>
+    where
+        Self: Sized,
+    {
+        Shared::new(self)
+    }
+
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut> {
         Reduce {
             fold: None,

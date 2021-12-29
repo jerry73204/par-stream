@@ -9,8 +9,10 @@ pub use futures::{
 pub use once_cell::sync::{Lazy, OnceCell};
 pub use pin_project::pin_project;
 pub use std::{
+    cell::UnsafeCell,
     cmp::{self, Ordering::*},
     collections::{hash_map, HashMap, VecDeque},
+    fmt,
     fmt::Debug,
     future::Future,
     iter,
@@ -24,7 +26,7 @@ pub use std::{
         atomic::{AtomicBool, AtomicUsize, Ordering::*},
         Arc, Weak,
     },
-    task::{Context, Poll, Poll::*},
+    task::{Context, Poll, Poll::*, Waker},
     time::Duration,
 };
 
