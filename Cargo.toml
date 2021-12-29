@@ -38,6 +38,7 @@ async-std = { version = "1.10.0", features = ["unstable", "attributes"] }
 itertools = "0.10.3"
 concurrent-slice = "0.1.0"
 tokio-stream = { version = "0.1.8", features = ["sync"] }
+structopt = "0.3.25"
 
 [features]
 runtime-async-std = ["async-std"]

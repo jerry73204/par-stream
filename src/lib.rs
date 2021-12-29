@@ -180,7 +180,7 @@ mod functions;
 mod future_factory;
 mod index_stream;
 mod par_stream;
-mod rt;
+pub mod rt;
 mod shared_stream;
 mod stream;
 mod try_index_stream;
