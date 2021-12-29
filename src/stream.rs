@@ -67,9 +67,16 @@ where
         Fut: 'static + Future<Output = Option<(T, Self)>> + Send,
         T: 'static + Send;
 
-    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>;
+    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>
+    where
+        Self: Stream,
+        F: FnMut(B, Self::Item) -> Fut,
+        Fut: Future<Output = Option<(B, T)>>;
 
-    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>;
+    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>
+    where
+        Self: Stream,
+        F: FnMut(B, Self::Item) -> Option<(B, T)>;
 }
 
 impl<S> StreamExt for S
@@ -98,7 +105,12 @@ where
         }
     }
 
-    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut> {
+    fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>
+    where
+        Self: Stream,
+        F: FnMut(B, Self::Item) -> Fut,
+        Fut: Future<Output = Option<(B, T)>>,
+    {
         StatefulThen {
             stream: self,
             future: None,
@@ -108,7 +120,11 @@ where
         }
     }
 
-    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F> {
+    fn stateful_map<T, B, F>(self, init: B, f: F) -> StatefulMap<Self, B, T, F>
+    where
+        Self: Stream,
+        F: FnMut(B, Self::Item) -> Option<(B, T)>,
+    {
         StatefulMap {
             stream: self,
             state: Some(init),
