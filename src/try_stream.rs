@@ -8,17 +8,7 @@ where
     /// Create a fallible stream that gives the current iteration count.
     ///
     /// The count wraps to zero if the count overflows.
-    fn try_enumerate(self) -> TryEnumerate<Self, Self::Ok, Self::Error>
-    where
-        Self: Sized,
-    {
-        TryEnumerate {
-            stream: self,
-            counter: 0,
-            fused: false,
-            _phantom: PhantomData,
-        }
-    }
+    fn try_enumerate(self) -> TryEnumerate<Self, Self::Ok, Self::Error>;
 
     fn catch_error(
         self,
@@ -48,6 +38,15 @@ impl<S, T, E> TryStreamExt for S
 where
     S: Stream<Item = Result<T, E>>,
 {
+    fn try_enumerate(self) -> TryEnumerate<Self, T, E> {
+        TryEnumerate {
+            counter: 0,
+            fused: false,
+            _phantom: PhantomData,
+            stream: self,
+        }
+    }
+
     fn try_stateful_then<B, U, F, Fut>(
         self,
         init: B,

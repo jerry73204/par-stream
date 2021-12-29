@@ -11,18 +11,7 @@ where
     /// Creates a fallible stream that reorders the items according to the iteration count.
     ///
     /// It is usually combined with [try_enumerate](crate::try_stream::TryStreamExt::try_enumerate).
-    fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, Self::Ok, Self::Error>
-    where
-        Self: Sized,
-    {
-        TryReorderEnumerated {
-            stream: self,
-            commit: 0,
-            is_terminated: false,
-            buffer: HashMap::new(),
-            _phantom: PhantomData,
-        }
-    }
+    fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, Self::Ok, Self::Error>;
 }
 
 impl<S, T, E> TryIndexStreamExt for S
@@ -31,6 +20,16 @@ where
 {
     type Ok = T;
     type Error = E;
+
+    fn try_reorder_enumerated(self) -> TryReorderEnumerated<Self, T, E> {
+        TryReorderEnumerated {
+            stream: self,
+            commit: 0,
+            is_terminated: false,
+            buffer: HashMap::new(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 // try_reorder_enumerated

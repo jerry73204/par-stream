@@ -4,9 +4,7 @@ pub trait StreamExt
 where
     Self: Stream,
 {
-    fn shared(self) -> Shared<Self>
-    where
-        Self: Sized;
+    fn shared(self) -> Shared<Self>;
 
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut>;
 
@@ -78,10 +76,7 @@ impl<S> StreamExt for S
 where
     S: Stream,
 {
-    fn shared(self) -> Shared<Self>
-    where
-        Self: Sized,
-    {
+    fn shared(self) -> Shared<Self> {
         Shared::new(self)
     }
 

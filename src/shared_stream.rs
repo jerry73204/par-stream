@@ -15,15 +15,21 @@ const NULL_WAKER_KEY: usize = usize::max_value();
 
 /// Stream for the [`shared`](super::StreamExt::shared) method.
 #[must_use = "streams do nothing unless you consume or poll them"]
-pub struct Shared<St: Stream> {
+pub struct Shared<St>
+where
+    St: ?Sized + Stream,
+{
     inner: Option<Arc<Inner<St>>>,
     waker_key: usize,
 }
 
-struct Inner<St: Stream> {
-    stream: UnsafeCell<St>,
+struct Inner<St>
+where
+    St: ?Sized + Stream,
+{
     state: AtomicUsize,
     notifier: Arc<Notifier>,
+    stream: UnsafeCell<St>,
 }
 
 struct Notifier {
@@ -298,7 +304,7 @@ where
 
 impl<St> Drop for Shared<St>
 where
-    St: Stream,
+    St: ?Sized + Stream,
 {
     fn drop(&mut self) {
         if self.waker_key != NULL_WAKER_KEY {

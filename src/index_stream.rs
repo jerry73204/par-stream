@@ -59,16 +59,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexedItem>
-    where
-        Self: Sized,
-    {
-        ReorderEnumerated {
-            commit: 0,
-            buffer: HashMap::new(),
-            stream: self,
-        }
-    }
+    fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexedItem>;
 }
 
 impl<S, T> IndexStreamExt for S
@@ -76,6 +67,14 @@ where
     S: Stream<Item = (usize, T)>,
 {
     type IndexedItem = T;
+
+    fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexedItem> {
+        ReorderEnumerated {
+            commit: 0,
+            buffer: HashMap::new(),
+            stream: self,
+        }
+    }
 }
 
 // reorder_enumerated
