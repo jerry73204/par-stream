@@ -1,4 +1,4 @@
-use crate::{common::*, config::ParParams, rt, utils};
+use crate::{common::*, config::ParParams, rt, stream::StreamExt as _, utils};
 
 // par_unfold
 
@@ -140,40 +140,38 @@ mod sync {
         let streams: Vec<_> = streams
             .into_iter()
             .enumerate()
-            .map(|(index, stream)| stream.map(move |item| (index, item)).boxed())
+            .map(|(stream_index, stream)| stream.map(move |item| (stream_index, item)).boxed())
             .collect();
         let num_streams = streams.len();
 
         match num_streams {
             0 => {
+                // The case that no stream provided, return empty stream
                 return stream::empty().boxed();
             }
             1 => {
+                // Fast path for single stream case
                 return streams.into_iter().next().unwrap().map(Ok).boxed();
             }
-            _ => {}
+            _ => {
+                // Fall through for multiple streams
+            }
         }
 
-        let mut select_stream = stream::select_all(streams);
-        let (input_tx, input_rx) = utils::channel(buf_size);
+        let mut input_stream =
+            stream::select_all(streams).stateful_map(key_fn, |key_fn, (index, item)| {
+                let key = key_fn(&item);
+                Some((key_fn, (index, key, item)))
+            });
         let (output_tx, output_rx) = utils::channel(buf_size);
 
-        let input_future = async move {
-            while let Some((index, item)) = select_stream.next().await {
-                let key = key_fn(&item);
-                if input_tx.send_async((index, key, item)).await.is_err() {
-                    break;
-                }
-            }
-        };
-
-        let sync_future = rt::spawn_blocking(move || {
+        rt::spawn(async move {
             let mut heap: BinaryHeap<Reverse<KV<K, S::Item>>> = BinaryHeap::new();
             let mut min_items: Vec<Option<K>> = vec![None; num_streams];
             let mut threshold: Option<K>;
 
             'worker: loop {
-                'input: while let Ok((index, key, item)) = input_rx.recv() {
+                'input: while let Some((index, key, item)) = input_stream.next().await {
                     // update min item for that stream
                     {
                         let prev = &mut min_items[index];
@@ -182,7 +180,7 @@ mod sync {
                                 *prev = key.clone();
                             }
                             Some(_) => {
-                                let ok = output_tx.send(Err((index, item))).is_ok();
+                                let ok = output_tx.send_async(Err((index, item))).await.is_ok();
                                 if !ok {
                                     break 'worker;
                                 }
@@ -230,9 +228,7 @@ mod sync {
             }
         });
 
-        let join_future = future::join(input_future, sync_future);
-
-        utils::join_future_stream(join_future, output_rx.into_stream()).boxed()
+        output_rx.into_stream().boxed()
     }
 }
 
@@ -289,9 +285,11 @@ mod try_sync {
 
         match num_streams {
             0 => {
+                // The case that no stream provided, return empty stream
                 return stream::empty().boxed();
             }
             1 => {
+                // Fast path for single stream case
                 return streams
                     .into_iter()
                     .next()
@@ -299,41 +297,33 @@ mod try_sync {
                     .and_then(|item| async move { Ok(Ok(item)) })
                     .boxed();
             }
-            _ => {}
+            _ => {
+                // Fall through for multiple streams
+            }
         }
 
-        let mut select_stream = stream::select_all(streams);
-        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
+        let mut input_stream =
+            stream::select_all(streams).stateful_map(key_fn, |key_fn, result| {
+                let result = result.map(|(index, item)| {
+                    let key = key_fn(&item);
+                    (index, key, item)
+                });
 
-        let input_future = async move {
-            while let Some(result) = select_stream.next().await {
-                match result {
-                    Ok((index, item)) => {
-                        let key = key_fn(&item);
-                        if input_tx.send_async(Ok((index, key, item))).await.is_err() {
-                            break;
-                        }
-                    }
-                    Err(err) => {
-                        let _ = input_tx.send_async(Err(err)).await;
-                        break;
-                    }
-                }
-            }
-        };
+                Some((key_fn, result))
+            });
 
-        let sync_future = rt::spawn_blocking(move || {
+        rt::spawn(async move {
             let mut heap: BinaryHeap<Reverse<KV<K, T>>> = BinaryHeap::new();
             let mut min_items: Vec<Option<K>> = vec![None; num_streams];
             let mut threshold: Option<K>;
 
             'worker: loop {
-                'input: while let Ok(result) = input_rx.recv() {
+                'input: while let Some(result) = input_stream.next().await {
                     let (index, key, item) = match result {
                         Ok(tuple) => tuple,
                         Err(err) => {
-                            let _ = output_tx.send(Err(err));
+                            let _ = output_tx.send_async(Err(err)).await;
                             break 'worker;
                         }
                     };
@@ -394,14 +384,7 @@ mod try_sync {
             }
         });
 
-        let join_future = future::join(input_future, sync_future);
-
-        stream::select(
-            join_future.into_stream().map(|_| None),
-            output_rx.into_stream().map(|item| Some(item)),
-        )
-        .filter_map(|item| async move { item })
-        .boxed()
+        output_rx.into_stream().boxed()
     }
 }
 
