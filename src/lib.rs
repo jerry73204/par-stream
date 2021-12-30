@@ -182,6 +182,7 @@ mod index_stream;
 mod par_stream;
 pub mod rt;
 mod shared_stream;
+pub mod state_stream;
 mod stream;
 mod try_index_stream;
 mod try_par_stream;
