@@ -1,5 +1,6 @@
 use crate::{
     broadcast::BroadcastGuard,
+    builder::ParBuilder,
     common::*,
     config::{self, BufSize, NumWorkers, ParParams},
     index_stream::IndexStreamExt as _,
@@ -30,6 +31,8 @@ where
         K: 'static + Send + Hash + Eq + Borrow<Q>,
         Q: Send + Hash + Eq,
         B: Into<BufSize>;
+
+    fn par_builder(self) -> ParBuilder<Self>;
 
     /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
     /// and produces the next stream element.
@@ -626,6 +629,10 @@ where
         });
 
         rx.into_stream().boxed()
+    }
+
+    fn par_builder(self) -> ParBuilder<Self> {
+        ParBuilder::new(self)
     }
 
     fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
