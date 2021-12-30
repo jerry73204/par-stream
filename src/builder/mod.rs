@@ -1,8 +1,12 @@
+mod fn_factory;
+mod future_factory;
+
+pub use fn_factory::*;
+pub use future_factory::*;
+
 use crate::{
     common::*,
     config::{NumWorkers, ParParams},
-    fn_factory::{BoxFnFactory, FnFactory},
-    future_factory::{BoxFutureFactory, FutureFactory},
     index_stream::{IndexStreamExt as _, ReorderEnumerated},
     rt,
     stream::StreamExt as _,
