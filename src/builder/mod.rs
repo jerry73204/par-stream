@@ -540,7 +540,7 @@ mod tests {
     use crate::par_stream::ParStreamExt as _;
 
     #[tokio::test]
-    async fn par_builder_async_test() {
+    async fn par_builder_blocking_test() {
         let vec: Vec<_> = stream::iter(1u64..=1000)
             .par_builder()
             .map_blocking(|val| move || val.pow(5))
@@ -551,5 +551,76 @@ mod tests {
         let expect: Vec<_> = (1u64..=1000).map(|val| val.pow(5) + 1).collect();
 
         assert_eq!(vec, expect);
+    }
+
+    #[tokio::test]
+    async fn par_builder_async_test() {
+        let vec: Vec<_> = stream::iter(1u64..=1000)
+            .par_builder()
+            .map_async(|val| async move { val.pow(5) })
+            .map_async(|val| async move { val + 1 })
+            .build_ordered_stream(None)
+            .collect()
+            .await;
+        let expect: Vec<_> = (1u64..=1000).map(|val| val.pow(5) + 1).collect();
+
+        assert_eq!(vec, expect);
+    }
+
+    #[tokio::test]
+    async fn par_builder_mixed_async_blocking_test() {
+        {
+            let vec: Vec<_> = stream::iter(1u64..=1000)
+                .par_builder()
+                .map_async(|val| async move { val.pow(5) })
+                .map_blocking(|val| move || val + 1)
+                .build_ordered_stream(None)
+                .collect()
+                .await;
+            let expect: Vec<_> = (1u64..=1000).map(|val| val.pow(5) + 1).collect();
+
+            assert_eq!(vec, expect);
+        }
+
+        {
+            let vec: Vec<_> = stream::iter(1u64..=1000)
+                .par_builder()
+                .map_blocking(|val| move || val.pow(5))
+                .map_async(|val| async move { val + 1 })
+                .build_ordered_stream(None)
+                .collect()
+                .await;
+            let expect: Vec<_> = (1u64..=1000).map(|val| val.pow(5) + 1).collect();
+
+            assert_eq!(vec, expect);
+        }
+
+        {
+            let vec: Vec<_> = stream::iter(1u64..=1000)
+                .par_builder()
+                .map_blocking(|val| move || val.pow(5))
+                .map_async(|val| async move { val + 1 })
+                .map_blocking(|val| move || val / 2)
+                .build_ordered_stream(None)
+                .collect()
+                .await;
+            let expect: Vec<_> = (1u64..=1000).map(|val| (val.pow(5) + 1) / 2).collect();
+
+            assert_eq!(vec, expect);
+        }
+
+        {
+            let vec: Vec<_> = stream::iter(1u64..=1000)
+                .par_builder()
+                .map_async(|val| async move { val.pow(5) })
+                .map_blocking(|val| move || val + 1)
+                .map_async(|val| async move { val / 2 })
+                .build_ordered_stream(None)
+                .collect()
+                .await;
+            let expect: Vec<_> = (1u64..=1000).map(|val| (val.pow(5) + 1) / 2).collect();
+
+            assert_eq!(vec, expect);
+        }
     }
 }
