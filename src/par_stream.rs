@@ -3,7 +3,7 @@ use crate::{
     builder::ParBuilder,
     common::*,
     config::{BufSize, NumWorkers, ParParams},
-    index_stream::IndexStreamExt as _,
+    index_stream::{IndexStreamExt as _, ReorderEnumerated},
     pull::PullBuilder,
     rt,
     scatter::Scatter,
@@ -12,6 +12,10 @@ use crate::{
     tee::Tee,
     utils,
 };
+use flume::r#async::RecvStream;
+
+pub type ParThen<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
+pub type ParMap<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
 
 /// An extension trait that provides parallel processing combinators on streams.
 pub trait ParStreamExt
@@ -19,7 +23,7 @@ where
     Self: 'static + Send + Stream,
     Self::Item: 'static + Send,
 {
-    fn spawned<B>(self, buf_size: B) -> BoxStream<'static, Self::Item>
+    fn spawned<B>(self, buf_size: B) -> RecvStream<'static, Self::Item>
     where
         B: Into<BufSize>;
 
@@ -71,7 +75,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
         Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
@@ -218,7 +222,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_then<T, P, F, Fut>(self, params: P, f: F) -> ParThen<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -271,7 +275,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -324,7 +328,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_map<T, P, F, Func>(self, params: P, f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -379,7 +383,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -510,7 +514,7 @@ where
     S: 'static + Send + Stream,
     S::Item: 'static + Send,
 {
-    fn spawned<B>(self, buf_size: B) -> BoxStream<'static, Self::Item>
+    fn spawned<B>(self, buf_size: B) -> RecvStream<'static, Self::Item>
     where
         B: Into<BufSize>,
     {
@@ -520,14 +524,14 @@ where
             let _ = self.map(Ok).forward(tx.into_sink()).await;
         });
 
-        rx.into_stream().boxed()
+        rx.into_stream()
     }
 
     fn par_builder(self) -> ParBuilder<Self> {
         ParBuilder::new(self)
     }
 
-    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
         Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
@@ -560,7 +564,7 @@ where
             });
         });
 
-        output_rx.into_stream().boxed()
+        output_rx.into_stream()
     }
 
     fn pull_routing<B, K, Q, F>(self, buf_size: B, key_fn: F) -> PullBuilder<Self, K, F, Q>
@@ -591,7 +595,7 @@ where
         BroadcastBuilder::new(self, buf_size)
     }
 
-    fn par_then<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
+    fn par_then<T, P, F, Fut>(self, params: P, mut f: F) -> ParThen<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -606,10 +610,9 @@ where
         self.enumerate()
             .par_then_unordered(params, indexed_f)
             .reorder_enumerated()
-            .boxed()
     }
 
-    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Fut + Send,
@@ -640,10 +643,10 @@ where
                     .await;
             });
         });
-        output_rx.into_stream().boxed()
+        output_rx.into_stream()
     }
 
-    fn par_map<T, P, F, Func>(self, params: P, mut f: F) -> BoxStream<'static, T>
+    fn par_map<T, P, F, Func>(self, params: P, mut f: F) -> ParMap<T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -656,10 +659,9 @@ where
                 move || (index, job())
             })
             .reorder_enumerated()
-            .boxed()
     }
 
-    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> BoxStream<'static, T>
+    fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> RecvStream<'static, T>
     where
         T: 'static + Send,
         F: 'static + FnMut(Self::Item) -> Func + Send,
@@ -693,7 +695,7 @@ where
             });
         });
 
-        output_rx.into_stream().boxed()
+        output_rx.into_stream()
     }
 
     fn par_reduce<P, F, Fut>(
