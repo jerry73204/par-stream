@@ -1,10 +1,15 @@
-use crate::{common::*, shared_stream::Shared};
+use crate::{common::*, shared_stream::Shared, state_stream::StateStream};
+use futures::stream::Zip;
 
 pub trait StreamExt
 where
     Self: Stream,
 {
     fn shared(self) -> Shared<Self>;
+
+    fn with_state<B>(self, init: B) -> Zip<Self, StateStream<B>>
+    where
+        Self: Sized;
 
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut>;
 
@@ -91,6 +96,13 @@ where
 {
     fn shared(self) -> Shared<Self> {
         Shared::new(self)
+    }
+
+    fn with_state<B>(self, init: B) -> Zip<Self, StateStream<B>>
+    where
+        Self: Sized,
+    {
+        self.zip(StateStream::new(init))
     }
 
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut> {
