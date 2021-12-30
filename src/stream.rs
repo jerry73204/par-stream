@@ -67,6 +67,12 @@ where
         Fut: 'static + Future<Output = Option<(T, Self)>> + Send,
         T: 'static + Send;
 
+    fn stateful_batching<T, B, F, Fut>(self, init: B, f: F) -> StatefulBatching<Self, B, T, F, Fut>
+    where
+        Self: Sized + Stream,
+        F: FnMut(B, Self) -> Fut,
+        Fut: Future<Output = Option<(T, B, Self)>>;
+
     fn stateful_then<T, B, F, Fut>(self, init: B, f: F) -> StatefulThen<Self, B, T, F, Fut>
     where
         Self: Stream,
@@ -101,6 +107,20 @@ where
             f,
             future: None,
             stream: Some(self),
+            _phantom: PhantomData,
+        }
+    }
+
+    fn stateful_batching<T, B, F, Fut>(self, init: B, f: F) -> StatefulBatching<Self, B, T, F, Fut>
+    where
+        Self: Stream,
+        F: FnMut(B, Self) -> Fut,
+        Fut: Future<Output = Option<(T, B, Self)>>,
+    {
+        StatefulBatching {
+            state: Some((init, self)),
+            future: None,
+            f,
             _phantom: PhantomData,
         }
     }
@@ -293,6 +313,52 @@ mod stateful_map {
     }
 }
 
+pub use stateful_batching::*;
+mod stateful_batching {
+    use super::*;
+
+    /// Stream for the [`stateful_batching`](super::StreamExt::stateful_batching) method.
+    #[pin_project]
+    pub struct StatefulBatching<St, B, T, F, Fut> {
+        pub(super) f: F,
+        pub(super) _phantom: PhantomData<T>,
+        #[pin]
+        pub(super) future: Option<Fut>,
+        pub(super) state: Option<(B, St)>,
+    }
+
+    impl<St, B, T, F, Fut> Stream for StatefulBatching<St, B, T, F, Fut>
+    where
+        St: Stream,
+        F: FnMut(B, St) -> Fut,
+        Fut: Future<Output = Option<(T, B, St)>>,
+    {
+        type Item = T;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut this = self.project();
+
+            Poll::Ready(loop {
+                if let Some(fut) = this.future.as_mut().as_pin_mut() {
+                    let output = ready!(fut.poll(cx));
+                    this.future.set(None);
+
+                    if let Some((item, state, stream)) = output {
+                        *this.state = Some((state, stream));
+                        break Some(item);
+                    } else {
+                        break None;
+                    }
+                } else if let Some((state, stream)) = this.state.take() {
+                    this.future.set(Some((this.f)(state, stream)));
+                } else {
+                    break None;
+                }
+            })
+        }
+    }
+}
+
 use reduce::*;
 mod reduce {
     use super::*;
@@ -390,6 +456,34 @@ mod tests {
             .await;
 
         assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    }
+
+    #[tokio::test]
+    async fn stateful_batching_test() {
+        let vec: Vec<_> = stream::iter([1i32, 1, 1, -1, -1, 1])
+            .stateful_batching(None, |mut sum: Option<i32>, mut stream| async move {
+                while let Some(val) = stream.next().await {
+                    match &mut sum {
+                        Some(sum) => {
+                            if sum.signum() == val.signum() {
+                                *sum += val;
+                            } else {
+                                return Some((*sum, Some(val), stream));
+                            }
+                        }
+                        sum => *sum = Some(val),
+                    }
+                }
+
+                match sum {
+                    Some(sum) => Some((sum, None, stream)),
+                    None => None,
+                }
+            })
+            .collect()
+            .await;
+
+        assert_eq!(vec, [3, -2, 1]);
     }
 
     #[tokio::test]
