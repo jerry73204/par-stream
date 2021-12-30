@@ -195,6 +195,7 @@ pub use config::*;
 pub use functions::*;
 pub use index_stream::*;
 pub use shared_stream::*;
+pub use state_stream::StateStream;
 pub use stream::*;
 pub use try_index_stream::*;
 pub use try_par_stream::*;
