@@ -1,25 +1,25 @@
 use crate::{common::*, config::BufSize, rt, utils};
 use tokio::sync::{oneshot, watch};
 
-/// The guard type returned from [broadcast()](ParStreamExt::broadcast).
+/// The build type returned from [broadcast()](ParStreamExt::broadcast).
 ///
-/// The guard is used to register new broadcast receivers, each consuming elements
-/// from the stream. The guard must be dropped, either by `guard.finish()` or
-/// `drop(guard)` before the receivers start consuming data. Otherwise, the
-/// receivers will receive panic.
+/// It is used to register new broadcast receivers. Each receiver consumes copies
+/// of items of the stream. The builder is finished by `guard.build()` so that
+/// registered receivers can start consuming data. Otherwise, the receivers
+/// take empty input.
 #[derive(Debug)]
-pub struct BroadcastGuard<T> {
+pub struct BroadcastBuilder<T> {
     pub(super) buf_size: Option<usize>,
     pub(super) ready_rx: watch::Receiver<()>,
     pub(super) senders_tx: Option<oneshot::Sender<Vec<flume::Sender<T>>>>,
     pub(super) senders: Option<Vec<flume::Sender<T>>>,
 }
 
-impl<T> BroadcastGuard<T>
+impl<T> BroadcastBuilder<T>
 where
     T: 'static + Send + Clone,
 {
-    pub fn new<B, St>(stream: St, buf_size: B) -> BroadcastGuard<T>
+    pub fn new<B, St>(stream: St, buf_size: B) -> BroadcastBuilder<T>
     where
         St: 'static + Send + Stream<Item = T>,
         B: Into<BufSize>,
@@ -36,8 +36,6 @@ where
 
             // tell subscribers to be ready
             if ready_tx.send(()).is_err() {
-                // return if there is not subscribers
-                debug_assert!(senders.is_empty());
                 return;
             }
 
@@ -61,7 +59,7 @@ where
             }
         });
 
-        BroadcastGuard {
+        BroadcastBuilder {
             buf_size: buf_size.into().get(),
             ready_rx,
             senders_tx: Some(senders_tx),
@@ -106,17 +104,11 @@ where
         BroadcastStream { stream }
     }
 
-    /// Drops the guard, so that created receivers can consume data without panic.
-    pub fn finish(self) {
-        drop(self)
-    }
-}
-
-impl<T> Drop for BroadcastGuard<T> {
-    fn drop(&mut self) {
+    /// Finish the builder to start broadcasting.
+    pub fn build(mut self) {
         let senders_tx = self.senders_tx.take().unwrap();
         let senders = self.senders.take().unwrap();
-        let _ = senders_tx.send(senders);
+        senders_tx.send(senders).unwrap();
     }
 }
 

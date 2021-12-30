@@ -1,5 +1,5 @@
 use crate::{
-    broadcast::BroadcastGuard,
+    broadcast::BroadcastBuilder,
     builder::ParBuilder,
     common::*,
     config::{self, BufSize, NumWorkers, ParParams},
@@ -127,7 +127,7 @@ where
         Self::Item: Clone,
         B: Into<BufSize>;
 
-    /// Converts to a [guard](BroadcastGuard) that can create receivers,
+    /// Converts to a [guard](BroadcastBuilder) that can create receivers,
     /// each receiving cloned elements from this stream.
     ///
     /// The generated receivers can produce elements only after the guard is dropped.
@@ -141,10 +141,10 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let mut guard = stream::iter(0..).broadcast(2);
-    ///     let rx1 = guard.register();
-    ///     let rx2 = guard.register();
-    ///     guard.finish(); // drop the guard
+    ///     let mut builder = stream::iter(0..).broadcast(2);
+    ///     let rx1 = builder.register();
+    ///     let rx2 = builder.register();
+    ///     builder.build(); // drop the guard
     ///
     ///     let (ret1, ret2): (Vec<_>, Vec<_>) =
     ///         join!(rx1.take(100).collect(), rx2.take(100).collect());
@@ -171,7 +171,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn broadcast<B>(self, buf_size: B) -> BroadcastGuard<Self::Item>
+    fn broadcast<B>(self, buf_size: B) -> BroadcastBuilder<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>;
@@ -691,12 +691,12 @@ where
         Tee::new(self, buf_size)
     }
 
-    fn broadcast<B>(self, buf_size: B) -> BroadcastGuard<Self::Item>
+    fn broadcast<B>(self, buf_size: B) -> BroadcastBuilder<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>,
     {
-        BroadcastGuard::new(self, buf_size)
+        BroadcastBuilder::new(self, buf_size)
     }
 
     fn par_then<T, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, T>
@@ -1122,10 +1122,10 @@ mod tests {
 
     #[tokio::test]
     async fn broadcast_test() {
-        let mut guard = stream::iter(0..).broadcast(2);
-        let rx1 = guard.register();
-        let rx2 = guard.register();
-        guard.finish();
+        let mut builder = stream::iter(0..).broadcast(2);
+        let rx1 = builder.register();
+        let rx2 = builder.register();
+        builder.build();
 
         let (ret1, ret2): (Vec<_>, Vec<_>) =
             join!(rx1.take(100).collect(), rx2.take(100).collect());

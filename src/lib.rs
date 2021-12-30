@@ -95,11 +95,11 @@
 //! async fn main_async() {
 //!     let data = vec![2, -1, 3, 5];
 //!
-//!     let mut guard = futures::stream::iter(data.clone()).broadcast(3);
-//!     let rx1 = guard.register();
-//!     let rx2 = guard.register();
-//!     let rx3 = guard.register();
-//!     guard.finish(); // the guard is dropped so that registered streams can start
+//!     let mut builder = futures::stream::iter(data.clone()).broadcast(3);
+//!     let rx1 = builder.register();
+//!     let rx2 = builder.register();
+//!     let rx3 = builder.register();
+//!     builder.build(); // the builder is dropped so that registered streams can start
 //!
 //!     let join = rx1
 //!         .map(|v| v * 2)
