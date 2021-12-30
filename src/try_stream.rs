@@ -1,4 +1,5 @@
 use crate::common::*;
+use tokio::sync::oneshot;
 
 /// An extension trait that controls ordering of items of fallible streams.
 pub trait TryStreamExt
@@ -12,16 +13,7 @@ where
 
     fn take_until_error(self) -> TakeUntilError<Self, Self::Ok, Self::Error>;
 
-    fn catch_error(
-        self,
-    ) -> (
-        BoxStream<'static, Self::Ok>,
-        BoxFuture<'static, Result<(), Self::Error>>,
-    )
-    where
-        Self: 'static + Send,
-        Self::Ok: 'static + Send,
-        Self::Error: 'static + Send;
+    fn catch_error(self) -> (ErrorNotify<Self::Error>, CatchError<Self>);
 
     fn try_stateful_then<B, U, F, Fut>(
         self,
@@ -80,30 +72,15 @@ where
         }
     }
 
-    fn catch_error(self) -> (BoxStream<'static, T>, BoxFuture<'static, Result<(), E>>)
-    where
-        S: 'static + Send,
-        T: 'static + Send,
-        E: 'static + Send,
-    {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let future = rx.map(|result| match result {
-            Ok(err) => Err(err),
-            Err(_) => Ok(()),
-        });
-        let stream = self.scan(Some(tx), |tx, result| {
-            let output = match result {
-                Ok(val) => Some(val),
-                Err(err) => {
-                    let _ = tx.take().unwrap().send(err);
-                    None
-                }
-            };
+    fn catch_error(self) -> (ErrorNotify<E>, CatchError<S>) {
+        let (tx, rx) = oneshot::channel();
+        let stream = CatchError {
+            sender: Some(tx),
+            stream: self,
+        };
+        let notify = ErrorNotify { receiver: rx };
 
-            future::ready(output)
-        });
-
-        (stream.boxed(), future.boxed())
+        (notify, stream)
     }
 }
 
@@ -334,6 +311,88 @@ mod try_enumerate {
     }
 }
 
+pub use catch_error::*;
+mod catch_error {
+    use super::*;
+
+    #[pin_project]
+    pub struct CatchError<St>
+    where
+        St: ?Sized + TryStream,
+    {
+        pub(super) sender: Option<oneshot::Sender<St::Error>>,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St> Stream for CatchError<St>
+    where
+        St: TryStream,
+    {
+        type Item = St::Ok;
+
+        fn poll_next(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Option<Self::Item>> {
+            let this = self.project();
+
+            Ready({
+                if let Some(sender) = this.sender.take() {
+                    match this.stream.try_poll_next(ctx) {
+                        Ready(Some(Ok(item))) => {
+                            *this.sender = Some(sender);
+                            Some(item)
+                        }
+                        Ready(Some(Err(err))) => {
+                            let _ = sender.send(err);
+                            None
+                        }
+                        Ready(None) => {
+                            drop(sender);
+                            None
+                        }
+                        Pending => {
+                            *this.sender = Some(sender);
+                            return Pending;
+                        }
+                    }
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    #[pin_project]
+    pub struct ErrorNotify<E> {
+        #[pin]
+        pub(super) receiver: oneshot::Receiver<E>,
+    }
+
+    impl<E> ErrorNotify<E> {
+        pub fn try_catch(mut self) -> ControlFlow<Result<(), E>, Self> {
+            use oneshot::error::TryRecvError::*;
+
+            match self.receiver.try_recv() {
+                Ok(err) => Break(Err(err)),
+                Err(Empty) => Continue(self),
+                Err(Closed) => Break(Ok(())),
+            }
+        }
+    }
+
+    impl<E> Future for ErrorNotify<E> {
+        type Output = Result<(), E>;
+
+        fn poll(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<Self::Output> {
+            let this = self.project();
+
+            Ready(match ready!(this.receiver.poll(ctx)) {
+                Ok(err) => Err(err),
+                Err(_) => Ok(()),
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -423,6 +482,88 @@ mod tests {
             assert_eq!(stream.next().await, Some(Ok(3)));
             assert_eq!(stream.next().await, Some(Ok(4)));
             assert_eq!(stream.next().await, None);
+        }
+    }
+
+    #[tokio::test]
+    async fn catch_error_test() {
+        {
+            let (notify, stream) = stream::empty::<Result<(), ()>>().catch_error();
+
+            let vec: Vec<_> = stream.collect().await;
+            let result = notify.await;
+
+            assert_eq!(vec, []);
+            assert_eq!(result, Ok(()));
+        }
+
+        {
+            let (notify, stream) =
+                stream::iter([Result::<_, ()>::Ok(0), Ok(1), Ok(2), Ok(3)]).catch_error();
+
+            let vec: Vec<_> = stream.collect().await;
+            let result = notify.await;
+
+            assert_eq!(vec, [0, 1, 2, 3]);
+            assert_eq!(result, Ok(()));
+        }
+
+        {
+            let (notify, stream) = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)]).catch_error();
+
+            let vec: Vec<_> = stream.collect().await;
+            let result = notify.await;
+
+            assert_eq!(vec, [0, 1]);
+            assert_eq!(result, Err(2));
+        }
+
+        {
+            let (notify, mut stream) = stream::empty::<Result<(), ()>>().catch_error();
+
+            let notify = match notify.try_catch() {
+                Continue(notify) => notify,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(stream.next().await, None);
+            assert!(matches!(notify.try_catch(), Break(Ok(()))));
+        }
+
+        {
+            let (notify, mut stream) = stream::iter([Result::<_, ()>::Ok(0)]).catch_error();
+
+            let notify = match notify.try_catch() {
+                Continue(notify) => notify,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(stream.next().await, Some(0));
+            let notify = match notify.try_catch() {
+                Continue(notify) => notify,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(stream.next().await, None);
+            assert!(matches!(notify.try_catch(), Break(Ok(()))));
+        }
+
+        {
+            let (notify, mut stream) = stream::iter([Ok(0), Err(2)]).catch_error();
+
+            let notify = match notify.try_catch() {
+                Continue(notify) => notify,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(stream.next().await, Some(0));
+            let notify = match notify.try_catch() {
+                Continue(notify) => notify,
+                _ => unreachable!(),
+            };
+
+            assert_eq!(stream.next().await, None);
+            assert!(matches!(notify.try_catch(), Break(Err(2))));
         }
     }
 }

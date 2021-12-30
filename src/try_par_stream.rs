@@ -277,7 +277,7 @@ where
         Fut: 'static + Future<Output = Result<U, E>> + Send,
         P: Into<ParParams>,
     {
-        let (input_stream, input_error) = self.catch_error();
+        let (input_error, input_stream) = self.catch_error();
         let output_stream = input_stream.par_then_unordered(params, f);
 
         stream::select(
@@ -323,7 +323,7 @@ where
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, E> + Send,
     {
-        let (input_stream, input_error) = self.catch_error();
+        let (input_error, input_stream) = self.catch_error();
         let output_stream = input_stream.par_map_unordered(params, f);
 
         stream::select(
