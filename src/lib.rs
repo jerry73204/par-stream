@@ -172,6 +172,7 @@ pub mod prelude {
     };
 }
 
+mod broadcast;
 mod builder;
 mod common;
 mod config;
@@ -181,22 +182,27 @@ mod future_factory;
 mod index_stream;
 mod par_stream;
 pub mod rt;
+mod scatter;
 mod shared_stream;
 pub mod state_stream;
 mod stream;
+mod tee;
 mod try_index_stream;
 mod try_par_stream;
 mod try_stream;
 mod utils;
 
 pub use crate::par_stream::*;
+pub use broadcast::*;
 pub use builder::*;
 pub use config::*;
 pub use functions::*;
 pub use index_stream::*;
+pub use scatter::*;
 pub use shared_stream::*;
 pub use state_stream::StateStream;
 pub use stream::*;
+pub use tee::*;
 pub use try_index_stream::*;
 pub use try_par_stream::*;
 pub use try_stream::*;
