@@ -17,14 +17,6 @@ where
     Self::Ok: 'static + Send,
     Self::Error: 'static + Send,
 {
-    /// A fallible analogue to [batching](crate::ParStreamExt::batching) that consumes
-    /// as many elements as it likes for each next output element.
-    fn try_batching<U, F, Fut>(self, f: F) -> BoxStream<'static, Result<U, Self::Error>>
-    where
-        U: 'static + Send,
-        F: FnOnce(flume::Receiver<Self::Ok>, flume::Sender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
-
     /// A fallible analogue to [par_batching](crate::ParStreamExt::par_batching).
     fn try_par_batching<U, P, F, Fut>(
         self,
@@ -115,64 +107,6 @@ where
     T: 'static + Send,
     E: 'static + Send,
 {
-    fn try_batching<U, F, Fut>(self, f: F) -> BoxStream<'static, Result<U, E>>
-    where
-        U: 'static + Send,
-        F: FnOnce(flume::Receiver<T>, flume::Sender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
-    {
-        let mut stream = self.boxed();
-
-        let (input_tx, input_rx) = flume::bounded(0);
-        let (output_tx, output_rx) = flume::bounded(0);
-
-        let input_future = async move {
-            while let Some(item) = stream.try_next().await? {
-                let result = input_tx.send_async(item).await;
-                if result.is_err() {
-                    break;
-                }
-            }
-            Ok(())
-        };
-        let batching_future = f(input_rx, output_tx);
-        let join_future = future::try_join(input_future, batching_future);
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_future.into_stream().map(|result| result.map(|_| None)),
-        )
-        .boxed();
-
-        stream::try_unfold(
-            (Some(select_stream), None),
-            move |(mut stream, error)| async move {
-                if let Some(stream_) = &mut stream {
-                    match stream_.next().await {
-                        Some(Ok(Some(output))) => return Ok(Some((Some(output), (stream, error)))),
-                        Some(Ok(None)) => {
-                            return Ok(Some((None, (stream, error))));
-                        }
-                        Some(Err(err)) => {
-                            return Ok(Some((None, (stream, Some(err)))));
-                        }
-                        None => {
-                            // stream = None;
-                        }
-                    }
-                }
-
-                if let Some(error) = error {
-                    return Err(error);
-                }
-
-                Ok(None)
-            },
-        )
-        .try_filter_map(|item| async move { Ok(item) })
-        .boxed()
-    }
-
     fn try_par_batching<U, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
     where
         P: Into<ParParams>,
@@ -533,88 +467,6 @@ mod tests {
                     }
                 }
             }
-            assert!(stream.next().await.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn try_batching_test() {
-        {
-            let mut stream = stream::iter(0..10)
-                .map(Ok)
-                .try_batching::<usize, _, _>(|_, _| async move { Err("init error") });
-
-            assert_eq!(stream.next().await, Some(Err("init error")));
-            assert!(stream.next().await.is_none());
-        }
-
-        {
-            let mut stream = stream::iter(0..10)
-                .map(Ok)
-                .try_batching(|input, output| async move {
-                    let mut sum = 0;
-
-                    while let Ok(val) = input.recv_async().await {
-                        let new_sum = val + sum;
-
-                        if new_sum >= 10 {
-                            sum = 0;
-                            let result = output.send_async(new_sum).await;
-                            if result.is_err() {
-                                break;
-                            }
-                        } else {
-                            sum = new_sum;
-                        }
-                    }
-
-                    if sum == 0 {
-                        Ok(())
-                    } else {
-                        dbg!();
-                        Err("some elements are left behind")
-                    }
-                });
-
-            assert_eq!(stream.next().await, Some(Ok(10)));
-            assert_eq!(stream.next().await, Some(Ok(11)));
-            assert_eq!(stream.next().await, Some(Ok(15)));
-            assert!(matches!(stream.next().await, Some(Err(_))));
-            assert!(stream.next().await.is_none());
-        }
-
-        {
-            let mut stream = stream::iter(0..10)
-                .map(Ok)
-                .try_batching(|input, output| async move {
-                    let mut sum = 0;
-
-                    while let Ok(val) = input.recv_async().await {
-                        let new_sum = val + sum;
-
-                        if new_sum >= 15 {
-                            return Err("too large");
-                        } else if new_sum >= 10 {
-                            sum = 0;
-                            let result = output.send_async(new_sum).await;
-                            if result.is_err() {
-                                break;
-                            }
-                        } else {
-                            sum = new_sum;
-                        }
-                    }
-
-                    if input.recv_async().await.is_err() {
-                        Ok(())
-                    } else {
-                        Err("some elements are left behind")
-                    }
-                });
-
-            assert_eq!(stream.next().await, Some(Ok(10)));
-            assert_eq!(stream.next().await, Some(Ok(11)));
-            assert_eq!(stream.next().await, Some(Err("too large")));
             assert!(stream.next().await.is_none());
         }
     }
