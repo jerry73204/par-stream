@@ -1,4 +1,5 @@
 use crate::{common::*, config::BufSize, rt, utils};
+use flume::r#async::RecvStream;
 
 pub struct PullBuilder<St, K, F, Q = K>
 where
@@ -34,19 +35,19 @@ where
         }
     }
 
-    pub fn register(&mut self, key: K) -> Option<flume::Receiver<St::Item>> {
+    pub fn register(&mut self, key: K) -> Option<RecvStream<'static, St::Item>> {
         use std::collections::hash_map::Entry as E;
 
         if let E::Vacant(entry) = self.senders.entry(key) {
             let (tx, rx) = utils::channel(self.buf_size);
             entry.insert(tx);
-            Some(rx)
+            Some(rx.into_stream())
         } else {
             None
         }
     }
 
-    pub fn build(self) -> flume::Receiver<St::Item> {
+    pub fn build(self) -> RecvStream<'static, St::Item> {
         let Self {
             mut key_fn,
             senders,
@@ -73,7 +74,7 @@ where
             }
         });
 
-        leak_rx
+        leak_rx.into_stream()
     }
 }
 
@@ -87,16 +88,16 @@ mod tests {
         let mut builder = stream::iter([("A", 1), ("B", 2), ("C", 3), ("D", 4)])
             .pull_routing(None, |&(key, _)| key);
 
-        let rx_a = builder.register("A").unwrap();
-        let rx_b = builder.register("B").unwrap();
-        let rx_c = builder.register("C").unwrap();
-        let rx_leak = builder.build();
+        let stream_a = builder.register("A").unwrap();
+        let stream_b = builder.register("B").unwrap();
+        let stream_c = builder.register("C").unwrap();
+        let stream_leak = builder.build();
 
         let join: Vec<Vec<_>> = future::join_all([
-            rx_a.into_stream().collect(),
-            rx_b.into_stream().collect(),
-            rx_c.into_stream().collect(),
-            rx_leak.into_stream().collect(),
+            stream_a.collect(),
+            stream_b.collect(),
+            stream_c.collect(),
+            stream_leak.collect(),
         ])
         .await;
 
