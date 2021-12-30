@@ -9,6 +9,7 @@ pub use futures::{
 pub use once_cell::sync::{Lazy, OnceCell};
 pub use pin_project::pin_project;
 pub use std::{
+    borrow::Borrow,
     cell::UnsafeCell,
     cmp::{self, Ordering::*},
     collections::{hash_map, HashMap, VecDeque},

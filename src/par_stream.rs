@@ -3,6 +3,7 @@ use crate::{
     common::*,
     config::{self, BufSize, NumWorkers, ParParams},
     index_stream::IndexStreamExt as _,
+    pull::PullBuilder,
     rt,
     scatter::Scatter,
     shared_stream::Shared,
@@ -19,6 +20,15 @@ where
 {
     fn spawned<B>(self, buf_size: B) -> BoxStream<'static, Self::Item>
     where
+        B: Into<BufSize>;
+
+    fn pull_routing<B, K, Q, F>(self, buf_size: B, key_fn: F) -> PullBuilder<Self, K, F, Q>
+    where
+        Self: 'static + Send + Stream,
+        Self::Item: 'static + Send,
+        F: 'static + Send + FnMut(&Self::Item) -> Q,
+        K: 'static + Send + Hash + Eq + Borrow<Q>,
+        Q: Send + Hash + Eq,
         B: Into<BufSize>;
 
     /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
