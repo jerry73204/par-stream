@@ -6,7 +6,6 @@ use crate::{
     index_stream::{IndexStreamExt as _, ReorderEnumerated},
     pull::PullBuilder,
     rt,
-    scatter::Scatter,
     shared_stream::Shared,
     stream::StreamExt as _,
     tee::Tee,
@@ -435,63 +434,15 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn par_reduce<P, F, Fut>(
+    fn par_reduce<N, F, Fut>(
         self,
-        params: P,
+        num_workers: N,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send;
-
-    /// Splits the stream into a receiver and a future.
-    ///
-    /// The returned future scatters input items into the receiver and its clones,
-    /// and should be manually awaited by user.
-    ///
-    /// The returned receiver can be cloned and distributed to resepctive workers.
-    ///
-    /// It lets user to write custom workers that receive items from the same stream.
-    ///
-    /// ```rust
-    /// use futures::{join, prelude::*};
-    /// use par_stream::prelude::*;
-    ///
-    /// async fn main_async() {
-    ///     let orig = stream::iter(1isize..=1000);
-    ///
-    ///     // scatter the items
-    ///     let rx1 = orig.scatter(None);
-    ///     let rx2 = rx1.clone();
-    ///
-    ///     // collect the values concurrently
-    ///     let (values1, values2): (Vec<_>, Vec<_>) = join!(rx1.collect(), rx2.collect());
-    ///
-    ///     // the total item count is equal to the original set
-    ///     assert_eq!(values1.len() + values2.len(), 1000);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
-    /// ```
-    fn scatter<B>(self, buf_size: B) -> Scatter<Self::Item>
-    where
-        B: Into<BufSize>;
 
     /// Runs an asynchronous task on each element of an stream in parallel.
     fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
@@ -698,46 +649,41 @@ where
         output_rx.into_stream()
     }
 
-    fn par_reduce<P, F, Fut>(
+    fn par_reduce<N, F, Fut>(
         self,
-        params: P,
+        num_workers: N,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        P: Into<ParParams>,
+        N: Into<NumWorkers>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send,
     {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
+        let num_workers = num_workers.into().get();
         let stream = self.shared();
 
         // phase 1
-        let phase_1_future = async move {
-            let reducer_futures = {
-                let reduce_fn = reduce_fn.clone();
-
-                (0..num_workers).map(move |_| {
-                    let stream = stream.clone();
+        let phase_1_future = {
+            let reduce_fn = reduce_fn.clone();
+            async move {
+                let reducer_futures = (0..num_workers).map(move |_| {
                     let mut reduce_fn = reduce_fn.clone();
+                    let stream = stream.clone();
 
                     rt::spawn(
                         async move { stream.reduce(|fold, item| reduce_fn(fold, item)).await },
                     )
-                })
-            };
-            let values = future::join_all(reducer_futures).await;
+                });
 
-            (values, reduce_fn)
+                future::join_all(reducer_futures).await
+            }
         };
 
         // phase 2
         let phase_2_future = async move {
-            let (values, reduce_fn) = phase_1_future.await;
+            let values = phase_1_future.await;
 
-            let (pair_tx, pair_rx) = utils::channel(buf_size);
+            let (pair_tx, pair_rx) = utils::channel(num_workers);
             let (feedback_tx, feedback_rx) = flume::bounded(num_workers);
 
             let mut count = 0;
@@ -749,25 +695,23 @@ where
                 }
             }
 
-            let pairing_future = {
-                rt::spawn(async move {
-                    while count >= 2 {
-                        let first = feedback_rx.recv_async().await.unwrap();
-                        let second = feedback_rx.recv_async().await.unwrap();
-                        pair_tx.send_async((first, second)).await.unwrap();
-                        count -= 1;
-                    }
+            let pairing_future = rt::spawn(async move {
+                while count >= 2 {
+                    let first = feedback_rx.recv_async().await.unwrap();
+                    let second = feedback_rx.recv_async().await.unwrap();
+                    pair_tx.send_async((first, second)).await.unwrap();
+                    count -= 1;
+                }
 
-                    match count {
-                        0 => None,
-                        1 => {
-                            let output = feedback_rx.recv_async().await.unwrap();
-                            Some(output)
-                        }
-                        _ => unreachable!(),
+                match count {
+                    0 => None,
+                    1 => {
+                        let output = feedback_rx.recv_async().await.unwrap();
+                        Some(output)
                     }
-                })
-            };
+                    _ => unreachable!(),
+                }
+            });
 
             let worker_futures = (0..num_workers).map(move |_| {
                 let pair_rx = pair_rx.clone();
@@ -792,13 +736,6 @@ where
         };
 
         phase_2_future.boxed()
-    }
-
-    fn scatter<B>(self, buf_size: B) -> Scatter<Self::Item>
-    where
-        B: Into<BufSize>,
-    {
-        Scatter::new(self, buf_size)
     }
 
     fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
