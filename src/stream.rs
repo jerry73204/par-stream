@@ -11,6 +11,10 @@ where
     where
         Self: Sized;
 
+    fn wait_for<Fut>(self, fut: Fut) -> WaitFor<Self, Fut>
+    where
+        Fut: Future<Output = bool>;
+
     fn reduce<F, Fut>(self, f: F) -> Reduce<Self, F, Fut>;
 
     /// A combinator that consumes as many elements as it likes, and produces the next stream element.
@@ -110,6 +114,17 @@ where
             fold: None,
             f,
             future: None,
+            stream: self,
+        }
+    }
+
+    fn wait_for<Fut>(self, fut: Fut) -> WaitFor<Self, Fut>
+    where
+        Fut: Future<Output = bool>,
+    {
+        WaitFor {
+            is_terminated: false,
+            future: Some(fut),
             stream: self,
         }
     }
@@ -419,9 +434,91 @@ mod reduce {
     }
 }
 
+use wait_for::*;
+mod wait_for {
+    use super::*;
+
+    #[pin_project]
+    pub struct WaitFor<St, Fut>
+    where
+        St: ?Sized + Stream,
+        Fut: Future<Output = bool>,
+    {
+        pub(super) is_terminated: bool,
+        #[pin]
+        pub(super) future: Option<Fut>,
+        #[pin]
+        pub(super) stream: St,
+    }
+
+    impl<St, Fut> Stream for WaitFor<St, Fut>
+    where
+        St: Stream,
+        Fut: Future<Output = bool>,
+    {
+        type Item = St::Item;
+
+        fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            let mut this = self.project();
+
+            Ready(loop {
+                if *this.is_terminated {
+                    break None;
+                }
+                if let Some(mut future) = this.future.as_mut().as_pin_mut() {
+                    let ok = ready!(future.poll_unpin(cx));
+                    this.future.set(None);
+
+                    if !ok {
+                        *this.is_terminated = true;
+                        break None;
+                    }
+                } else {
+                    break ready!(this.stream.poll_next(cx));
+                }
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rt;
+    use std::time::Instant;
+
+    #[tokio::test]
+    async fn stream_wait_for_future_test() {
+        let wait = Duration::from_millis(200);
+
+        {
+            let instant = Instant::now();
+            let vec: Vec<_> = stream::iter([3, 1, 4])
+                .wait_for(async move {
+                    rt::sleep(wait).await;
+                    true
+                })
+                .collect()
+                .await;
+
+            assert!(instant.elapsed() >= wait);
+            assert_eq!(vec, [3, 1, 4]);
+        }
+
+        {
+            let instant = Instant::now();
+            let vec: Vec<_> = stream::iter([3, 1, 4])
+                .wait_for(async move {
+                    rt::sleep(wait).await;
+                    false
+                })
+                .collect()
+                .await;
+
+            assert!(instant.elapsed() >= wait);
+            assert_eq!(vec, []);
+        }
+    }
 
     #[tokio::test]
     async fn reduce_test() {
