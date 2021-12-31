@@ -1,167 +1,232 @@
-//! Asynchronous parallel streams analogous to [rayon](https://github.com/rayon-rs/rayon).
+//! Parallel processing libray for asynchronous streams.
 //!
 //! # Cargo Features
 //!
-//! The following cargo features select the backend runtime for concurrent workers.
+//! The following cargo features select the backend runtime for parallel workers.
 //! One of them must be specified, otherwise the crate raises a compile error.
 //!
 //! - `runtime-tokio` enables the [tokio] multi-threaded runtime.
 //! - `runtime-async-std` enables the [async-std](async_std) default runtime.
 //!
-//! # Combinators
+//! # Extension Traits
 //!
-//! ## Usage
-//!
-//! The crate provides extension traits to add new combinators to existing [streams](futures::stream::Stream),
-//! that are targeted for parallel computing and concurrent data processing. Most traits can be found at [`prelude`](prelude).
-//!
-//! The extension traits can be imported from [`prelude`](prelude).
+//! Extension traits extends existing [Stream](futures::Stream) with extra combinators to existing streams.
+//! They can be imported from [prelude] for convenience.
 //!
 //! ```rust
 //! use par_stream::prelude::*;
 //! ```
 //!
-//! ## Parallel Processing
+//! Stream combinators are provided by distinct traits according to the capability of the stream.
 //!
-//! - [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) processes stream items in parallel closures.
-//! - [`stream.par_then(config, fut)`](ParStreamExt::par_then) processes stream items in parallel futures.
-//! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) and [`par_then_unordered()`](ParStreamExt::par_then_unordered)
-//!   are unordered variances.
+//!
+//! ### Traits for non-parallel stream item manipulation
+//!
+//! - [StreamExt](crate::StreamExt) requires `Self: Stream`
+//! - [TryStreamExt](crate::TryStreamExt) requires `Self: TryStream`
+//!
+//! ### Traits for stream element ordering
+//!
+//! - [IndexStreamExt](crate::IndexStreamExt) requires `Self: Stream<Item = (usize, T)>`
+//! - [TryIndexStreamExt](crate::TryIndexStreamExt) requires `Stream<Item = Result<(usize, T), E>>`
+//!
+//! ### Traits for parallel processing
+//!
+//! - [ParStreamExt](crate::ParStreamExt) requires
+//!   - `Self: 'static + Send + Stream` and
+//!   - `Self::Item: 'static + Send`
+//! - [TryParStreamExt](crate::TryParStreamExt) requires
+//!   - `Self: 'static + Send + Stream<Item = Result<T, E>>`,
+//!   - `T: 'static + Send` and
+//!   - `E: 'static + Send`
+//!
+//! # Parallel Processing
+//!
+//! These combinators run parallel tasks on the stream, either in ordered/unordered and fallible or not manner.
+//! - [`par_map()`](ParStreamExt::par_map) runs parallel blocking task respecting input order.
+//! - [`par_then()`](ParStreamExt::par_then) runs parallel asynchronous task respecting input order.
+//! - [`par_map_unordered()`](ParStreamExt::par_map_unordered) runs parallel blocking task without respecting input order.
+//! - [`par_then_unordered()`](ParStreamExt::par_then_unordered) runs parallel asynchronous task without respecting input order.
 //! - [`try_par_map()`](TryParStreamExt::try_par_map), [`try_par_then()`](TryParStreamExt::try_par_then),
 //!   [`try_par_then_unordered()`](TryParStreamExt::try_par_then_unordered) are the fallible variances.
 //!
-//! ## Distributing Patterns
+//! Chaining the combinators above establishes a parallel processing dataflow.
 //!
-//! - [`stream.broadcast(buf_size)`](ParStreamExt::broadcast) broadcasts element copies to multiple receivers.
-//!   Each receiver are guaranteed to retrieve the same set of items.
-//! - [`stream.tee(buf_size)`](ParStreamExt::tee) creates receivers to recieve copied elements.
-//!   Unlike [`stream.broadcast(buf_size)`](ParStreamExt::broadcast), it can create new receivers after
-//!   existing receivers start consuming items. Receivers created lately may miss some of the elements.
-//! - [`stream.spawned()`](ParStreamExt::spawned) sends each element to one of existing receivers.
-//! - [`sync_by_key(buf_size, key_fn, streams)`](sync_by_key) synchronizes multiple streams by pairing up
-//!   the key of each item from input streams.
+//! ```
+//! # par_stream::rt::block_on_executor(async move {
+//! use futures::stream::{self, StreamExt as _};
+//! use par_stream::{IndexStreamExt as _, ParStreamExt as _};
 //!
-//! ### Scatter-Gather Pattern
+//! let vec: Vec<_> = stream::iter(0i64..1000)
+//!     // a series of unordered parallel tasks
+//!     .par_then(None, |val| async move { val.pow(2) })
+//!     .par_then(None, |val| async move { val * 2 })
+//!     .par_then(None, |val| async move { val + 1 })
+//!     .collect()
+//!     .await;
 //!
-//! The combinators can construct a scatter-gather pattern that passes each to one of concurrent workers,
-//! and gathers the outputs together.
-//!
-//! ```rust
-//! # use futures::stream::{StreamExt as _, self};
-//! # use par_stream::ParStreamExt as _;
-//! # use std::collections::HashSet;
-//!
-//! async fn main_async() {
-//!     let orig = futures::stream::iter(0..1000);
-//!
-//!     // scatter stream items to two receivers
-//!     let rx1 = orig.spawned(None);
-//!     let rx2 = rx1.clone();
-//!
-//!     // gather back from two receivers
-//!     let values: HashSet<_> = stream::select(rx1, rx2).collect().await;
-//!
-//!     // the gathered values have equal content with the original
-//!     assert_eq!(values, (0..1000).collect::<HashSet<_>>());
-//! }
-//!
-//! # #[cfg(feature = "runtime-async-std")]
-//! # #[async_std::main]
-//! # async fn main() {
-//! #     main_async().await
-//! # }
-//! #
-//! # #[cfg(feature = "runtime-tokio")]
-//! # #[tokio::main]
-//! # async fn main() {
-//! #     main_async().await
-//! # }
-//! #
-//! # #[cfg(feature = "runtime-smol")]
-//! # fn main() {
-//! #     smol::block_on(main_async())
-//! # }
+//! itertools::assert_equal(vec, (0i64..1000).map(|val| val.pow(2) * 2 + 1));
+//! # })
 //! ```
 //!
-//! ### Broadcast-Zip Pattern
+//! # Unordered Parallel Processing
 //!
-//! Another example is to construct a broadcast-zip pattern that clones each element to
-//! several concurrent workers, and pairs up outputs from each worker.
+//! The crate provides item reordering combinators.
 //!
-//! ```rust
-//! # use futures::prelude::*;
-//! # use par_stream::prelude::*;
+//! - [`reorder_enumerated()`](IndexStreamExt::reorder_enumerated) reorders the items `(index, value)`
+//!   according to the index number.
+//! - [`try_reorder_enumerated()`](TryIndexStreamExt::try_reorder_enumerated) is the fallible coutnerpart.
 //!
-//! async fn main_async() {
-//!     let data = vec![2, -1, 3, 5];
+//! They can be combined with either
+//! [enumerate()](futures::StreamExt::enumerate) from [futures] crate or the fallible counterpart
+//! [try_enumerate()](TryStreamExt::try_enumerate) from this crate
+//! to establish an unordered data processing flow.
 //!
-//!     let mut builder = futures::stream::iter(data.clone()).broadcast(3, true);
-//!     let rx1 = builder.register();
-//!     let rx2 = builder.register();
-//!     let rx3 = builder.register();
-//!     builder.build(); // the builder is dropped so that registered streams can start
-//!
-//!     let join = rx1
-//!         .map(|v| v * 2)
-//!         .zip(rx2.map(|v| v * 3))
-//!         .zip(rx3.map(|v| v * 5));
-//!
-//!     let collected: Vec<_> = join.collect().await;
-//!     assert_eq!(
-//!         collected,
-//!         vec![((4, 6), 10), ((-2, -3), -5), ((6, 9), 15), ((10, 15), 25)]
-//!     );
-//! }
-//!
-//! # #[cfg(feature = "runtime-async-std")]
-//! # #[async_std::main]
-//! # async fn main() {
-//! #     main_async().await
-//! # }
-//! #
-//! # #[cfg(feature = "runtime-tokio")]
-//! # #[tokio::main]
-//! # async fn main() {
-//! #     main_async().await
-//! # }
-//! #
-//! # #[cfg(feature = "runtime-smol")]
-//! # fn main() {
-//! #     smol::block_on(main_async())
-//! # }
 //! ```
+//! # par_stream::rt::block_on_executor(async move {
+//! use futures::stream::{self, StreamExt as _};
+//! use par_stream::{IndexStreamExt as _, ParStreamExt as _};
 //!
-//! ## Item Ordering
-//!
-//! - [`stream.reorder_enumerated()`](IndexStreamExt::reorder_enumerated) accepts a `(usize, T)` typed stream and
-//!   reorder the items according to the index number.
-//!
-//! The item ordering combinators are usually combined with unordered concurrent processing methods,
-//! allowing on-demand data passing between stages.
-//!
-//! ```ignore
-//! stream
-//!     // mark items with index numbers
+//! let vec: Vec<_> = stream::iter(0i64..1000)
+//!     // add index number to each item
 //!     .enumerate()
-//!     // a series of unordered maps
-//!     .par_then_unordered(config, map_fn)
-//!     .par_then_unordered(config, map_fn)
-//!     .par_then_unordered(config, map_fn)
-//!     // reorder the items back by indexes
+//!     // a series of unordered parallel tasks
+//!     .par_then_unordered(None, |(index, val)| async move { (index, val.pow(2)) })
+//!     .par_then_unordered(None, |(index, val)| async move { (index, val * 2) })
+//!     .par_then_unordered(None, |(index, val)| async move { (index, val + 1) })
+//!     // reorder the items back by index number
 //!     .reorder_enumerated()
+//!     .collect()
+//!     .await;
+//!
+//! itertools::assert_equal(vec, (0i64..1000).map(|val| val.pow(2) * 2 + 1));
+//! # })
 //! ```
 //!
-//! ## Configure Number of Workers
+//! # Anycast Pattern
 //!
-//! The `config` parameter of [`stream.par_map(config, map_fn)`](ParStreamExt::par_map) controls
-//! the number of concurrent workers and internal buffer size. It accepts the following values.
+//! - [`shared()`](StreamExt::shared) creates stream handles that can be sent to multiple receivers.
+//!   Polling the handle will poll the underlying stream in lock-free manner. By consuming the handle,
+//!   the receiver takes a portion of stream items.
+//! - [`spawned()`](ParStreamExt::spawned) spawns an active worker to forward stream items to a channel.
+//!   The channel can be cloned and be sent to multiple receivers, so that each receiver takes a portion of stream items.
 //!
-//! - `None`: The number of workers defaults to the number of system processors.
-//! - `10` or non-zero integers: 10 workers.
-//! - `2.5` or non-zero floating points: The number of worker is 2.5 times the system processors.
-//! - `(10, 15)`: 10 workers and internal buffer size 15.
+//! Both `shared()` and `spawned()` splits the ownership of the stream into multiple receivers. They differ in
+//! performance considerations. The `spawned()` methods spawns an active worker and allocates an extra buffer while
+//! `shared()` does not. In most cases, their performance are comparable.
 //!
-//! If the buffer size is not specified, the default is the double of number of workers.
+//! The combinators can work with [`select()`](futures::stream::select) to construct a scatter-gather dataflow.
+//!
+//! ```rust
+//! # par_stream::rt::block_on_executor(async move {
+//! use futures::stream::{self, StreamExt as _};
+//! use par_stream::{ParStreamExt as _, StreamExt as _};
+//! use std::collections::HashSet;
+//!
+//! let stream = futures::stream::iter(0..1000);
+//!
+//! // scatter stream items to two receivers
+//! let share1 = stream.shared(); // or stream.scatter(buf_size)
+//! let share2 = share1.clone();
+//!
+//! // process elements in separate parallel workers
+//! let receiver1 = share1.map(|val| val * 2).spawned(None);
+//! let receiver2 = share2.map(|val| val * 2).spawned(None);
+//!
+//! // gather values back from receivers
+//! let mut vec: Vec<_> = stream::select(receiver1, receiver2).collect().await;
+//!
+//! // verify output values
+//! vec.sort();
+//! itertools::assert_equal(vec, (0..2000).step_by(2));
+//! # })
+//! ```
+//!
+//! # Broadcast Pattern
+//!
+//! - [`broadcast()`](ParStreamExt::broadcast) broadcasts copies of stream items to receivers.
+//!   Receivers are registered before starting taking items and are guaranteed to start from the first item.
+//! - [`tee()`](ParStreamExt::tee) is similar to `broadcast()`, but can register new receiver after starting taking items.
+//!   Receivers are not guaranteed to start from the first item.
+//!
+//! The `broadcast()` can work with [zip()](futures::StreamExt::zip) to construct a broadcast-join dataflow.
+//!
+//! ```rust
+//! # par_stream::rt::block_on_executor(async move {
+//! use futures::prelude::*;
+//! use par_stream::prelude::*;
+//!
+//! let data = vec![2, -1, 3, 5];
+//! let stream = futures::stream::iter(data.clone());
+//!
+//! // broadcast the stream into three receivers
+//! let mut builder = stream.broadcast(None, true);
+//! let rx1 = builder.register();
+//! let rx2 = builder.register();
+//! let rx3 = builder.register();
+//! builder.build(); // finish the builder to start consuming items
+//!
+//! // spawn a parallel processor for each receiver
+//! let stream1 = rx1.map(|v| v * 2).spawned(None);
+//! let stream2 = rx2.map(|v| v * 3).spawned(None);
+//! let stream3 = rx3.map(|v| v * 5).spawned(None);
+//!
+//! // collect output values
+//! let vec: Vec<_> = stream1
+//!     .zip(stream2)
+//!     .zip(stream3)
+//!     .map(|((v1, v2), v3)| (v1, v2, v3))
+//!     .collect()
+//!     .await;
+//!
+//! // verify output values
+//! assert_eq!(vec, [(4, 6, 10), (-2, -3, -5), (6, 9, 15), (10, 15, 25)]);
+//! # })
+//! ```
+//!
+//! # Parallel Data Generation
+//!
+//! The following combniators spawn parallel workers, each producing items individually.
+//!
+//! - [`par_unfold`](par_unfold) produces values from a future.
+//! - [`par_unfold_blocking`](par_unfold_blocking) produces values from a blocking function.
+//! - [`try_par_unfold`](try_par_unfold) and [`try_par_unfold_blocking`](try_par_unfold_blocking) are fallible counterparts.
+//!
+//! # Parameters
+//!
+//! Combinators may require extra parameters to configure the number of workers and buffer size.
+//!
+//! - `N: Into<NumWorkers>` for `par_for_each<N, F>(n: N, f: F)`
+//! - `B: Into<BufSize>` for `scatter<B>(b: B)`
+//! - `P: Into<ParParams>` for `par_then<P, F>(p: P, f: F)`
+//!
+//! [`N: Into<NumWorkers>`](NumWorkers) accepts the following values.
+//! - `None`: default value, it sets to the number of logical system processors.
+//! - `8` (integer): fixed number of workers.
+//! - `2.0` (floating number): sets to the scaling of the number of logical system processors.
+//!
+//! [`B: Into<BufSize>`](BufSize) accepts the following values.
+//! - `None`: default value, it sets to the double of logical system processors.
+//! - `8` (integer): fixed buffer size.
+//! - `2.0` (floating number): sets to the scaling of the number of logical system processors.
+//!
+//! [`P: Into<ParParms>`](ParParams) is combination of worker size and buffer size. It accepts the following values.
+//! - `None`: default value, it sets to default values of worker size and buffer size.
+//! - `8` (integer): fixed worker size, and buffer size is contant multiple of worker size.
+//! - `2.0` (floating number): sets the worker size to the scaling of logical system processors, and buffer size is contant multiple of worker size.
+//! - [`ParParamsConfig`](ParParamsConfig): manual configuration.
+//!
+//! # Utility Combinators
+//!
+//! The crate provides several utility stream combinators that coule make your life easier :).
+//!
+//! - [`with_state`](StreamExt::with_state) binds a stream with a state value.
+//! - [`wait_until`](StreamExt::wait_until) lets a stream to wait until a future resolves.
+//! - [`reduce`](StreamExt::reduce) reduces the stream items into a single value.
+//! - [`batching`](StreamExt::batching) consumes arbitrary number of input items for each output item.
+//! - [`stateful_then`](StreamExt::stateful_then), [`stateful_map`](StreamExt::stateful_map), [`stateful_batching`](StreamExt::stateful_batching) are stateful counterparts.
+//! - [`take_until_error`](TryStreamExt::take_until_error) causes the stream to stop taking values after an error.
+//! - [`catch_error`](TryStreamExt::catch_error) splits a stream of results into a stream of unwrapped value and a future that may resolve to an error.
 
 /// Commonly used traits.
 pub mod prelude {

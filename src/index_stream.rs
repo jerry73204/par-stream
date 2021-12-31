@@ -1,6 +1,6 @@
 use crate::common::*;
 
-/// An extension trait that controls ordering of stream items.
+/// The trait extends [Stream](futures::stream::Stream) types with ordering manipulation combinators.
 pub trait IndexStreamExt
 where
     Self: Stream<Item = (usize, Self::IndexedItem)>,
