@@ -1,10 +1,15 @@
+//! Stream and handle types for the [`with_state`](crate::stream::StreamExt::with_state) method.
+
 use crate::common::*;
 use tokio::sync::oneshot;
 
-pub fn new<T>(init: T) -> StateStream<T> {
-    StateStream::new(init)
-}
-
+/// Stream for the [`with_state`](super::StreamExt::with_state) method.
+///
+/// The stream produces a single [handle](Handle) to value `T` and
+/// pauses indefinitely until [`handle.send()`](Handle::send) or
+/// [`handle.close()`](Handle::close). Calling [`handle.send()`](Handle::send)
+/// returns the value to the stream, so that the stream can produce the handle again.
+/// [`handle.close()`](Handle::close) drops the handle and the close the stream.
 #[pin_project]
 pub struct StateStream<T> {
     #[pin]
@@ -13,6 +18,7 @@ pub struct StateStream<T> {
 }
 
 impl<T> StateStream<T> {
+    /// Creates the stream with initial value `init`.
     pub fn new(init: T) -> Self {
         Self {
             value: Some(init),
@@ -52,6 +58,7 @@ impl<T> Stream for StateStream<T> {
     }
 }
 
+/// The handle maintains an unique reference to the state value for [StateStream].
 pub struct Handle<T> {
     inner: Option<Inner<T>>,
 }
@@ -66,15 +73,18 @@ impl<T> Handle<T> {
         self.inner.as_ref().unwrap()
     }
 
+    /// Returns the value to the associated stream.
     pub fn send(mut self) -> Result<(), T> {
         let Inner { value, sender } = self.inner.take().unwrap();
         sender.send(value)
     }
 
+    /// Takes the ownership of value and closes the associated stream.
     pub fn take(mut self) -> T {
         self.inner.take().unwrap().value
     }
 
+    /// Discards the value and closes the associated stream.
     pub fn close(mut self) {
         let _ = self.inner.take();
     }

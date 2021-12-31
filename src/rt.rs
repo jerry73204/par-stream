@@ -1,3 +1,5 @@
+//! Asynchronous runtime methods.
+
 use crate::common::*;
 
 #[cfg(not(any(
@@ -105,6 +107,13 @@ mod rt_dummy {
         panic!();
     }
 
+    pub fn block_on_executor<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        panic!();
+    }
+
     #[derive(Debug)]
     #[repr(transparent)]
     pub struct JoinHandle<T> {
@@ -127,7 +136,7 @@ mod rt_dummy {
 ))]
 mod rt_tokio {
     use super::*;
-    use tokio::runtime::Handle;
+    use tokio::runtime::{Handle, Runtime};
 
     pub fn spawn<F>(future: F) -> JoinHandle<F::Output>
     where
@@ -154,6 +163,13 @@ mod rt_tokio {
         F: Future,
     {
         Handle::current().block_on(future)
+    }
+
+    pub fn block_on_executor<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        Runtome::new().block_on(future)
     }
 
     #[derive(Debug)]
@@ -198,6 +214,13 @@ mod rt_async_std {
     }
 
     pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        async_std::task::block_on(future)
+    }
+
+    pub fn block_on_executor<F>(future: F) -> F::Output
     where
         F: Future,
     {
@@ -253,6 +276,13 @@ mod rt_smol {
     }
 
     pub fn block_on<F>(future: F) -> F::Output
+    where
+        F: Future,
+    {
+        smol::block_on(future)
+    }
+
+    pub fn block_on_executor<F>(future: F) -> F::Output
     where
         F: Future,
     {

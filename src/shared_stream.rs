@@ -14,6 +14,10 @@ const POISONED: usize = 3;
 const NULL_WAKER_KEY: usize = usize::max_value();
 
 /// Stream for the [`shared`](super::StreamExt::shared) method.
+///
+/// The stream is cloneable. Polling the stream will poll the internal
+/// stream shared with the other owners. If there are multiple consumers
+/// for the shared stream, the items are sent in first-come-first-serve manner.
 #[must_use = "streams do nothing unless you consume or poll them"]
 pub struct Shared<St>
 where

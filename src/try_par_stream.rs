@@ -10,14 +10,14 @@ use crate::{
 };
 use tokio::sync::broadcast;
 
-/// An extension trait that provides fallible combinators for parallel processing on streams.
+/// The trait extends [TryStream](futures::stream::TryStream) types with parallel processing combinators.
 pub trait TryParStreamExt
 where
     Self: 'static + Send + TryStream,
     Self::Ok: 'static + Send,
     Self::Error: 'static + Send,
 {
-    /// A fallible analogue to [par_batching](crate::ParStreamExt::par_batching).
+    /// Fallible stream combinator for [par_batching](crate::ParStreamExt::par_batching).
     fn try_par_batching<U, P, F, Fut>(
         self,
         params: P,
@@ -29,7 +29,7 @@ where
         U: 'static + Send,
         P: Into<ParParams>;
 
-    /// A fallible analogue to [par_then](crate::ParStreamExt::par_then).
+    /// Fallible stream combinator for [par_then](crate::ParStreamExt::par_then).
     fn try_par_then<U, P, F, Fut>(
         self,
         params: P,
@@ -41,7 +41,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send;
 
-    /// A fallible analogue to [par_then_unordered](crate::ParStreamExt::par_then_unordered).
+    /// Fallible stream combinator for [par_then_unordered](crate::ParStreamExt::par_then_unordered).
     fn try_par_then_unordered<U, P, F, Fut>(
         self,
         params: P,
@@ -53,7 +53,7 @@ where
         Fut: 'static + Future<Output = Result<U, Self::Error>> + Send,
         P: Into<ParParams>;
 
-    /// A fallible analogue to [par_map](crate::ParStreamExt::par_map).
+    /// Fallible stream combinator for [par_map](crate::ParStreamExt::par_map).
     fn try_par_map<U, P, F, Func>(
         self,
         params: P,
@@ -65,7 +65,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
-    /// A fallible analogue to [par_map_unordered](crate::ParStreamExt::par_map_unordered).
+    /// Fallible stream combinator for [par_map_unordered](crate::ParStreamExt::par_map_unordered).
     fn try_par_map_unordered<U, P, F, Func>(
         self,
         params: P,
@@ -77,8 +77,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
-    /// Runs this stream to completion, executing asynchronous closure for each element on the stream
-    /// in parallel.
+    /// Fallible stream combinator for [par_for_each](crate::par_stream::ParStreamExt::par_for_each).
     fn try_par_for_each<N, F, Fut>(
         self,
         num_workers: N,
@@ -89,7 +88,7 @@ where
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
-    /// A fallible analogue to [par_for_each_blocking](crate::ParStreamExt::par_for_each_blocking).
+    /// Fallible stream combinator for [par_for_each_blocking](crate::par_stream::ParStreamExt::par_for_each_blocking).
     fn try_par_for_each_blocking<N, F, Func>(
         self,
         num_workers: N,

@@ -1,6 +1,7 @@
 use crate::{common::*, config::BufSize, rt, utils};
 use flume::r#async::RecvStream;
 
+/// The builder forwards each stream item according to its key to a destination receiver.
 pub struct PullBuilder<St, K, F, Q = K>
 where
     St: ?Sized + Stream,
@@ -20,6 +21,10 @@ where
     K: 'static + Send + Hash + Eq + Borrow<Q>,
     Q: Send + Hash + Eq,
 {
+    /// Creates the builder.
+    ///
+    /// The `buf_size` sets the channel size for each registered receiver.
+    /// The `key_fn` is used to compute the key for each input item.
     pub fn new<B>(stream: St, buf_size: B, key_fn: F) -> Self
     where
         B: Into<BufSize>,
@@ -35,6 +40,9 @@ where
         }
     }
 
+    /// Creates a receiver binding to the `key`.
+    ///
+    /// If the `key` is already registered, it returns `None`.
     pub fn register(&mut self, key: K) -> Option<RecvStream<'static, St::Item>> {
         use std::collections::hash_map::Entry as E;
 
@@ -47,6 +55,10 @@ where
         }
     }
 
+    /// Finish the builder and start forwarding items to receivers.
+    ///
+    /// It returns a special leaking receiver that accepts items which
+    /// key is not registered or the destination receiver is closed.
     pub fn build(self) -> RecvStream<'static, St::Item> {
         let Self {
             mut key_fn,

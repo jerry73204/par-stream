@@ -1,3 +1,5 @@
+//! Builder types for [par_builder](crate::par_stream::ParStreamExt::par_builder).
+
 mod fn_factory;
 mod future_factory;
 

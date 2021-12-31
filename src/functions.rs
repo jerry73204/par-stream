@@ -7,18 +7,40 @@ pub use par_unfold::*;
 mod par_unfold {
     use super::*;
 
-    /// Creates a stream elements produced by multiple concurrent workers.
+    /// Produce stream elements from parallel asynchronous tasks.
     ///
-    /// Each worker obtains the initial state by calling `init_f(worker_index)`.
-    /// Then, `unfold_f(wokrer_index, state)` consumes the state and is called repeatedly.
-    /// If `unfold_f` returns `Some((output, state))`, the output is produced as stream element and
-    /// the state is updated. The stream finishes `unfold_f` returns `None` on all workers.
+    /// This function spawns a set of parallel workers. Each worker produces and places
+    /// items to an output buffer. The worker pool size and buffer size is determined by
+    /// `params`.
     ///
-    /// The output elements collected from workers can be arbitrary ordered. There is no
-    /// ordering guarantee respecting to the order of function callings and worker indexes.
+    /// The state is initialized to `init`. The `f(worker_index, Arc<State>) -> Option<(output, Arc<State>)>`
+    /// generates asynchronous tasks for workers, which takes a worker index number and
+    /// a shared state, and returns the output item and gives the shared state back.
+    ///
+    /// If `f` returns `None`, it stops the worker for that worker index. The unfolding stream
+    /// terminates after every worker produces `None.`
+    ///
+    /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::sync::atomic::{AtomicUsize, Ordering::*};
+    ///
+    /// let mut vec: Vec<_> =
+    ///     par_stream::par_unfold(None, AtomicUsize::new(0), |_, counter| async move {
+    ///         let output = counter.fetch_add(1, SeqCst);
+    ///         (output < 1000).then(|| (output, counter))
+    ///     })
+    ///     .collect()
+    ///     .await;
+    ///
+    /// vec.sort();
+    /// itertools::assert_equal(vec, 0..1000);
+    /// # })
+    /// ```
     pub fn par_unfold<Item, State, P, F, Fut>(
-        config: P,
-        state: State,
+        params: P,
+        init: State,
         f: F,
     ) -> BoxStream<'static, Item>
     where
@@ -31,9 +53,9 @@ mod par_unfold {
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let state = Arc::new(state);
+        let state = Arc::new(init);
 
         (0..num_workers).for_each(|worker_index| {
             let output_tx = output_tx.clone();
@@ -55,11 +77,40 @@ mod par_unfold {
         output_rx.into_stream().boxed()
     }
 
-    /// Creates a stream elements produced by multiple concurrent workers. It is a blocking analogous to
-    /// [par_unfold()].
+    /// Produce stream elements from parallel blocking tasks.
+    ///
+    /// This function spawns a set of parallel workers. Each worker produces and places
+    /// items to an output buffer. The worker pool size and buffer size is determined by
+    /// `params`.
+    ///
+    /// The state is initialized to `init`. The `f(worker_index, Arc<State>) -> Option<(output, Arc<State>)>`
+    /// generates blocing tasks for workers, which takes a worker index number and
+    /// a shared state, and returns the output item and gives the shared state back.
+    ///
+    /// If `f` returns `None`, it stops the worker for that worker index. The unfolding stream
+    /// terminates after every worker produces `None.`
+    ///
+    /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::sync::atomic::{AtomicUsize, Ordering::*};
+    ///
+    /// let mut vec: Vec<_> =
+    ///     par_stream::par_unfold_blocking(None, AtomicUsize::new(0), move |_, counter| {
+    ///         let output = counter.fetch_add(1, SeqCst);
+    ///         (output < 1000).then(|| (output, counter))
+    ///     })
+    ///     .collect()
+    ///     .await;
+    ///
+    /// vec.sort();
+    /// itertools::assert_equal(vec, 0..1000);
+    /// # })
+    /// ```
     pub fn par_unfold_blocking<Item, State, P, F>(
-        config: P,
-        state: State,
+        params: P,
+        init: State,
         f: F,
     ) -> BoxStream<'static, Item>
     where
@@ -71,9 +122,9 @@ mod par_unfold {
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let state = Arc::new(state);
+        let state = Arc::new(init);
 
         (0..num_workers).for_each(|worker_index| {
             let mut f = f.clone();

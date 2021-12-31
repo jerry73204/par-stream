@@ -1,26 +1,39 @@
 use crate::common::*;
 use tokio::sync::oneshot;
 
-/// An extension trait that controls ordering of items of fallible streams.
+/// The trait extends [TryStream](futures::stream::TryStream) types with combinators.
 pub trait TryStreamExt
 where
     Self: TryStream,
 {
     /// Create a fallible stream that gives the current iteration count.
     ///
-    /// The count wraps to zero if the count overflows.
+    /// # Overflow Behavior
+    /// The method does no guarding against overflows, so enumerating more than `usize::MAX`
+    /// elements either produces the wrong result or panics. If debug assertions are enabled, a panic is guaranteed.
+    ///
+    /// Panics
+    /// The returned iterator might panic if the to-be-returned index would overflow a `usize`.
     fn try_enumerate(self) -> TryEnumerate<Self, Self::Ok, Self::Error>;
 
+    /// Takes elements until an `Err(_)`.
     fn take_until_error(self) -> TakeUntilError<Self, Self::Ok, Self::Error>;
 
+    /// Split the stream of `Result<T, E>` to a stream of `T` and a future of `Result<(), E>`.
+    ///
+    /// The method returns `(future, stream)`. If this combinator encoutners an `Err`,
+    /// `future.await` returns that error, and returned `stream` fuses. If the input
+    /// stream is depleted without error, `future.await` resolves to `Ok(())`.
     fn catch_error(self) -> (ErrorNotify<Self::Error>, CatchError<Self>);
 
+    /// Similar to [and_then](futures::stream::TryStreamExt::and_then) but with a state.
     fn try_stateful_then<B, U, F, Fut>(
         self,
         init: B,
         f: F,
     ) -> TryStatefulThen<Self, B, Self::Ok, U, Self::Error, F, Fut>;
 
+    /// Similar to [map](futures::stream::StreamExt::map) but with a state and is fallible.
     fn try_stateful_map<B, U, F>(
         self,
         init: B,
@@ -88,6 +101,7 @@ pub use take_until_error::*;
 mod take_until_error {
     use super::*;
 
+    /// Stream for the [`take_until_error`](super::TryStreamExt::take_until_error) method.
     #[pin_project]
     pub struct TakeUntilError<St, T, E>
     where
@@ -255,7 +269,7 @@ pub use try_enumerate::*;
 mod try_enumerate {
     use super::*;
 
-    /// A fallible stream combinator returned from [try_enumerate()](crate::try_stream::TryStreamExt::try_enumerate).
+    /// Stream for the [try_enumerate()](crate::try_stream::TryStreamExt::try_enumerate) method.
     #[derive(Derivative)]
     #[derivative(Debug)]
     #[pin_project]
@@ -315,6 +329,7 @@ pub use catch_error::*;
 mod catch_error {
     use super::*;
 
+    /// Stream for the [`catch_error`](super::TryStreamExt::catch_error) method.
     #[pin_project]
     pub struct CatchError<St>
     where
@@ -361,6 +376,7 @@ mod catch_error {
         }
     }
 
+    /// Future for the [`catch_error`](super::TryStreamExt::catch_error) method.
     #[pin_project]
     pub struct ErrorNotify<E> {
         #[pin]

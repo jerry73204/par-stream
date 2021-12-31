@@ -7,57 +7,42 @@ where
 {
     type IndexedItem;
 
-    /// Reorder the input items paired with a iteration count.
+    /// Reorders the input items `(index, item)` according to the index number and returns `item`.
     ///
-    /// The combinator asserts the input item has tuple type `(usize, T)`.
-    /// It reorders the items according to the first value of input tuple.
+    /// It can be combined with [enumerate()](futures::StreamExt::enumerate) and parallel
+    /// unordered tasks.
     ///
-    /// It is usually combined with [enumerate()](futures::StreamExt::enumerate), then
-    /// applies a series of unordered parallel mapping, and finally reorders the values
-    /// back by this method. It avoids reordering the values after each parallel mapping step.
+    /// The index numbers must start from zero, be unique and contiguous. Index not starting
+    /// from zero causes the stream to hang indefinitely.
+    ///
+    /// # Panics
+    /// The repeating of an index will cause the stream to panic.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     let doubled = stream::iter(0..1000)
-    ///         // add enumerated index that does not panic on overflow
-    ///         .enumerate()
-    ///         // double the values in parallel
-    ///         .par_then_unordered(None, move |(index, value)| {
-    ///             // the closure is sent to parallel worker
-    ///             async move { (index, value * 2) }
-    ///         })
-    ///         // add values by one in parallel
-    ///         .par_then_unordered(None, move |(index, value)| {
-    ///             // the closure is sent to parallel worker
-    ///             async move { (index, value + 1) }
-    ///         })
-    ///         // reorder the values by enumerated index
-    ///         .reorder_enumerated()
-    ///         .collect::<Vec<_>>()
-    ///         .await;
-    ///     let expect = (0..1000).map(|value| value * 2 + 1).collect::<Vec<_>>();
-    ///     assert_eq!(doubled, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// let doubled: Vec<_> = stream::iter(0..1000)
+    ///     // add index number
+    ///     .enumerate()
+    ///     // double the values in parallel
+    ///     .par_then_unordered(None, move |(index, value)| {
+    ///         // the closure is sent to parallel worker
+    ///         async move { (index, value * 2) }
+    ///     })
+    ///     // add values by one in parallel
+    ///     .par_then_unordered(None, move |(index, value)| {
+    ///         // the closure is sent to parallel worker
+    ///         async move { (index, value + 1) }
+    ///     })
+    ///     // reorder the values according to index number
+    ///     .reorder_enumerated()
+    ///     .collect()
+    ///     .await;
+    /// let expect: Vec<_> = (0..1000).map(|value| value * 2 + 1).collect();
+    /// assert_eq!(doubled, expect);
+    /// # })
     /// ```
     fn reorder_enumerated(self) -> ReorderEnumerated<Self, Self::IndexedItem>;
 }
@@ -84,7 +69,7 @@ pub use reorder_enumerated::*;
 mod reorder_enumerated {
     use super::*;
 
-    /// A stream combinator returned from [reorder_enumerated()](IndexStreamExt::reorder_enumerated).
+    /// Stream for the [reorder_enumerated](IndexStreamExt::reorder_enumerated) method.
     #[derive(Derivative)]
     #[derivative(Debug)]
     #[pin_project]

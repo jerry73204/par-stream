@@ -1,7 +1,10 @@
 use crate::{common::*, config::BufSize, rt, utils};
 use tokio::sync::Mutex;
 
-/// A stream combinator returned from [tee()](ParStreamExt::tee).
+/// Stream for the [tee()](crate::par_stream::ParStreamExt::tee) method.
+///
+/// Cloning this stream allocates a new channel for the new receiver, so that
+/// future copies of stream items are forwarded to the channel.
 #[derive(Derivative)]
 #[derivative(Debug)]
 pub struct Tee<T>

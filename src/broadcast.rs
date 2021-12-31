@@ -4,7 +4,7 @@ use crate::{
 };
 use tokio::sync::{oneshot, watch};
 
-/// The build type returned from [broadcast()](ParStreamExt::broadcast).
+/// The build type returned from [broadcast()](crate::par_stream::ParStreamExt::broadcast).
 ///
 /// It is used to register new broadcast receivers. Each receiver consumes copies
 /// of items of the stream. The builder is finished by `guard.build()` so that

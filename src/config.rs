@@ -1,5 +1,6 @@
 use crate::common::*;
 
+/// The default value returned by [get_buf_size_scale()].
 pub const DEFAULT_BUF_SIZE_SCALE: f64 = 2.0;
 
 static BUF_SIZE_SCALE: OnceCell<f64> = OnceCell::new();
@@ -47,6 +48,7 @@ pub use config::*;
 mod config {
     use super::*;
 
+    /// The determination strategy for the number of workers and buffer size.
     #[derive(Debug, Clone, PartialEq)]
     pub enum ParParamsConfig {
         Default,
@@ -107,6 +109,7 @@ mod config {
         }
     }
 
+    /// The determination strategy for the number of workers.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum NumWorkers {
         Default,
@@ -150,6 +153,7 @@ mod config {
         }
     }
 
+    /// The buffer size determination strategy.
     #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum BufSize {
         Default,
@@ -200,7 +204,8 @@ pub use params::*;
 mod params {
     use super::*;
 
-    #[derive(Debug, Clone, PartialEq)]
+    /// The parameters including `num_workers` and `buf_size`.
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     pub struct ParParams {
         pub num_workers: usize,
         pub buf_size: Option<usize>,

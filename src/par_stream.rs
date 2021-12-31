@@ -13,19 +13,62 @@ use crate::{
 };
 use flume::r#async::RecvStream;
 
+/// Stream for the [par_then()](ParStreamExt::par_then) method.
 pub type ParThen<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
+
+/// Stream for the [par_map()](ParStreamExt::par_map) method.
 pub type ParMap<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
 
-/// An extension trait that provides parallel processing combinators on streams.
+/// The trait extends [Stream](futures::stream::Stream) types with parallel processing combinators.
 pub trait ParStreamExt
 where
     Self: 'static + Send + Stream,
     Self::Item: 'static + Send,
 {
+    /// Moves the stream to a spawned worker and forwards stream items to a channel with `buf_size`.
+    ///
+    /// It returns a receiver [stream](RecvStream) that buffers the items. The receiver stream is
+    /// cloneable so that items are sent in anycast manner.
+    ///
+    /// This combinator is similar to [shared()](crate::stream::StreamExt::shared).
+    /// The difference is that `spawned()` spawns a worker that actively forwards stream
+    /// items to the channel, and the receivers shares the channel. The `shared()` combinator
+    /// directly poll the underlying stream whenever a receiver polls in lock-free manner.
+    /// The choice of these combinator depends on the performance considerations.
+    ///
+    /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
+    /// use futures::prelude::*;
+    /// use par_stream::prelude::*;
+    /// use std::mem;
+    ///
+    /// // Creates two sharing handles to the stream
+    /// let stream = stream::iter(0..100);
+    /// let recv1 = stream.spawned(None); // spawn with default buffer size
+    /// let recv2 = recv1.clone(); // creates the second receiver
+    ///
+    /// // Consumes the shared streams individually
+    /// let collect1 = par_stream::rt::spawn(recv1.collect());
+    /// let collect2 = par_stream::rt::spawn(recv2.collect());
+    /// let (vec1, vec2): (Vec<_>, Vec<_>) = futures::join!(collect1, collect2);
+    ///
+    /// // Checks that the combined values of two vecs are equal to original values
+    /// let mut all_vec: Vec<_> = vec1.into_iter().chain(vec2).collect();
+    /// all_vec.sort();
+    /// itertools::assert_equal(all_vec, 0..100);
+    /// # })
+    /// ```
     fn spawned<B>(self, buf_size: B) -> RecvStream<'static, Self::Item>
     where
         B: Into<BufSize>;
 
+    /// Creates a builder that routes each input item according to `key_fn` to a destination receiver.
+    ///
+    /// Call [`builder.register("key")`](PullBuilder::register) to obtain the receiving stream for that key.
+    /// The builder must be finished by [`builder.build()`](PullBuilder::build) so that receivers start
+    /// consuming items. [`builder.build()`](PullBuilder::build) also returns a special leaking receiver
+    /// for items which key is not registered or target receiver is closed. Dropping the builder without
+    /// [`builder.build()`](PullBuilder::build) will cause receivers to get empty input.
     fn pull_routing<B, K, Q, F>(self, buf_size: B, key_fn: F) -> PullBuilder<Self, K, F, Q>
     where
         Self: 'static + Send + Stream,
@@ -35,44 +78,28 @@ where
         Q: Send + Hash + Eq,
         B: Into<BufSize>;
 
+    /// Creates a builder that setups parallel tasks.
     fn par_builder(self) -> ParBuilder<Self>;
 
     /// The combinator maintains a collection of concurrent workers, each consuming as many elements as it likes,
-    /// and produces the next stream element.
+    /// for each output element.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     /// use std::mem;
     ///
-    /// async fn main_async() {
-    ///     let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    ///     stream::iter(data).par_batching(None, |_worker_index, mut stream| async move {
-    ///         while let Some(value) = stream.next().await {
-    ///             if value > 0 {
-    ///                 return Some((value, stream));
-    ///             }
+    /// let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
+    /// stream::iter(data).par_batching(None, |_worker_index, mut stream| async move {
+    ///     while let Some(value) = stream.next().await {
+    ///         if value > 0 {
+    ///             return Some((value, stream));
     ///         }
-    ///         None
-    ///     });
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    ///     }
+    ///     None
+    /// });
+    /// # })
     /// ```
     fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
@@ -81,145 +108,92 @@ where
         T: 'static + Send,
         P: Into<ParParams>;
 
-    /// Converts the stream to a cloneable receiver that receiving items in fan-out pattern.
+    /// Converts the stream to cloneable receivers, each receiving a copy for each input item.
     ///
-    /// When a receiver is cloned, it creates a separate internal buffer, so that a background
-    /// worker clones and passes each stream item to available receiver buffers. It can be used
-    /// to _fork_ a stream into copies and pass them to concurrent workers.
+    /// It spawns a task to consume the stream, and forwards item copies to receivers.
+    /// The `buf_size` sets the interal channel size. Dropping a receiver does not cause another
+    /// receiver to stop.
     ///
-    /// Each receiver maintains an internal buffer with `buf_size`. If one of the receiver buffer
-    /// is full, the stream will halt until the blocking buffer spare the space.
+    /// Receivers are not guaranteed to get the same initial item due to the time difference
+    /// among receiver creation time. Use [broadcast()](crate::par_stream::ParStreamExt::broadcast)
+    /// instead if you need this guarantee.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::{join, prelude::*};
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     let orig: Vec<_> = (0..1000).collect();
+    /// let orig: Vec<_> = (0..1000).collect();
     ///
-    ///     let rx1 = stream::iter(orig.clone()).tee(1);
-    ///     let rx2 = rx1.clone();
-    ///     let rx3 = rx1.clone();
+    /// let rx1 = stream::iter(orig.clone()).tee(1);
+    /// let rx2 = rx1.clone();
+    /// let rx3 = rx1.clone();
     ///
-    ///     let fut1 = rx1.map(|val| val).collect();
-    ///     let fut2 = rx2.map(|val| val * 2).collect();
-    ///     let fut3 = rx3.map(|val| val * 3).collect();
+    /// let fut1 = rx1.map(|val| val).collect();
+    /// let fut2 = rx2.map(|val| val * 2).collect();
+    /// let fut3 = rx3.map(|val| val * 3).collect();
     ///
-    ///     let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
+    /// # })
     /// ```
     fn tee<B>(self, buf_size: B) -> Tee<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>;
 
-    /// Converts to a [guard](BroadcastBuilder) that can create receivers,
-    /// each receiving cloned elements from this stream.
+    /// Creates a [builder](BroadcastBuilder) to register broadcast receivers.
     ///
-    /// The generated receivers can produce elements only after the guard is dropped.
-    /// It ensures the receivers start receiving elements at the mean time.
+    /// Call [builder.register()](BroadcastBuilder::register) to create a receiver.
+    /// Once the registration is done. [builder.build()](BroadcastBuilder::build) must
+    /// be called so that receivers start comsuming item copies. If the builder is droppped
+    /// without build, receivers get empty input.
     ///
-    /// Each receiver maintains an internal buffer with `buf_size`. If one of the receiver buffer
-    /// is full, the stream will halt until the blocking buffer spare the space.
+    /// Each receiver maintains an internal buffer of `buf_size`. The `send_all` configures
+    /// the behavior if any one of receiver closes. If `send_all` is true, closing of one receiver
+    /// casues the other receivers to stop, otherwise it does not.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::{join, prelude::*};
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     let mut builder = stream::iter(0..).broadcast(2, true);
-    ///     let rx1 = builder.register();
-    ///     let rx2 = builder.register();
-    ///     builder.build();
+    /// let mut builder = stream::iter(0..).broadcast(2, true);
+    /// let rx1 = builder.register();
+    /// let rx2 = builder.register();
+    /// builder.build();
     ///
-    ///     let (ret1, ret2): (Vec<_>, Vec<_>) =
-    ///         join!(rx1.take(100).collect(), rx2.take(100).collect());
-    ///     let expect: Vec<_> = (0..100).collect();
+    /// let (ret1, ret2): (Vec<_>, Vec<_>) = join!(rx1.take(100).collect(), rx2.take(100).collect());
+    /// let expect: Vec<_> = (0..100).collect();
     ///
-    ///     assert_eq!(ret1, expect);
-    ///     assert_eq!(ret2, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// assert_eq!(ret1, expect);
+    /// assert_eq!(ret2, expect);
+    /// # })
     /// ```
     fn broadcast<B>(self, buf_size: B, send_all: bool) -> BroadcastBuilder<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>;
 
-    /// Computes new items from the stream asynchronously in parallel with respect to the input order.
+    /// Runs an asynchronous task on parallel workers and produces items respecting the input order.
     ///
-    /// The `limit` is the number of parallel workers.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    /// The method guarantees the order of output items obeys that of input items.
-    ///
-    /// Each parallel task runs in two-stage manner. The `f` closure is invoked in the
-    /// main thread and lets you clone over outer varaibles. Then, `f` returns a future
-    /// and the future will be sent to a parallel worker.
+    /// The `params` sets the worker pool size and output buffer size.
+    /// Each parallel worker shares the stream and executes a future for each input item.
+    /// Output items are gathered to a channel and are reordered respecting to input order.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     let doubled: Vec<_> = stream::iter(0..1000)
-    ///         // doubles the values in parallel
-    ///         .par_then(None, move |value| async move { value * 2 })
-    ///         // the collected values will be ordered
-    ///         .collect()
-    ///         .await;
-    ///     let expect: Vec<_> = (0..1000).map(|value| value * 2).collect();
-    ///     assert_eq!(doubled, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// let doubled: Vec<_> = stream::iter(0..1000)
+    ///     // doubles the values in parallel
+    ///     .par_then(None, move |value| async move { value * 2 })
+    ///     // the collected values will be ordered
+    ///     .collect()
+    ///     .await;
+    /// let expect: Vec<_> = (0..1000).map(|value| value * 2).collect();
+    /// assert_eq!(doubled, expect);
+    /// # })
     /// ```
     fn par_then<T, P, F, Fut>(self, params: P, f: F) -> ParThen<T>
     where
@@ -228,51 +202,30 @@ where
         Fut: 'static + Future<Output = T> + Send,
         P: Into<ParParams>;
 
-    /// Computes new items from the stream asynchronously in parallel without respecting the input order.
+    /// Runs an asynchronous task on parallel workers and produces items without respecting input order.
     ///
-    /// The `limit` is the number of parallel workers.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    /// The order of output items is not guaranteed to respect the order of input items.
-    ///
-    /// Each parallel task runs in two-stage manner. The `f` closure is invoked in the
-    /// main thread and lets you clone over outer varaibles. Then, `f` returns a future
-    /// and the future will be sent to a parallel worker.
+    /// The `params` sets the worker pool size and output buffer size.
+    /// Each parallel worker shares the stream and executes a future for each input item.
+    /// The worker forwards the output to a channel as soon as it finishes.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     /// use std::collections::HashSet;
     ///
-    /// async fn main_async() {
-    ///     let doubled: HashSet<_> = stream::iter(0..1000)
-    ///         // doubles the values in parallel
-    ///         .par_then_unordered(None, move |value| {
-    ///             // the future is sent to a parallel worker
-    ///             async move { value * 2 }
-    ///         })
-    ///         // the collected values may NOT be ordered
-    ///         .collect()
-    ///         .await;
-    ///     let expect: HashSet<_> = (0..1000).map(|value| value * 2).collect();
-    ///     assert_eq!(doubled, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// let doubled: HashSet<_> = stream::iter(0..1000)
+    ///     // doubles the values in parallel
+    ///     .par_then_unordered(None, move |value| {
+    ///         // the future is sent to a parallel worker
+    ///         async move { value * 2 }
+    ///     })
+    ///     // the collected values may NOT be ordered
+    ///     .collect()
+    ///     .await;
+    /// let expect: HashSet<_> = (0..1000).map(|value| value * 2).collect();
+    /// assert_eq!(doubled, expect);
+    /// # })
     /// ```
     fn par_then_unordered<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
@@ -281,51 +234,30 @@ where
         Fut: 'static + Future<Output = T> + Send,
         P: Into<ParParams>;
 
-    /// Computes new items in a function in parallel with respect to the input order.
+    /// Runs a blocking task on parallel workers and produces items respecting the input order.
     ///
-    /// The `limit` is the number of parallel workers.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    /// The method guarantees the order of output items obeys that of input items.
-    ///
-    /// Each parallel task runs in two-stage manner. The `f` closure is invoked in the
-    /// main thread and lets you clone over outer varaibles. Then, `f` returns a closure
-    /// and the closure will be sent to a parallel worker.
+    /// The `params` sets the worker pool size and output buffer size.
+    /// Each parallel worker shares the stream and executes a future for each input item.
+    /// Output items are gathered to a channel and are reordered respecting to input order.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     // the variable will be shared by parallel workers
-    ///     let doubled: Vec<_> = stream::iter(0..1000)
-    ///         // doubles the values in parallel
-    ///         .par_map(None, move |value| {
-    ///             // the closure is sent to parallel worker
-    ///             move || value * 2
-    ///         })
-    ///         // the collected values may NOT be ordered
-    ///         .collect()
-    ///         .await;
-    ///     let expect: Vec<_> = (0..1000).map(|value| value * 2).collect();
-    ///     assert_eq!(doubled, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// // the variable will be shared by parallel workers
+    /// let doubled: Vec<_> = stream::iter(0..1000)
+    ///     // doubles the values in parallel
+    ///     .par_map(None, move |value| {
+    ///         // the closure is sent to parallel worker
+    ///         move || value * 2
+    ///     })
+    ///     // the collected values may NOT be ordered
+    ///     .collect()
+    ///     .await;
+    /// let expect: Vec<_> = (0..1000).map(|value| value * 2).collect();
+    /// assert_eq!(doubled, expect);
+    /// # })
     /// ```
     fn par_map<T, P, F, Func>(self, params: P, f: F) -> ParMap<T>
     where
@@ -334,53 +266,32 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: Into<ParParams>;
 
-    /// Computes new items in a function in parallel without respecting the input order.
+    /// Runs a blocking task on parallel workers and produces items without respecting input order.
     ///
-    /// The `limit` is the number of parallel workers.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    /// The method guarantees the order of output items obeys that of input items.
-    ///
-    /// Each parallel task runs in two-stage manner. The `f` closure is invoked in the
-    /// main thread and lets you clone over outer varaibles. Then, `f` returns a future
-    /// and the future will be sent to a parallel worker.
+    /// The `params` sets the worker pool size and output buffer size.
+    /// Each parallel worker shares the stream and executes a future for each input item.
+    /// The worker forwards the output to a channel as soon as it finishes.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     /// use std::collections::HashSet;
     ///
-    /// async fn main_async() {
-    ///     // the variable will be shared by parallel workers
+    /// // the variable will be shared by parallel workers
     ///
-    ///     let doubled: HashSet<_> = stream::iter(0..1000)
-    ///         // doubles the values in parallel
-    ///         .par_map_unordered(None, move |value| {
-    ///             // the closure is sent to parallel worker
-    ///             move || value * 2
-    ///         })
-    ///         // the collected values may NOT be ordered
-    ///         .collect()
-    ///         .await;
-    ///     let expect: HashSet<_> = (0..1000).map(|value| value * 2).collect();
-    ///     assert_eq!(doubled, expect);
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// let doubled: HashSet<_> = stream::iter(0..1000)
+    ///     // doubles the values in parallel
+    ///     .par_map_unordered(None, move |value| {
+    ///         // the closure is sent to parallel worker
+    ///         move || value * 2
+    ///     })
+    ///     // the collected values may NOT be ordered
+    ///     .collect()
+    ///     .await;
+    /// let expect: HashSet<_> = (0..1000).map(|value| value * 2).collect();
+    /// assert_eq!(doubled, expect);
+    /// # })
     /// ```
     fn par_map_unordered<T, P, F, Func>(self, params: P, f: F) -> RecvStream<'static, T>
     where
@@ -389,50 +300,27 @@ where
         Func: 'static + FnOnce() -> T + Send,
         P: Into<ParParams>;
 
-    /// Reduces the input items into single value in parallel.
+    /// Reduces the input stream into a single value in parallel.
     ///
-    /// The `limit` is the number of parallel workers.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    ///
-    /// The `buf_size` is the size of buffer that stores the temporary reduced values.
-    /// If it is `0` or `None`, it defaults the number of cores on system.
-    ///
-    /// Unlike [fold()](futures::stream::StreamExt::fold), the method does not combine the values sequentially.
-    /// Instead, the parallel workers greedly take two values from the buffer, reduce to
-    /// one value, and push back to the buffer.
+    /// It maintains a parallel worker pool of `num_workers`. Each worker reduces
+    /// the input items from the stream into a single value. Once all parallel worker
+    /// finish, the values from each worker are reduced into one in treefold manner.
     ///
     /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
     ///
-    /// async fn main_async() {
-    ///     // the variable will be shared by parallel workers
-    ///     let sum = stream::iter(1..=1000)
-    ///         // sum up the values in parallel
-    ///         .par_reduce(None, move |lhs, rhs| {
-    ///             // the closure is sent to parallel worker
-    ///             async move { lhs + rhs }
-    ///         })
-    ///         .await;
-    ///     assert_eq!(sum, Some((1 + 1000) * 1000 / 2));
-    /// }
-    ///
-    /// # #[cfg(feature = "runtime-async-std")]
-    /// # #[async_std::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-tokio")]
-    /// # #[tokio::main]
-    /// # async fn main() {
-    /// #     main_async().await
-    /// # }
-    /// #
-    /// # #[cfg(feature = "runtime-smol")]
-    /// # fn main() {
-    /// #     smol::block_on(main_async())
-    /// # }
+    /// // the variable will be shared by parallel workers
+    /// let sum = stream::iter(1..=1000)
+    ///     // sum up the values in parallel
+    ///     .par_reduce(None, move |lhs, rhs| {
+    ///         // the closure is sent to parallel worker
+    ///         async move { lhs + rhs }
+    ///     })
+    ///     .await;
+    /// assert_eq!(sum, Some((1 + 1000) * 1000 / 2));
+    /// # })
     /// ```
     fn par_reduce<N, F, Fut>(
         self,
@@ -444,15 +332,14 @@ where
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send;
 
-    /// Runs an asynchronous task on each element of an stream in parallel.
+    /// Runs an asynchronous task on parallel workers.
     fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
         N: Into<NumWorkers>;
 
-    /// Creates a parallel stream analogous to [par_for_each](ParStreamExt::par_for_each) with a
-    /// Runs an blocking task on each element of an stream in parallel.
+    /// Runs a blocking task on parallel workers.
     fn par_for_each_blocking<N, F, Func>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
