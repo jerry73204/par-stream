@@ -145,10 +145,10 @@ where
     /// use par_stream::prelude::*;
     ///
     /// async fn main_async() {
-    ///     let mut builder = stream::iter(0..).broadcast(2);
+    ///     let mut builder = stream::iter(0..).broadcast(2, true);
     ///     let rx1 = builder.register();
     ///     let rx2 = builder.register();
-    ///     builder.build(); // drop the guard
+    ///     builder.build();
     ///
     ///     let (ret1, ret2): (Vec<_>, Vec<_>) =
     ///         join!(rx1.take(100).collect(), rx2.take(100).collect());
@@ -175,7 +175,7 @@ where
     /// #     smol::block_on(main_async())
     /// # }
     /// ```
-    fn broadcast<B>(self, buf_size: B) -> BroadcastBuilder<Self::Item>
+    fn broadcast<B>(self, buf_size: B, send_all: bool) -> BroadcastBuilder<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>;
@@ -587,12 +587,12 @@ where
         Tee::new(self, buf_size)
     }
 
-    fn broadcast<B>(self, buf_size: B) -> BroadcastBuilder<Self::Item>
+    fn broadcast<B>(self, buf_size: B, send_all: bool) -> BroadcastBuilder<Self::Item>
     where
         Self::Item: Clone,
         B: Into<BufSize>,
     {
-        BroadcastBuilder::new(self, buf_size)
+        BroadcastBuilder::new(self, buf_size, send_all)
     }
 
     fn par_then<T, P, F, Fut>(self, params: P, mut f: F) -> ParThen<T>
@@ -856,27 +856,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use itertools::izip;
     use rand::prelude::*;
     use std::time::Duration;
-
-    #[tokio::test]
-    async fn broadcast_test() {
-        let mut builder = stream::iter(0..).broadcast(2);
-        let rx1 = builder.register();
-        let rx2 = builder.register();
-        builder.build();
-
-        let (ret1, ret2): (Vec<_>, Vec<_>) =
-            join!(rx1.take(100).collect(), rx2.take(100).collect());
-
-        izip!(ret1, 0..100).for_each(|(lhs, rhs)| {
-            assert_eq!(lhs, rhs);
-        });
-        izip!(ret2, 0..100).for_each(|(lhs, rhs)| {
-            assert_eq!(lhs, rhs);
-        });
-    }
 
     #[tokio::test]
     async fn par_batching_test() {

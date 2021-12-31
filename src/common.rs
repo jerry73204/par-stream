@@ -31,4 +31,4 @@ pub use std::{
     time::Duration,
 };
 
-pub type BoxSink<T, E> = Pin<Box<dyn Sink<T, Error = E> + Send>>;
+// pub type BoxSink<T, E> = Pin<Box<dyn Sink<T, Error = E> + Send>>;

@@ -95,7 +95,7 @@
 //! async fn main_async() {
 //!     let data = vec![2, -1, 3, 5];
 //!
-//!     let mut builder = futures::stream::iter(data.clone()).broadcast(3);
+//!     let mut builder = futures::stream::iter(data.clone()).broadcast(3, true);
 //!     let rx1 = builder.register();
 //!     let rx2 = builder.register();
 //!     let rx3 = builder.register();
