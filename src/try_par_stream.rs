@@ -537,13 +537,16 @@ mod tests {
     #[tokio::test]
     async fn try_par_then_test() {
         {
-            let mut stream = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                .try_par_then(None, |value| future::ok(value));
+            let vec: Vec<Result<_, _>> =
+                stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                    .try_par_then(None, |value| future::ok(value))
+                    .collect()
+                    .await;
 
-            assert_eq!(stream.try_next().await, Ok(Some(1usize)));
-            assert_eq!(stream.try_next().await, Ok(Some(2usize)));
-            assert_eq!(stream.try_next().await, Err(-3isize));
-            assert_eq!(stream.try_next().await, Ok(None));
+            assert!(matches!(
+                *vec,
+                [Err(-3)] | [Ok(1), Err(-3)] | [Ok(2), Err(-3)] | [Ok(1), Ok(2), Err(-3)],
+            ));
         }
 
         {
@@ -556,22 +559,21 @@ mod tests {
         }
 
         {
-            let mut stream =
-                stream::repeat(())
-                    .enumerate()
-                    .map(Ok)
-                    .try_par_then(3, |(index, ())| async move {
-                        match index {
-                            3 | 6 => Err(index),
-                            index => Ok(index),
-                        }
-                    });
+            let vec: Vec<Result<_, _>> = stream::iter(1..)
+                .map(Ok)
+                .try_par_then(3, |index| async move {
+                    match index {
+                        3 | 6 => Err(index),
+                        index => Ok(index),
+                    }
+                })
+                .collect()
+                .await;
 
-            assert_eq!(stream.next().await, Some(Ok(0)));
-            assert_eq!(stream.next().await, Some(Ok(1)));
-            assert_eq!(stream.next().await, Some(Ok(2)));
-            assert_eq!(stream.next().await, Some(Err(3)));
-            assert!(stream.next().await.is_none());
+            assert!(matches!(
+                *vec,
+                [Err(3)] | [Ok(1), Err(3)] | [Ok(2), Err(3)] | [Ok(1), Ok(2), Err(3)],
+            ));
         }
     }
 
