@@ -1,6 +1,7 @@
 use crate::common::*;
 
 pub const DEFAULT_BUF_SIZE_SCALE: f64 = 2.0;
+
 static BUF_SIZE_SCALE: OnceCell<f64> = OnceCell::new();
 static DEFAULT_NUM_WORKERS: Lazy<usize> = Lazy::new(|| {
     let value = num_cpus::get();
@@ -8,11 +9,26 @@ static DEFAULT_NUM_WORKERS: Lazy<usize> = Lazy::new(|| {
     value
 });
 
-pub fn set_buf_size_scale(scale: f64) -> bool {
+/// Sets the global scaling factor for buffer size.
+///
+/// The default buffer size will be determined by `scale * num_cpus`.
+/// The method must be called at most once and before calling of any other
+/// methods in this crate. Otherwise it returns an error with current value.
+///
+/// # Panics
+/// The `scale` must be positive and finite.
+pub fn set_buf_size_scale(scale: f64) -> Result<(), f64> {
     assert!(scale.is_finite() && scale > 0.0);
-    BUF_SIZE_SCALE.set(scale).is_ok()
+    BUF_SIZE_SCALE.set(scale)
 }
 
+/// Gets the global scaling factor for buffer size.
+///
+/// If [set_buf_size_scale] was not called before, it returns
+/// [DEFAULT_BUF_SIZE_SCALE]. Otherwise it returns the value accordingly.
+///
+/// Note that calling this function causes future calls to [set_buf_size_scale]
+/// to fail.
 pub fn get_buf_size_scale() -> f64 {
     *BUF_SIZE_SCALE.get_or_init(|| DEFAULT_BUF_SIZE_SCALE)
 }
