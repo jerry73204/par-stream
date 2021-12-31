@@ -11,7 +11,7 @@ where
     where
         Self: Sized;
 
-    fn wait_for<Fut>(self, fut: Fut) -> WaitFor<Self, Fut>
+    fn wait_until<Fut>(self, fut: Fut) -> WaitUntil<Self, Fut>
     where
         Fut: Future<Output = bool>;
 
@@ -118,15 +118,11 @@ where
         }
     }
 
-    fn wait_for<Fut>(self, fut: Fut) -> WaitFor<Self, Fut>
+    fn wait_until<Fut>(self, fut: Fut) -> WaitUntil<Self, Fut>
     where
         Fut: Future<Output = bool>,
     {
-        WaitFor {
-            is_terminated: false,
-            future: Some(fut),
-            stream: self,
-        }
+        WaitUntil::new(self, fut)
     }
 
     fn batching<T, F, Fut>(self, f: F) -> Batching<Self, T, F, Fut> {
@@ -434,24 +430,38 @@ mod reduce {
     }
 }
 
-use wait_for::*;
-mod wait_for {
+use wait_until::*;
+mod wait_until {
     use super::*;
 
     #[pin_project]
-    pub struct WaitFor<St, Fut>
+    pub struct WaitUntil<St, Fut>
     where
         St: ?Sized + Stream,
         Fut: Future<Output = bool>,
     {
-        pub(super) is_terminated: bool,
+        pub(super) is_fused: bool,
         #[pin]
         pub(super) future: Option<Fut>,
         #[pin]
         pub(super) stream: St,
     }
 
-    impl<St, Fut> Stream for WaitFor<St, Fut>
+    impl<St, Fut> WaitUntil<St, Fut>
+    where
+        St: Stream,
+        Fut: Future<Output = bool>,
+    {
+        pub(super) fn new(stream: St, fut: Fut) -> Self {
+            Self {
+                stream,
+                future: Some(fut),
+                is_fused: false,
+            }
+        }
+    }
+
+    impl<St, Fut> Stream for WaitUntil<St, Fut>
     where
         St: Stream,
         Fut: Future<Output = bool>,
@@ -462,21 +472,47 @@ mod wait_for {
             let mut this = self.project();
 
             Ready(loop {
-                if *this.is_terminated {
+                if *this.is_fused {
                     break None;
-                }
-                if let Some(mut future) = this.future.as_mut().as_pin_mut() {
-                    let ok = ready!(future.poll_unpin(cx));
+                } else if let Some(future) = this.future.as_mut().as_pin_mut() {
+                    let ok = ready!(future.poll(cx));
                     this.future.set(None);
 
                     if !ok {
-                        *this.is_terminated = true;
+                        *this.is_fused = true;
                         break None;
                     }
                 } else {
                     break ready!(this.stream.poll_next(cx));
                 }
             })
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            if self.is_fused {
+                // No future values if it is fused
+                (0, Some(0))
+            } else {
+                let (lower, upper) = self.stream.size_hint();
+
+                if self.future.is_some() {
+                    // If future is not resolved yet, returns zero lower bound
+                    (0, upper)
+                } else {
+                    // Returns size hint from underlying stream if the future is resolved
+                    (lower, upper)
+                }
+            }
+        }
+    }
+
+    impl<St, Fut> FusedStream for WaitUntil<St, Fut>
+    where
+        St: FusedStream,
+        Fut: Future<Output = bool>,
+    {
+        fn is_terminated(&self) -> bool {
+            self.is_fused || self.stream.is_terminated()
         }
     }
 }
@@ -488,13 +524,13 @@ mod tests {
     use std::time::Instant;
 
     #[tokio::test]
-    async fn stream_wait_for_future_test() {
+    async fn stream_wait_until_future_test() {
         let wait = Duration::from_millis(200);
 
         {
             let instant = Instant::now();
             let vec: Vec<_> = stream::iter([3, 1, 4])
-                .wait_for(async move {
+                .wait_until(async move {
                     rt::sleep(wait).await;
                     true
                 })
@@ -508,7 +544,7 @@ mod tests {
         {
             let instant = Instant::now();
             let vec: Vec<_> = stream::iter([3, 1, 4])
-                .wait_for(async move {
+                .wait_until(async move {
                     rt::sleep(wait).await;
                     false
                 })

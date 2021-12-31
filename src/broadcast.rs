@@ -122,7 +122,7 @@ where
         let stream = rx
             .into_stream()
             .reorder_enumerated()
-            .wait_for(async move { ready_rx.changed().await.is_ok() })
+            .wait_until(async move { ready_rx.changed().await.is_ok() })
             .boxed();
 
         BroadcastStream { stream }
