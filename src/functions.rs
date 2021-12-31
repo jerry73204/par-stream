@@ -1,4 +1,43 @@
-use crate::{common::*, config::ParParams, rt, stream::StreamExt as _, utils};
+use crate::{
+    common::*,
+    config::{BufSize, ParParams},
+    rt,
+    stream::StreamExt as _,
+    utils,
+};
+use flume::r#async::RecvStream;
+
+// iter_blocking
+
+pub use iter_blocking::*;
+
+mod iter_blocking {
+    use super::*;
+
+    /// Converts an [Iterator] into a [Stream] by consuming the iterator in a blocking thread.
+    ///
+    /// It is useful when consuming the iterator is computationally expensive and involves blocking code.
+    /// It prevents blocking the asynchronous context when consuming the returned stream.
+    pub fn iter_blocking<B, I>(buf_size: B, iter: I) -> RecvStream<'static, I::Item>
+    where
+        B: Into<BufSize>,
+        I: 'static + IntoIterator + Send,
+        I::Item: Send,
+    {
+        let buf_size = buf_size.into().get();
+        let (tx, rx) = utils::channel(buf_size);
+
+        rt::spawn_blocking(move || {
+            for item in iter.into_iter() {
+                if tx.send(item).is_err() {
+                    break;
+                }
+            }
+        });
+
+        rx.into_stream()
+    }
+}
 
 // par_unfold
 
@@ -796,5 +835,24 @@ mod tests {
         assert!(stream.next().await.is_none());
         assert!(counts.values().all(|&count| count <= max_quota));
         assert!(counts.values().cloned().sum::<usize>() <= max_quota);
+    }
+
+    #[tokio::test]
+    async fn iter_blocking_test() {
+        let iter = (0..2).map(|val| {
+            std::thread::sleep(Duration::from_millis(100));
+            val
+        });
+
+        let vec: Vec<_> = stream::select(
+            super::iter_blocking(None, iter),
+            future::ready(2).into_stream(),
+        )
+        .collect()
+        .await;
+
+        // assuming iter_blocking() will not block the executor,
+        // 2 must go before 0, 1
+        assert_eq!(vec, [2, 0, 1]);
     }
 }
