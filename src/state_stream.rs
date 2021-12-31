@@ -163,15 +163,14 @@ impl<T> DerefMut for Handle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stream::StreamExt as _;
 
     #[tokio::test]
     async fn state_stream_test() {
         let quota = 100;
 
-        let state_stream = super::new(0);
-
         let count: usize = stream::repeat(())
-            .zip(state_stream)
+            .with_state(0)
             .filter_map(|((), mut cost)| async move {
                 if *cost < quota {
                     *cost += 1;
@@ -191,7 +190,7 @@ mod tests {
     #[tokio::test]
     async fn state_stream_simple_test() {
         {
-            let mut state_stream = super::new(0);
+            let mut state_stream = StateStream::new(0);
 
             let handle = state_stream.next().await.unwrap();
             handle.send().unwrap();
@@ -206,14 +205,14 @@ mod tests {
         }
 
         {
-            let mut state_stream = super::new(0);
+            let mut state_stream = StateStream::new(0);
             let handle = state_stream.next().await.unwrap();
             drop(state_stream);
             assert!(handle.send().is_err());
         }
 
         {
-            let mut state_stream = super::new(0);
+            let mut state_stream = StateStream::new(0);
             let handle = state_stream.next().await.unwrap();
             handle.close();
             assert!(state_stream.next().await.is_none());

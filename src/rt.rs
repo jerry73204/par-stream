@@ -169,7 +169,7 @@ mod rt_tokio {
     where
         F: Future,
     {
-        Runtome::new().block_on(future)
+        Runtime::new().unwrap().block_on(future)
     }
 
     #[derive(Debug)]
