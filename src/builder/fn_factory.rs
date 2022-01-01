@@ -1,49 +1,50 @@
-pub type BoxFnFactory<In, Out> = Box<dyn FnMut(In) -> Box<dyn FnOnce() -> Out + Send> + Send>;
+pub type BoxFnFactory<In, Out> = Box<dyn FnMut(In) -> BoxFn<'static, Out> + Send>;
+pub(crate) type BoxFn<'a, T> = Box<dyn FnOnce() -> T + Send + 'a>;
 
-pub trait FnFactory<In, Out, Func>
+pub trait FnFactory<In, Out>
 where
-    Self: 'static + Send + FnMut(In) -> Func,
-    Func: 'static + Send + FnOnce() -> Out,
+    Self::Fn: 'static + Send + FnOnce() -> Out,
     In: 'static + Send,
     Out: 'static + Send,
 {
-    fn generate(&mut self, input: In) -> Func;
+    type Fn;
+
+    fn generate(&mut self, input: In) -> Self::Fn;
 
     fn boxed(self) -> BoxFnFactory<In, Out>;
 
-    fn chain<GOut, G, GFunc>(self, other: G) -> BoxFnFactory<In, GOut>
+    fn chain<GOut, G>(self, other: G) -> BoxFnFactory<In, GOut>
     where
         Self: Sized + Send,
-        G: Send + Clone + FnFactory<Out, GOut, GFunc>,
+        G: 'static + Send + Clone + FnFactory<Out, GOut>,
         GOut: 'static + Send,
-        GFunc: 'static + Send + FnOnce() -> GOut;
+        G::Fn: 'static + Send + FnOnce() -> GOut;
 }
 
-impl<F, In, Out, Func> FnFactory<In, Out, Func> for F
+impl<F, In, Out, Func> FnFactory<In, Out> for F
 where
     F: 'static + Send + FnMut(In) -> Func,
     Func: 'static + Send + FnOnce() -> Out,
     In: 'static + Send,
     Out: 'static + Send,
 {
-    fn generate(&mut self, input: In) -> Func {
+    type Fn = Func;
+
+    fn generate(&mut self, input: In) -> Self::Fn {
         self(input)
     }
 
     fn boxed(mut self) -> BoxFnFactory<In, Out> {
-        Box::new(move |input: In| -> Box<dyn FnOnce() -> Out + Send> {
-            Box::new(self.generate(input))
-        })
+        Box::new(move |input: In| -> BoxFn<'static, Out> { Box::new(self.generate(input)) })
     }
 
-    fn chain<GOut, G, GFunc>(mut self, other: G) -> BoxFnFactory<In, GOut>
+    fn chain<GOut, G>(mut self, other: G) -> BoxFnFactory<In, GOut>
     where
         Self: Sized,
-        G: Clone + FnFactory<Out, GOut, GFunc>,
+        G: 'static + Send + Clone + FnFactory<Out, GOut>,
         GOut: 'static + Send,
-        GFunc: 'static + Send + FnOnce() -> GOut,
     {
-        Box::new(move |input: In| -> Box<dyn FnOnce() -> GOut + Send> {
+        Box::new(move |input: In| -> BoxFn<'static, GOut> {
             let func1 = self.generate(input);
             let mut g = other.clone();
 

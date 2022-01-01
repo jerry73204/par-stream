@@ -19,6 +19,24 @@ use flume::r#async::RecvStream;
 pub type UnorderedStream<T> = RecvStream<'static, T>;
 pub type OrderedStream<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
 
+pub struct UnfoldAsyncBuilder<Fac>
+where
+    Fac: FutureFactory<()>,
+    <Fac::Fut as Future>::Output: Send,
+{
+    fac: Fac,
+}
+
+pub struct UnfoldBlockingBuilder<Out, Fac>
+where
+    Fac: FnFactory<(), Out>,
+    Fac::Fn: 'static + Send + FnOnce() -> Out,
+    Out: 'static + Send,
+{
+    fac: Fac,
+    _phantom: PhantomData<Out>,
+}
+
 pub struct ParBuilder<St>
 where
     St: ?Sized + Stream,
@@ -26,47 +44,181 @@ where
     stream: St,
 }
 
-pub struct ParAsyncBuilder<St, Fac, Fut>
+pub struct ParAsyncBuilder<St, Fac>
 where
     St: ?Sized + Stream,
     St::Item: 'static + Send,
-    Fac: FutureFactory<St::Item, Fut::Output, Fut>,
-    Fut: 'static + Send + Future,
-    Fut::Output: Send,
+    Fac: FutureFactory<St::Item>,
+    Fac::Fut: 'static + Send + Future,
+    <Fac::Fut as Future>::Output: Send,
 {
     fac: Fac,
-    _phantom: PhantomData<Fut>,
     stream: St,
 }
 
-pub struct ParAsyncTailBlockBuilder<St, FutFac, Fut, FnFac, Func, Out>
+pub struct ParAsyncTailBlockBuilder<St, FutFac, FnFac, Out>
 where
     St: ?Sized + Stream,
     St::Item: 'static + Send,
-    FutFac: FutureFactory<St::Item, Fut::Output, Fut>,
-    Fut: 'static + Send + Future,
-    Fut::Output: Send,
-    FnFac: FnFactory<Fut::Output, Out, Func>,
-    Func: 'static + Send + FnOnce() -> Out,
+    FutFac: FutureFactory<St::Item>,
+    FutFac::Fut: 'static + Send + Future,
+    <FutFac::Fut as Future>::Output: Send,
+    FnFac: FnFactory<<FutFac::Fut as Future>::Output, Out>,
+    FnFac::Fn: 'static + Send + FnOnce() -> Out,
     Out: 'static + Send,
 {
     fut_fac: FutFac,
     fn_fac: FnFac,
-    _phantom: PhantomData<(Fut, Func, Out)>,
+    _phantom: PhantomData<Out>,
     stream: St,
 }
 
-pub struct ParBlockingBuilder<St, Fac, Func, Out>
+pub struct ParBlockingBuilder<St, Fac, Out>
 where
     St: ?Sized + Stream,
     St::Item: 'static + Send,
-    Fac: FnFactory<St::Item, Out, Func>,
-    Func: 'static + Send + FnOnce() -> Out,
+    Fac: FnFactory<St::Item, Out>,
+    Fac::Fn: 'static + Send + FnOnce() -> Out,
     Out: 'static + Send,
 {
     fac: Fac,
-    _phantom: PhantomData<(Func, Out)>,
+    _phantom: PhantomData<Out>,
     stream: St,
+}
+
+impl<Fac> UnfoldAsyncBuilder<Fac>
+where
+    Fac: FutureFactory<()>,
+    <Fac::Fut as Future>::Output: Send,
+{
+    pub fn new<Fut>(fac: Fac) -> Self
+    where
+        Fac: FnMut(()) -> Fut,
+        Fut: 'static + Send + Future,
+        Fut::Output: 'static + Send,
+    {
+        Self { fac }
+    }
+
+    pub fn map_async<NewFut, NewFac>(
+        self,
+        f: NewFac,
+    ) -> UnfoldAsyncBuilder<ComposeFutureFactory<(), Fac, NewFac>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(<Fac::Fut as Future>::Output) -> NewFut,
+        NewFut: 'static + Send + Future,
+        NewFut::Output: 'static + Send,
+    {
+        UnfoldAsyncBuilder {
+            fac: self.fac.compose(f),
+        }
+    }
+
+    pub fn into_stream<P>(self, params: P) -> RecvStream<'static, <Fac::Fut as Future>::Output>
+    where
+        Fac: 'static + Send + Clone,
+        P: Into<ParParams>,
+    {
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
+        let Self { fac, .. } = self;
+        let (output_tx, output_rx) = utils::channel(buf_size);
+
+        (0..num_workers).for_each(move |_| {
+            let mut fac = fac.clone();
+            let output_tx = output_tx.clone();
+
+            rt::spawn(async move {
+                let _ = stream::repeat(())
+                    .then(|()| fac.generate(()))
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
+            });
+        });
+
+        output_rx.into_stream()
+    }
+}
+
+impl<Out, Fac> UnfoldBlockingBuilder<Out, Fac>
+where
+    Fac: FnFactory<(), Out>,
+    Fac::Fn: 'static + Send + FnOnce() -> Out,
+    Out: 'static + Send,
+{
+    pub fn new<Func>(fac: Fac) -> Self
+    where
+        Fac: FnMut() -> Func,
+    {
+        Self {
+            fac,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn map_async<NewFut, NewFac>(
+        self,
+        f: NewFac,
+    ) -> UnfoldAsyncBuilder<ComposeFutureFactory<(), impl FnMut(()) -> rt::JoinHandle<Out>, NewFac>>
+    where
+        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFut,
+        NewFut: 'static + Send + Future,
+        NewFut::Output: 'static + Send,
+    {
+        let mut orig_fac = self.fac;
+        let orig_fac_async = move |()| rt::spawn_blocking(orig_fac.generate(()));
+
+        UnfoldAsyncBuilder {
+            fac: orig_fac_async.compose(f),
+        }
+    }
+
+    pub fn map_blocking<NewOut, NewFunc, NewFac>(
+        self,
+        f: NewFac,
+    ) -> UnfoldBlockingBuilder<NewFunc::Output, BoxFnFactory<(), NewFunc::Output>>
+    where
+        Fac: Send,
+        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFunc,
+        NewFunc: 'static + Send + FnOnce() -> NewOut,
+        NewFunc::Output: 'static + Send,
+    {
+        UnfoldBlockingBuilder {
+            fac: self.fac.chain(f),
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn into_stream<P>(self, params: P) -> RecvStream<'static, Out>
+    where
+        Fac: 'static + Send + Clone,
+        P: Into<ParParams>,
+    {
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
+        let Self { fac, .. } = self;
+        let (output_tx, output_rx) = utils::channel(buf_size);
+
+        (0..num_workers).for_each(move |_| {
+            let mut fac = fac.clone();
+            let output_tx = output_tx.clone();
+
+            rt::spawn_blocking(move || loop {
+                let func = fac.generate(());
+                let output = func();
+                if output_tx.send(output).is_err() {
+                    break;
+                }
+            });
+        });
+
+        output_rx.into_stream()
+    }
 }
 
 impl<St> ParBuilder<St>
@@ -77,27 +229,23 @@ where
         Self { stream }
     }
 
-    pub fn map_async<Fac, Fut>(self, fac: Fac) -> ParAsyncBuilder<St, Fac, Fut>
+    pub fn map_async<Fut, Fac>(self, fac: Fac) -> ParAsyncBuilder<St, Fac>
     where
         St::Item: Send,
         Fac: 'static + Send + FnMut(St::Item) -> Fut,
-        Fut: Send + Future,
+        Fut: 'static + Send + Future,
         Fut::Output: Send,
     {
         let Self { stream } = self;
 
-        ParAsyncBuilder {
-            fac,
-            stream,
-            _phantom: PhantomData,
-        }
+        ParAsyncBuilder { fac, stream }
     }
 
-    pub fn map_blocking<Fac, Func, Out>(self, fac: Fac) -> ParBlockingBuilder<St, Fac, Func, Out>
+    pub fn map_blocking<Fac, Func, Out>(self, fac: Fac) -> ParBlockingBuilder<St, Fac, Out>
     where
         St::Item: 'static + Send,
         Fac: 'static + Send + FnMut(St::Item) -> Func,
-        Func: Send + FnOnce() -> Out,
+        Func: 'static + Send + FnOnce() -> Out,
         Out: Send,
     {
         let Self { stream } = self;
@@ -110,24 +258,20 @@ where
     }
 }
 
-impl<St, Fac, Fut> ParAsyncBuilder<St, Fac, Fut>
+impl<St, Fac> ParAsyncBuilder<St, Fac>
 where
     St: Stream,
     St::Item: 'static + Send,
-    Fac: 'static + Send + FnMut(St::Item) -> Fut,
-    Fut: 'static + Send + Future,
-    Fut::Output: 'static + Send,
+    Fac: 'static + Send + FutureFactory<St::Item>,
+    Fac::Fut: 'static + Send + Future,
+    <Fac::Fut as Future>::Output: 'static + Send,
 {
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
-    ) -> ParAsyncBuilder<
-        St,
-        BoxFutureFactory<St::Item, NewFut::Output>,
-        BoxFuture<'static, NewFut::Output>,
-    >
+    ) -> ParAsyncBuilder<St, ComposeFutureFactory<St::Item, Fac, NewFac>>
     where
-        NewFac: 'static + Send + Clone + FnMut(Fut::Output) -> NewFut,
+        NewFac: 'static + Send + Clone + FnMut(<Fac::Fut as Future>::Output) -> NewFut,
         NewFut: 'static + Send + Future,
         NewFut::Output: 'static + Send,
     {
@@ -138,8 +282,7 @@ where
         } = self;
 
         ParAsyncBuilder {
-            fac: orig_fac.chain(new_fac),
-            _phantom: PhantomData,
+            fac: orig_fac.compose(new_fac),
             stream,
         }
     }
@@ -147,9 +290,9 @@ where
     pub fn map_blocking<NewOut, NewFac, NewFunc>(
         self,
         new_fac: NewFac,
-    ) -> ParAsyncTailBlockBuilder<St, Fac, Fut, NewFac, NewFunc, NewOut>
+    ) -> ParAsyncTailBlockBuilder<St, Fac, NewFac, NewOut>
     where
-        NewFac: 'static + Send + Clone + FnMut(Fut::Output) -> NewFunc,
+        NewFac: 'static + Send + Clone + FnMut(<Fac::Fut as Future>::Output) -> NewFunc,
         NewFunc: 'static + Send + FnOnce() -> NewOut,
         NewFunc::Output: 'static + Send,
     {
@@ -159,7 +302,6 @@ where
             ..
         } = self;
 
-        // let new_fac_async = move |input: Fut::Output| rt::spawn_blocking(new_fac(input));
         ParAsyncTailBlockBuilder {
             fut_fac: orig_fac,
             fn_fac: new_fac,
@@ -168,7 +310,10 @@ where
         }
     }
 
-    pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Fut::Output>
+    pub fn build_unordered_stream<P>(
+        self,
+        params: P,
+    ) -> UnorderedStream<<Fac::Fut as Future>::Output>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -181,7 +326,7 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).shared();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -200,7 +345,7 @@ where
         output_rx.into_stream()
     }
 
-    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Fut::Output>
+    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<<Fac::Fut as Future>::Output>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -213,7 +358,10 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac(item)).enumerate().shared();
+        let stream = stream
+            .map(move |item| fac.generate(item))
+            .enumerate()
+            .shared();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -233,12 +381,12 @@ where
     }
 }
 
-impl<St, Fac, Fut> ParAsyncBuilder<St, Fac, Fut>
+impl<St, Fac> ParAsyncBuilder<St, Fac>
 where
     St: 'static + Send + Stream,
     St::Item: 'static + Send,
-    Fac: 'static + Send + FnMut(St::Item) -> Fut,
-    Fut: 'static + Send + Future<Output = ()>,
+    Fac: 'static + Send + FutureFactory<St::Item>,
+    Fac::Fut: 'static + Send + Future<Output = ()>,
 {
     pub async fn for_each<N>(self, num_workers: N)
     where
@@ -248,7 +396,7 @@ where
         let Self {
             mut fac, stream, ..
         } = self;
-        let stream = stream.map(move |item| fac(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).shared();
 
         let worker_futures = (0..num_workers).map(move |_| {
             let stream = stream.clone();
@@ -262,24 +410,23 @@ where
     }
 }
 
-impl<St, Fac, Func, Out> ParBlockingBuilder<St, Fac, Func, Out>
+impl<St, Fac, Out> ParBlockingBuilder<St, Fac, Out>
 where
     St: Stream,
     St::Item: 'static + Send,
-    Fac: 'static + Send + FnMut(St::Item) -> Func,
-    Func: 'static + Send + FnOnce() -> Out,
-    Func::Output: 'static + Send,
+    Fac: 'static + Send + FnFactory<St::Item, Out>,
+    Fac::Fn: 'static + Send + FnOnce() -> Out,
+    Out: 'static + Send,
 {
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
     ) -> ParAsyncBuilder<
         St,
-        BoxFutureFactory<St::Item, NewFut::Output>,
-        BoxFuture<'static, NewFut::Output>,
+        ComposeFutureFactory<St::Item, impl FnMut(St::Item) -> rt::JoinHandle<Out>, NewFac>,
     >
     where
-        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFut,
+        NewFac: Send + Clone + FnMut(Out) -> NewFut,
         NewFut: 'static + Send + Future,
         NewFut::Output: 'static + Send,
     {
@@ -289,11 +436,10 @@ where
             ..
         } = self;
 
-        let orig_fac_async = move |input: St::Item| rt::spawn_blocking(orig_fac(input));
+        let orig_fac_async = move |input: St::Item| rt::spawn_blocking(orig_fac.generate(input));
 
         ParAsyncBuilder {
-            fac: orig_fac_async.chain(new_fac),
-            _phantom: PhantomData,
+            fac: orig_fac_async.compose(new_fac),
             stream,
         }
     }
@@ -301,14 +447,9 @@ where
     pub fn map_blocking<NewOut, NewFac, NewFunc>(
         self,
         new_fac: NewFac,
-    ) -> ParBlockingBuilder<
-        St,
-        BoxFnFactory<St::Item, NewOut>,
-        Box<dyn FnOnce() -> NewOut + Send>,
-        NewOut,
-    >
+    ) -> ParBlockingBuilder<St, BoxFnFactory<St::Item, NewOut>, NewOut>
     where
-        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFunc,
+        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFunc,
         NewFunc: 'static + Send + FnOnce() -> NewOut,
         NewFunc::Output: 'static + Send,
     {
@@ -325,7 +466,7 @@ where
         }
     }
 
-    pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Func::Output>
+    pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Out>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -338,7 +479,7 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).shared();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -359,7 +500,7 @@ where
         output_rx.into_stream()
     }
 
-    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Func::Output>
+    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Out>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -372,7 +513,10 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac(item)).enumerate().shared();
+        let stream = stream
+            .map(move |item| fac.generate(item))
+            .enumerate()
+            .shared();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -394,12 +538,12 @@ where
     }
 }
 
-impl<St, Fac, Func> ParBlockingBuilder<St, Fac, Func, ()>
+impl<St, Fac> ParBlockingBuilder<St, Fac, ()>
 where
     St: 'static + Send + Stream,
     St::Item: 'static + Send,
-    Fac: 'static + Send + FnMut(St::Item) -> Func,
-    Func: 'static + Send + FnOnce() -> (),
+    Fac: 'static + Send + FnFactory<St::Item, ()>,
+    Fac::Fn: 'static + Send + FnOnce() -> (),
 {
     pub async fn for_each<N>(self, num_workers: N)
     where
@@ -409,7 +553,7 @@ where
             mut fac, stream, ..
         } = self;
         let num_workers = num_workers.into().get();
-        let stream = stream.map(move |item| fac(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).shared();
 
         let worker_futures = (0..num_workers).map(move |_| {
             let mut stream = stream.clone();
@@ -425,27 +569,23 @@ where
     }
 }
 
-impl<St, FutFac, Fut, FnFac, Func, Out> ParAsyncTailBlockBuilder<St, FutFac, Fut, FnFac, Func, Out>
+impl<St, FutFac, FnFac, Out> ParAsyncTailBlockBuilder<St, FutFac, FnFac, Out>
 where
     St: Stream,
     St::Item: 'static + Send,
-    FutFac: 'static + Send + FnMut(St::Item) -> Fut,
-    Fut: 'static + Send + Future,
-    Fut::Output: 'static + Send,
-    FnFac: 'static + Send + Clone + FnMut(Fut::Output) -> Func,
-    Func: 'static + Send + FnOnce() -> Out,
-    Func::Output: 'static + Send,
+    FutFac: 'static + Send + FutureFactory<St::Item>,
+    FutFac::Fut: 'static + Send + Future,
+    <FutFac::Fut as Future>::Output: 'static + Send,
+    FnFac: 'static + Send + Clone + FnFactory<<FutFac::Fut as Future>::Output, Out>,
+    FnFac::Fn: 'static + Send + FnOnce() -> Out,
+    Out: 'static + Send,
 {
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
-    ) -> ParAsyncBuilder<
-        St,
-        BoxFutureFactory<St::Item, NewFut::Output>,
-        BoxFuture<'static, NewFut::Output>,
-    >
+    ) -> ParAsyncBuilder<St, BoxFutureFactory<'static, St::Item, NewFut::Output>>
     where
-        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFut,
+        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFut,
         NewFut: 'static + Send + Future,
         NewFut::Output: 'static + Send,
     {
@@ -456,11 +596,12 @@ where
             ..
         } = self;
 
-        let fn_fac_async = move |input: Fut::Output| rt::spawn_blocking(fn_fac(input));
+        let fn_fac_async = move |input: <FutFac::Fut as Future>::Output| {
+            rt::spawn_blocking(fn_fac.generate(input))
+        };
 
         ParAsyncBuilder {
-            fac: fut_fac.chain(fn_fac_async).chain(new_fac),
-            _phantom: PhantomData,
+            fac: fut_fac.compose(fn_fac_async).compose(new_fac).boxed(),
             stream,
         }
     }
@@ -471,13 +612,11 @@ where
     ) -> ParAsyncTailBlockBuilder<
         St,
         FutFac,
-        Fut,
-        BoxFnFactory<Fut::Output, NewOut>,
-        Box<dyn FnOnce() -> NewOut + Send>,
+        BoxFnFactory<<FutFac::Fut as Future>::Output, NewOut>,
         NewOut,
     >
     where
-        NewFac: 'static + Send + Clone + FnMut(Func::Output) -> NewFunc,
+        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFunc,
         NewFunc: 'static + Send + FnOnce() -> NewOut,
         NewFunc::Output: 'static + Send,
     {
@@ -496,7 +635,7 @@ where
         }
     }
 
-    pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Func::Output>
+    pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Out>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -504,7 +643,7 @@ where
         self.into_async_builder().build_unordered_stream(params)
     }
 
-    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Func::Output>
+    pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Out>
     where
         St: 'static + Send,
         P: Into<ParParams>,
@@ -512,13 +651,7 @@ where
         self.into_async_builder().build_ordered_stream(params)
     }
 
-    fn into_async_builder(
-        self,
-    ) -> ParAsyncBuilder<
-        St,
-        BoxFutureFactory<St::Item, Func::Output>,
-        BoxFuture<'static, Func::Output>,
-    > {
+    fn into_async_builder(self) -> ParAsyncBuilder<St, BoxFutureFactory<'static, St::Item, Out>> {
         let Self {
             fut_fac,
             mut fn_fac,
@@ -526,11 +659,12 @@ where
             ..
         } = self;
 
-        let fn_fac_async = move |input: Fut::Output| rt::spawn_blocking(fn_fac(input));
+        let fn_fac_async = move |input: <FutFac::Fut as Future>::Output| {
+            rt::spawn_blocking(fn_fac.generate(input))
+        };
 
         ParAsyncBuilder {
-            fac: fut_fac.chain(fn_fac_async),
-            _phantom: PhantomData,
+            fac: fut_fac.compose(fn_fac_async).boxed(),
             stream,
         }
     }
