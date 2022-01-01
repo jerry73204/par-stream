@@ -1,12 +1,14 @@
 //! Parallel processing libray for asynchronous streams.
 //!
-//! # Cargo Features
+//! # Runtime Configuration
 //!
 //! The following cargo features select the backend runtime for parallel workers.
-//! One of them must be specified, otherwise the crate raises a compile error.
+//! At most one of them can be specified, otherwise the crate raises a compile error.
 //!
 //! - `runtime-tokio` enables the [tokio] multi-threaded runtime.
 //! - `runtime-async-std` enables the [async-std](async_std) default runtime.
+//!
+//! Please read [Using Custom Runtime](#using-custom-runtime) if you would like to provide a custom runtime.
 //!
 //! # Extension Traits
 //!
@@ -227,6 +229,57 @@
 //! - [`stateful_then`](StreamExt::stateful_then), [`stateful_map`](StreamExt::stateful_map), [`stateful_batching`](StreamExt::stateful_batching) are stateful counterparts.
 //! - [`take_until_error`](TryStreamExt::take_until_error) causes the stream to stop taking values after an error.
 //! - [`catch_error`](TryStreamExt::catch_error) splits a stream of results into a stream of unwrapped value and a future that may resolve to an error.
+//!
+//! # Using Custom Runtime
+//!
+//! To provide custom runtime implementation, declare a type that implements [Runtime](crate::rt::Runtime).
+//! Then, create an instance for that type and pass to [set_global_runtime()](crate::rt::set_global_runtime).
+//! The global runtime can be set at most once, and is effective only when no runtime Cargo features are enabled.
+//! Otherwise [set_global_runtime()](crate::rt::set_global_runtime) returns an error.
+//!
+//! ```ignore
+//! use par_stream::rt::{Runtime, SpawnHandle, SleepHandle};
+//!
+//! pub struct MyRuntime {
+//!     // omit..
+//! }
+//!
+//! impl MyRuntime {
+//!     pub fn new() -> Self { /* omit */ }
+//! }
+//!
+//! unsafe impl Runtime for MyRuntime {
+//!     fn block_on<'a>(
+//!         &self,
+//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>
+//!     ) -> Box<dyn Send + Any + 'static>
+//!     { /* omit */ }
+//!
+//!     fn block_on_executor<'a>(
+//!         &self,
+//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>
+//!     ) -> Box<dyn Send + Any + 'static>
+//!     { /* omit */ }
+//!
+//!     fn spawn(
+//!         &self,
+//!         fut: BoxFuture<'static, Box<dyn Send + Any + 'static>>
+//!     ) -> Box<dyn SpawnHandle>
+//!     { /* omit */ }
+//!
+//!     fn spawn_blocking(
+//!         &self,
+//!         f: Box<dyn FnOnce() -> Box<dyn Send + Any + 'static> + Send>
+//!     ) -> Box<dyn SpawnHandle>
+//!     { /* omit */ }
+//!
+//!
+//!     fn sleep(&self, dur: Duration) -> Box<dyn SleepHandle>
+//!     { /* omit */ }
+//! }
+//!
+//! par_stream::rt::set_global_runtime(MyRuntime::new()).unwrap();
+//! ```
 
 mod broadcast;
 pub mod builder;
