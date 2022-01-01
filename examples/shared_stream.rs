@@ -18,14 +18,16 @@ struct Opts {
     pub spawn: bool,
 }
 
-async fn main_async() {
-    let opts = Opts::from_args();
+fn main() {
+    par_stream::rt::block_on_executor(async move {
+        let opts = Opts::from_args();
 
-    let elapsed_notifier = shared_stream_by_notifier_test(&opts).await;
-    let elapsed_channel = shared_stream_by_channel_test(&opts).await;
+        let elapsed_notifier = shared_stream_by_notifier_test(&opts).await;
+        let elapsed_channel = shared_stream_by_channel_test(&opts).await;
 
-    println!("elapsed for notifier\t{:?}ms", elapsed_notifier.as_millis());
-    println!("elapsed for channel\t{:?}ms", elapsed_channel.as_millis());
+        println!("elapsed for notifier\t{:?}ms", elapsed_notifier.as_millis());
+        println!("elapsed for channel\t{:?}ms", elapsed_channel.as_millis());
+    });
 }
 
 async fn shared_stream_by_notifier_test(opts: &Opts) -> Duration {
@@ -118,21 +120,4 @@ async fn task(input: u64, pow: u32, spawn: bool) -> u64 {
 
 fn compute(input: u64, pow: u32) -> u64 {
     (0..pow).fold(1u64, move |product, _| product.wrapping_mul(input))
-}
-
-#[cfg(feature = "runtime-async-std")]
-#[async_std::main]
-async fn main() {
-    main_async().await
-}
-
-#[cfg(feature = "runtime-tokio")]
-#[tokio::main]
-async fn main() {
-    main_async().await
-}
-
-#[cfg(feature = "runtime-smol")]
-fn main() {
-    smol::block_on(main_async())
 }
