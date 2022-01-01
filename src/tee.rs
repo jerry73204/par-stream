@@ -12,6 +12,7 @@ where
     T: 'static,
 {
     pub(super) buf_size: Option<usize>,
+    #[derivative(Debug = "ignore")]
     pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
     pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<T>>>>>,
     #[derivative(Debug = "ignore")]

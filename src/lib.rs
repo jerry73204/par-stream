@@ -228,15 +228,6 @@
 //! - [`take_until_error`](TryStreamExt::take_until_error) causes the stream to stop taking values after an error.
 //! - [`catch_error`](TryStreamExt::catch_error) splits a stream of results into a stream of unwrapped value and a future that may resolve to an error.
 
-/// Commonly used traits.
-pub mod prelude {
-    pub use super::{
-        index_stream::IndexStreamExt, par_stream::ParStreamExt, stream::StreamExt,
-        try_index_stream::TryIndexStreamExt, try_par_stream::TryParStreamExt,
-        try_stream::TryStreamExt,
-    };
-}
-
 mod broadcast;
 pub mod builder;
 mod common;
@@ -267,3 +258,22 @@ pub use tee::*;
 pub use try_index_stream::*;
 pub use try_par_stream::*;
 pub use try_stream::*;
+
+crate::utils::has_tokio! {
+    pub use tokio;
+}
+
+crate::utils::has_async_std! {
+    pub use async_std;
+}
+
+/// Commonly used traits.
+pub mod prelude {
+
+    pub use super::{
+        index_stream::IndexStreamExt, stream::StreamExt, try_index_stream::TryIndexStreamExt,
+        try_stream::TryStreamExt,
+    };
+
+    pub use super::{par_stream::ParStreamExt, try_par_stream::TryParStreamExt};
+}

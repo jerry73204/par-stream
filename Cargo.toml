@@ -44,4 +44,4 @@ structopt = "0.3.25"
 runtime-async-std = ["async-std"]
 runtime-tokio = ["tokio/rt-multi-thread"]
 # runtime-smol = ["smol"]
-doc-only = ["runtime-tokio", "async-std"]
+doc-only = ["async-std"]
