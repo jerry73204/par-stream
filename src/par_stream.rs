@@ -690,17 +690,17 @@ mod tests {
 
         let sums: Vec<_> = stream::iter(data)
             .par_batching(None, |_, mut stream| async move {
-                let mut sum = 0;
+                let mut sum = stream.next().await?;
 
                 while let Some(val) = stream.next().await {
                     sum += val;
 
                     if sum >= 1000 {
-                        break;
+                        return Some((sum, stream));
                     }
                 }
 
-                Some((sum, stream))
+                None
             })
             .collect()
             .await;
