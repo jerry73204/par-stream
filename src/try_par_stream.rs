@@ -3,12 +3,16 @@ use crate::{
     config::{NumWorkers, ParParams},
     par_stream::ParStreamExt as _,
     rt,
+    shared_stream::Shared,
     stream::StreamExt as _,
     try_index_stream::TryIndexStreamExt as _,
-    try_stream::TryStreamExt as _,
+    try_stream::{TakeUntilError, TryStreamExt as _},
     utils,
 };
+use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
+
+pub type TryParStream<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
 
 /// The trait extends [TryStream](futures::stream::TryStream) types with parallel processing combinators.
 pub trait TryParStreamExt
@@ -18,14 +22,10 @@ where
     Self::Error: 'static + Send,
 {
     /// Fallible stream combinator for [par_batching](crate::ParStreamExt::par_batching).
-    fn try_par_batching<U, P, F, Fut>(
-        self,
-        params: P,
-        f: F,
-    ) -> BoxStream<'static, Result<U, Self::Error>>
+    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, Self::Error>
     where
-        F: FnMut(usize, flume::Receiver<Self::Ok>, flume::Sender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), Self::Error>> + Send,
+        F: 'static + Clone + Send + FnMut(usize, Shared<Self>) -> Fut,
+        Fut: 'static + Future<Output = Result<Option<(U, Shared<Self>)>, Self::Error>> + Send,
         U: 'static + Send,
         P: Into<ParParams>;
 
@@ -106,76 +106,61 @@ where
     T: 'static + Send,
     E: 'static + Send,
 {
-    fn try_par_batching<U, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
+    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, E>
     where
         P: Into<ParParams>,
         U: 'static + Send,
-        F: FnMut(usize, flume::Receiver<T>, flume::Sender<U>) -> Fut,
-        Fut: 'static + Future<Output = Result<(), E>> + Send,
+        F: 'static + Clone + Send + FnMut(usize, Shared<Self>) -> Fut,
+        Fut: 'static + Future<Output = Result<Option<(U, Shared<Self>)>, E>> + Send,
     {
         let ParParams {
             num_workers,
             buf_size,
         } = params.into();
 
-        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
+        let (terminate_tx, _) = broadcast::channel(1);
+        let input_stream = self.shared();
 
-        let input_fut = rt::spawn(async move {
-            let mut stream = self.boxed();
+        (0..num_workers).for_each(move |worker_index| {
+            let input_stream = input_stream.clone();
+            let output_tx = output_tx.clone();
+            let mut terminate_rx = terminate_tx.subscribe();
+            let terminate_tx = terminate_tx.clone();
+            let f = f.clone();
 
-            while let Some(item) = stream.next().await {
-                let result = input_tx.send_async(item?).await;
-                if result.is_err() {
-                    break;
-                }
-            }
-            Ok(())
+            rt::spawn(async move {
+                let _ = stream::repeat(())
+                    .take_until(async move {
+                        let _ = terminate_rx.recv().await;
+                    })
+                    .stateful_then(
+                        Some((f, terminate_tx, input_stream)),
+                        move |state, ()| async move {
+                            let (mut f, terminate_tx, input_stream) = state.unwrap();
+                            let result = f(worker_index, input_stream).await;
+
+                            if result.is_err() {
+                                let _ = terminate_tx.send(());
+                            }
+
+                            match result {
+                                Ok(Some((item, input_stream))) => {
+                                    Some((Some((f, terminate_tx, input_stream)), Ok(item)))
+                                }
+                                Ok(None) => None,
+                                Err(err) => Some((None, Err(err))),
+                            }
+                        },
+                    )
+                    .take_until_error()
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
+            });
         });
 
-        let worker_futs: Vec<_> = (0..num_workers)
-            .map(|worker_index| {
-                let fut = f(worker_index, input_rx.clone(), output_tx.clone());
-                rt::spawn(fut)
-            })
-            .collect();
-
-        let join_fut = future::try_join(input_fut, future::try_join_all(worker_futs))
-            .map(|result| result.map(|_| ()));
-
-        let select_stream = stream::select(
-            output_rx.into_stream().map(|item| Ok(Some(item))),
-            join_fut.into_stream().map(|result| result.map(|()| None)),
-        )
-        .boxed();
-
-        stream::try_unfold(
-            (Some(select_stream), None),
-            |(mut stream, error)| async move {
-                if let Some(stream_) = &mut stream {
-                    match stream_.next().await {
-                        Some(Ok(Some(item))) => {
-                            return Ok(Some((Some(item), (stream, error))));
-                        }
-                        Some(Ok(None)) => {
-                            return Ok(Some((None, (stream, error))));
-                        }
-                        Some(Err(err)) => {
-                            return Ok(Some((None, (stream, Some(err)))));
-                        }
-                        None => {}
-                    }
-                }
-
-                if let Some(error) = error {
-                    return Err(error);
-                }
-
-                Ok(None)
-            },
-        )
-        .try_filter_map(|item| async move { Ok(item) })
-        .boxed()
+        output_rx.into_stream().take_until_error()
     }
 
     fn try_par_then<U, P, F, Fut>(self, params: P, mut f: F) -> BoxStream<'static, Result<U, E>>
@@ -383,8 +368,8 @@ mod tests {
         {
             let mut stream = stream::iter(iter::repeat(1).take(10))
                 .map(Ok)
-                .try_par_batching::<(), _, _, _>(None, |_, _, _| async move {
-                    Result::<(), _>::Err("init error")
+                .try_par_batching(None, |_, _| async move {
+                    Result::<Option<((), _)>, _>::Err("init error")
                 });
 
             assert_eq!(stream.next().await, Some(Err("init error")));
@@ -392,29 +377,24 @@ mod tests {
         }
 
         {
-            let mut stream = stream::iter(iter::repeat(1).take(10))
-                .map(Ok)
-                .try_par_batching(None, |_, input, output| async move {
+            let mut stream = stream::repeat(1)
+                .take(10)
+                .map(Result::<_, ()>::Ok)
+                .try_par_batching(None, |_, mut stream| async move {
                     let mut sum = 0;
 
-                    while let Ok(val) = input.recv_async().await {
-                        let new_sum = sum + val;
-                        if new_sum >= 3 {
-                            sum = 0;
-                            let result = output.send_async(new_sum).await;
-                            if result.is_err() {
-                                break;
-                            }
-                        } else {
-                            sum = new_sum;
+                    while let Some(val) = stream.next().await {
+                        sum += val?;
+                        if sum >= 3 {
+                            return Ok(Some((sum, stream)));
                         }
                     }
 
                     if sum > 0 {
-                        let _ = output.send_async(sum).await;
+                        return Ok(Some((sum, stream)));
                     }
 
-                    Result::<_, ()>::Ok(())
+                    Ok(None)
                 });
 
             let mut total = 0;
@@ -427,30 +407,25 @@ mod tests {
         }
 
         {
-            let mut stream = stream::iter(iter::repeat(1).take(10))
-                .map(Ok)
-                .try_par_batching(None, |_, input, output| async move {
+            let mut stream = stream::repeat(1).take(10).map(Ok).try_par_batching(
+                None,
+                |_, mut stream| async move {
                     let mut sum = 0;
 
-                    while let Ok(val) = input.recv_async().await {
-                        let new_sum = sum + val;
-                        if new_sum >= 3 {
-                            sum = 0;
-                            let result = output.send_async(new_sum).await;
-                            if result.is_err() {
-                                break;
-                            }
-                        } else {
-                            sum = new_sum;
+                    while let Some(val) = stream.next().await {
+                        sum += val?;
+                        if sum >= 3 {
+                            return Ok(Some((sum, stream)));
                         }
                     }
 
                     if sum == 0 {
-                        Ok(())
+                        Ok(None)
                     } else {
                         Err(sum)
                     }
-                });
+                },
+            );
 
             let mut total = 0;
             while total < 10 {
