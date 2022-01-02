@@ -2,9 +2,12 @@
 
 use crate::utils::{has_async_std, has_tokio, no_rt};
 
+mod runtime;
+pub use runtime::*;
+
 no_rt! {
-    mod no_rt;
-    pub use no_rt::*;
+    mod rt_custom;
+    pub use rt_custom::*;
 }
 
 has_tokio! {

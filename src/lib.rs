@@ -237,45 +237,51 @@
 //! The global runtime can be set at most once, and is effective only when no runtime Cargo features are enabled.
 //! Otherwise [set_global_runtime()](crate::rt::set_global_runtime) returns an error.
 //!
-//! ```ignore
-//! use par_stream::rt::{Runtime, SpawnHandle, SleepHandle};
+//! ```
+//! use futures::future::BoxFuture;
+//! use par_stream::rt::{Runtime, SleepHandle, SpawnHandle};
+//! use std::{any::Any, time::Duration};
 //!
-//! pub struct MyRuntime {
-//!     // omit..
-//! }
+//! pub struct MyRuntime {/* omit */}
 //!
 //! impl MyRuntime {
-//!     pub fn new() -> Self { /* omit */ }
+//!     pub fn new() -> Self {
+//!         Self { /* omit */ }
+//!     }
 //! }
 //!
 //! unsafe impl Runtime for MyRuntime {
 //!     fn block_on<'a>(
 //!         &self,
-//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>
-//!     ) -> Box<dyn Send + Any + 'static>
-//!     { /* omit */ }
+//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>,
+//!     ) -> Box<dyn Send + Any + 'static> {
+//!         todo!()
+//!     }
 //!
 //!     fn block_on_executor<'a>(
 //!         &self,
-//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>
-//!     ) -> Box<dyn Send + Any + 'static>
-//!     { /* omit */ }
+//!         fut: BoxFuture<'a, Box<dyn Send + Any + 'static>>,
+//!     ) -> Box<dyn Send + Any + 'static> {
+//!         todo!()
+//!     }
 //!
 //!     fn spawn(
 //!         &self,
-//!         fut: BoxFuture<'static, Box<dyn Send + Any + 'static>>
-//!     ) -> Box<dyn SpawnHandle>
-//!     { /* omit */ }
+//!         fut: BoxFuture<'static, Box<dyn Send + Any + 'static>>,
+//!     ) -> Box<dyn SpawnHandle> {
+//!         todo!()
+//!     }
 //!
 //!     fn spawn_blocking(
 //!         &self,
-//!         f: Box<dyn FnOnce() -> Box<dyn Send + Any + 'static> + Send>
-//!     ) -> Box<dyn SpawnHandle>
-//!     { /* omit */ }
+//!         f: Box<dyn FnOnce() -> Box<dyn Send + Any + 'static> + Send>,
+//!     ) -> Box<dyn SpawnHandle> {
+//!         todo!()
+//!     }
 //!
-//!
-//!     fn sleep(&self, dur: Duration) -> Box<dyn SleepHandle>
-//!     { /* omit */ }
+//!     fn sleep(&self, dur: Duration) -> Box<dyn SleepHandle> {
+//!         todo!()
+//!     }
 //! }
 //!
 //! par_stream::rt::set_global_runtime(MyRuntime::new()).unwrap();
