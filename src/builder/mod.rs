@@ -257,6 +257,50 @@ where
     }
 }
 
+impl<St, Fac, Error> ParAsyncBuilder<St, Fac>
+where
+    St: 'static + Send + Stream,
+    St::Item: 'static + Send,
+    Fac: 'static + Send + FutureFactory<St::Item>,
+    Fac::Fut: 'static + Send + Future<Output = Result<(), Error>>,
+    Error: 'static + Send,
+{
+    pub async fn try_for_each<N>(self, num_workers: N) -> Result<(), Error>
+    where
+        N: Into<NumWorkers>,
+    {
+        let num_workers = num_workers.into().get();
+        let Self {
+            mut fac, stream, ..
+        } = self;
+        let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+        let stream = stream
+            .take_until(async move {
+                let _ = terminate_rx.recv().await;
+            })
+            .map(move |item| fac.generate(item))
+            .shared();
+
+        let worker_futures = (0..num_workers).map(move |_| {
+            let stream = stream.clone();
+            let terminate_tx = terminate_tx.clone();
+
+            rt::spawn(async move {
+                let result = stream.map(Ok).try_for_each(|fut| fut).await;
+
+                if result.is_err() {
+                    let _ = terminate_tx.send(());
+                }
+
+                result
+            })
+        });
+
+        future::try_join_all(worker_futures).await?;
+        Ok(())
+    }
+}
+
 impl<St, Fac, Out> ParBlockingBuilder<St, Fac, Out>
 where
     St: Stream,
@@ -514,6 +558,24 @@ where
             fac: fut_fac.compose(fn_fac_async).boxed(),
             stream,
         }
+    }
+}
+
+impl<St, FutFac, FnFac> ParAsyncTailBlockBuilder<St, FutFac, FnFac, ()>
+where
+    St: 'static + Send + Stream,
+    St::Item: 'static + Send,
+    FutFac: 'static + Send + FutureFactory<St::Item>,
+    FutFac::Fut: 'static + Send + Future,
+    <FutFac::Fut as Future>::Output: 'static + Send,
+    FnFac: 'static + Send + Clone + FnFactory<<FutFac::Fut as Future>::Output, ()>,
+    FnFac::Fn: 'static + Send + FnOnce() -> (),
+{
+    pub async fn for_each<N>(self, num_workers: N)
+    where
+        N: Into<NumWorkers>,
+    {
+        self.into_async_builder().for_each(num_workers).await;
     }
 }
 
