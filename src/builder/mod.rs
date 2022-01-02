@@ -15,10 +15,12 @@ use crate::{
     utils,
 };
 use flume::r#async::RecvStream;
+use tokio::sync::broadcast;
 
 pub type UnorderedStream<T> = RecvStream<'static, T>;
 pub type OrderedStream<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
 
+/// Parallel stream builder created by [par_builder](crate::par_stream::ParStreamExt::par_builder).
 pub struct ParBuilder<St>
 where
     St: ?Sized + Stream,
@@ -26,6 +28,7 @@ where
     stream: St,
 }
 
+/// The parallel stream builder with scheduled asynchronous tasks.
 pub struct ParAsyncBuilder<St, Fac>
 where
     St: ?Sized + Stream,
@@ -38,6 +41,7 @@ where
     stream: St,
 }
 
+/// The parallel stream builder with scheduled asynchronous tasks and a blocking task in the end.
 pub struct ParAsyncTailBlockBuilder<St, FutFac, FnFac, Out>
 where
     St: ?Sized + Stream,
@@ -55,6 +59,7 @@ where
     stream: St,
 }
 
+/// The parallel stream builder with scheduled blocking tasks.
 pub struct ParBlockingBuilder<St, Fac, Out>
 where
     St: ?Sized + Stream,
@@ -72,10 +77,12 @@ impl<St> ParBuilder<St>
 where
     St: Stream,
 {
+    /// Creates a builder instance from a stream.
     pub fn new(stream: St) -> Self {
         Self { stream }
     }
 
+    /// Schedules an asynchronous task.
     pub fn map_async<Fut, Fac>(self, fac: Fac) -> ParAsyncBuilder<St, Fac>
     where
         St::Item: Send,
@@ -88,6 +95,7 @@ where
         ParAsyncBuilder { fac, stream }
     }
 
+    /// Schedules a blocking task.
     pub fn map_blocking<Fac, Func, Out>(self, fac: Fac) -> ParBlockingBuilder<St, Fac, Out>
     where
         St::Item: 'static + Send,
@@ -113,6 +121,7 @@ where
     Fac::Fut: 'static + Send + Future,
     <Fac::Fut as Future>::Output: 'static + Send,
 {
+    /// Schedule an asynchronous task.
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
@@ -134,6 +143,10 @@ where
         }
     }
 
+    /// Schedules a blocking task.
+    ///
+    /// The worker thread will pass the blocking task to a blocking thread and
+    /// wait for the task to finish. It will introduce overhead on spawning blocking threads.
     pub fn map_blocking<NewOut, NewFac, NewFunc>(
         self,
         new_fac: NewFac,
@@ -157,6 +170,7 @@ where
         }
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output does not respect the input order.
     pub fn build_unordered_stream<P>(
         self,
         params: P,
@@ -192,6 +206,7 @@ where
         output_rx.into_stream()
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output respects the input order.
     pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<<Fac::Fut as Future>::Output>
     where
         St: 'static + Send,
@@ -235,6 +250,7 @@ where
     Fac: 'static + Send + FutureFactory<St::Item>,
     Fac::Fut: 'static + Send + Future<Output = ()>,
 {
+    /// Runs parallel tasks on each stream item.
     pub async fn for_each<N>(self, num_workers: N)
     where
         N: Into<NumWorkers>,
@@ -265,6 +281,7 @@ where
     Fac::Fut: 'static + Send + Future<Output = Result<(), Error>>,
     Error: 'static + Send,
 {
+    /// Runs parallel tasks on each stream item.
     pub async fn try_for_each<N>(self, num_workers: N) -> Result<(), Error>
     where
         N: Into<NumWorkers>,
@@ -309,6 +326,7 @@ where
     Fac::Fn: 'static + Send + FnOnce() -> Out,
     Out: 'static + Send,
 {
+    /// Schedule an asynchronous task.
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
@@ -335,6 +353,7 @@ where
         }
     }
 
+    /// Schedule a blocking task.
     pub fn map_blocking<NewOut, NewFac, NewFunc>(
         self,
         new_fac: NewFac,
@@ -357,6 +376,7 @@ where
         }
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output does not respect the input order.
     pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Out>
     where
         St: 'static + Send,
@@ -391,6 +411,7 @@ where
         output_rx.into_stream()
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output respects the input order.
     pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Out>
     where
         St: 'static + Send,
@@ -436,6 +457,7 @@ where
     Fac: 'static + Send + FnFactory<St::Item, ()>,
     Fac::Fn: 'static + Send + FnOnce() -> (),
 {
+    /// Runs parallel tasks on each stream item.
     pub async fn for_each<N>(self, num_workers: N)
     where
         N: Into<NumWorkers>,
@@ -460,6 +482,51 @@ where
     }
 }
 
+// impl<St, Fac, Error> ParBlockingBuilder<St, Fac, ()>
+// where
+//     St: 'static + Send + Stream,
+//     St::Item: 'static + Send,
+//     Fac: 'static + Send + FnFactory<St::Item, Result<(), Error>>,
+//     Fac::Fn: 'static + Send + FnOnce() -> Result<(), Error>,
+//     Error: 'static + Send,
+// {
+//     /// Runs parallel tasks on each stream item.
+//     pub async fn try_for_each<N>(self, num_workers: N) -> Result<(), Error>
+//     where
+//         N: Into<NumWorkers>,
+//     {
+//         let Self {
+//             mut fac, stream, ..
+//         } = self;
+//         let num_workers = num_workers.into().get();
+//         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
+//         let stream = stream.take_until(async move {
+//             let _ = terminate_rx.recv().await;
+//         }).map(move |item| fac.generate(item)).shared();
+
+//         let worker_futures = (0..num_workers).map(move |_| {
+//             let mut stream = stream.clone();
+//             let terminate_tx =  terminate_tx.clone();
+
+//             rt::spawn_blocking(move || {
+//                 while let Some(func) = rt::block_on(stream.next()) {
+//                     let result = func();
+
+//                     if result.is_err() {
+//                         let _ = terminate_rx.send(());
+//                         return result;
+//                     }
+//                 }
+
+//                 Ok(())
+//             })
+//         });
+
+//         future::try_join_all(worker_futures).await?;
+//         Ok(())
+//     }
+// }
+
 impl<St, FutFac, FnFac, Out> ParAsyncTailBlockBuilder<St, FutFac, FnFac, Out>
 where
     St: Stream,
@@ -471,6 +538,7 @@ where
     FnFac::Fn: 'static + Send + FnOnce() -> Out,
     Out: 'static + Send,
 {
+    /// Schedule an asynchronous task.
     pub fn map_async<NewFac, NewFut>(
         self,
         new_fac: NewFac,
@@ -497,6 +565,7 @@ where
         }
     }
 
+    /// Schedule a blocking task.
     pub fn map_blocking<NewOut, NewFac, NewFunc>(
         self,
         new_fac: NewFac,
@@ -526,6 +595,7 @@ where
         }
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output does not respect the input order.
     pub fn build_unordered_stream<P>(self, params: P) -> UnorderedStream<Out>
     where
         St: 'static + Send,
@@ -534,6 +604,7 @@ where
         self.into_async_builder().build_unordered_stream(params)
     }
 
+    /// Creates a stream that runs scheduled parallel tasks, which output respects the input order.
     pub fn build_ordered_stream<P>(self, params: P) -> OrderedStream<Out>
     where
         St: 'static + Send,
@@ -571,6 +642,7 @@ where
     FnFac: 'static + Send + Clone + FnFactory<<FutFac::Fut as Future>::Output, ()>,
     FnFac::Fn: 'static + Send + FnOnce() -> (),
 {
+    /// Runs parallel tasks on each stream item.
     pub async fn for_each<N>(self, num_workers: N)
     where
         N: Into<NumWorkers>,
@@ -578,6 +650,25 @@ where
         self.into_async_builder().for_each(num_workers).await;
     }
 }
+
+// impl<St, FutFac, FnFac, Error> ParAsyncTailBlockBuilder<St, FutFac, FnFac, ()>
+// where
+//     St: 'static + Send + Stream,
+//     St::Item: 'static + Send,
+//     FutFac: 'static + Send + FutureFactory<St::Item>,
+//     FutFac::Fut: 'static + Send + Future,
+//     <FutFac::Fut as Future>::Output: 'static + Send,
+//     FnFac: 'static + Send + Clone + FnFactory<<FutFac::Fut as Future>::Output, Result<(), Error>>,
+//     FnFac::Fn: 'static + Send + FnOnce() -> Result<(), Error>,
+// {
+//     /// Runs parallel tasks on each stream item.
+//     pub async fn try_for_each<N>(self, num_workers: N)
+//     where
+//         N: Into<NumWorkers>,
+//     {
+//         self.into_async_builder().try_for_each(num_workers).await;
+//     }
+// }
 
 #[cfg(test)]
 mod tests {
