@@ -11,11 +11,13 @@ where
 
     fn generate(&mut self, input: In) -> Self::Fn;
 
-    fn boxed(self) -> BoxFnFactory<In, Out>;
+    fn boxed(self) -> BoxFnFactory<In, Out>
+    where
+        Self: 'static + Send;
 
     fn chain<GOut, G>(self, other: G) -> BoxFnFactory<In, GOut>
     where
-        Self: Sized + Send,
+        Self: 'static + Send + Sized,
         G: 'static + Send + Clone + FnFactory<Out, GOut>,
         GOut: 'static + Send,
         G::Fn: 'static + Send + FnOnce() -> GOut;
@@ -23,7 +25,7 @@ where
 
 impl<F, In, Out, Func> FnFactory<In, Out> for F
 where
-    F: 'static + Send + FnMut(In) -> Func,
+    F: FnMut(In) -> Func,
     Func: 'static + Send + FnOnce() -> Out,
     In: 'static + Send,
     Out: 'static + Send,
@@ -34,13 +36,16 @@ where
         self(input)
     }
 
-    fn boxed(mut self) -> BoxFnFactory<In, Out> {
+    fn boxed(mut self) -> BoxFnFactory<In, Out>
+    where
+        Self: 'static + Send,
+    {
         Box::new(move |input: In| -> BoxFn<'static, Out> { Box::new(self.generate(input)) })
     }
 
     fn chain<GOut, G>(mut self, other: G) -> BoxFnFactory<In, GOut>
     where
-        Self: Sized,
+        Self: 'static + Send + Sized,
         G: 'static + Send + Clone + FnFactory<Out, GOut>,
         GOut: 'static + Send,
     {

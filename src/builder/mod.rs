@@ -19,24 +19,6 @@ use flume::r#async::RecvStream;
 pub type UnorderedStream<T> = RecvStream<'static, T>;
 pub type OrderedStream<T> = ReorderEnumerated<RecvStream<'static, (usize, T)>, T>;
 
-pub struct UnfoldAsyncBuilder<Fac>
-where
-    Fac: FutureFactory<()>,
-    <Fac::Fut as Future>::Output: Send,
-{
-    fac: Fac,
-}
-
-pub struct UnfoldBlockingBuilder<Out, Fac>
-where
-    Fac: FnFactory<(), Out>,
-    Fac::Fn: 'static + Send + FnOnce() -> Out,
-    Out: 'static + Send,
-{
-    fac: Fac,
-    _phantom: PhantomData<Out>,
-}
-
 pub struct ParBuilder<St>
 where
     St: ?Sized + Stream,
@@ -84,141 +66,6 @@ where
     fac: Fac,
     _phantom: PhantomData<Out>,
     stream: St,
-}
-
-impl<Fac> UnfoldAsyncBuilder<Fac>
-where
-    Fac: FutureFactory<()>,
-    <Fac::Fut as Future>::Output: Send,
-{
-    pub fn new<Fut>(fac: Fac) -> Self
-    where
-        Fac: FnMut(()) -> Fut,
-        Fut: 'static + Send + Future,
-        Fut::Output: 'static + Send,
-    {
-        Self { fac }
-    }
-
-    pub fn map_async<NewFut, NewFac>(
-        self,
-        f: NewFac,
-    ) -> UnfoldAsyncBuilder<ComposeFutureFactory<(), Fac, NewFac>>
-    where
-        NewFac: 'static + Send + Clone + FnMut(<Fac::Fut as Future>::Output) -> NewFut,
-        NewFut: 'static + Send + Future,
-        NewFut::Output: 'static + Send,
-    {
-        UnfoldAsyncBuilder {
-            fac: self.fac.compose(f),
-        }
-    }
-
-    pub fn into_stream<P>(self, params: P) -> RecvStream<'static, <Fac::Fut as Future>::Output>
-    where
-        Fac: 'static + Send + Clone,
-        P: Into<ParParams>,
-    {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let Self { fac, .. } = self;
-        let (output_tx, output_rx) = utils::channel(buf_size);
-
-        (0..num_workers).for_each(move |_| {
-            let mut fac = fac.clone();
-            let output_tx = output_tx.clone();
-
-            rt::spawn(async move {
-                let _ = stream::repeat(())
-                    .then(|()| fac.generate(()))
-                    .map(Ok)
-                    .forward(output_tx.into_sink())
-                    .await;
-            });
-        });
-
-        output_rx.into_stream()
-    }
-}
-
-impl<Out, Fac> UnfoldBlockingBuilder<Out, Fac>
-where
-    Fac: FnFactory<(), Out>,
-    Fac::Fn: 'static + Send + FnOnce() -> Out,
-    Out: 'static + Send,
-{
-    pub fn new<Func>(fac: Fac) -> Self
-    where
-        Fac: FnMut() -> Func,
-    {
-        Self {
-            fac,
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn map_async<NewFut, NewFac>(
-        self,
-        f: NewFac,
-    ) -> UnfoldAsyncBuilder<ComposeFutureFactory<(), impl FnMut(()) -> rt::JoinHandle<Out>, NewFac>>
-    where
-        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFut,
-        NewFut: 'static + Send + Future,
-        NewFut::Output: 'static + Send,
-    {
-        let mut orig_fac = self.fac;
-        let orig_fac_async = move |()| rt::spawn_blocking(orig_fac.generate(()));
-
-        UnfoldAsyncBuilder {
-            fac: orig_fac_async.compose(f),
-        }
-    }
-
-    pub fn map_blocking<NewOut, NewFunc, NewFac>(
-        self,
-        f: NewFac,
-    ) -> UnfoldBlockingBuilder<NewFunc::Output, BoxFnFactory<(), NewFunc::Output>>
-    where
-        Fac: Send,
-        NewFac: 'static + Send + Clone + FnMut(Out) -> NewFunc,
-        NewFunc: 'static + Send + FnOnce() -> NewOut,
-        NewFunc::Output: 'static + Send,
-    {
-        UnfoldBlockingBuilder {
-            fac: self.fac.chain(f),
-            _phantom: PhantomData,
-        }
-    }
-
-    pub fn into_stream<P>(self, params: P) -> RecvStream<'static, Out>
-    where
-        Fac: 'static + Send + Clone,
-        P: Into<ParParams>,
-    {
-        let ParParams {
-            num_workers,
-            buf_size,
-        } = params.into();
-        let Self { fac, .. } = self;
-        let (output_tx, output_rx) = utils::channel(buf_size);
-
-        (0..num_workers).for_each(move |_| {
-            let mut fac = fac.clone();
-            let output_tx = output_tx.clone();
-
-            rt::spawn_blocking(move || loop {
-                let func = fac.generate(());
-                let output = func();
-                if output_tx.send(output).is_err() {
-                    break;
-                }
-            });
-        });
-
-        output_rx.into_stream()
-    }
 }
 
 impl<St> ParBuilder<St>
@@ -759,4 +606,11 @@ mod tests {
             assert_eq!(vec, expect);
         }
     }
+
+    // #[tokio::test]
+    // async fn par_unfold_builder_async_test() {
+    //     let vec: Vec<_> = super::par_unfold_builder(|| async move {
+
+    //     }).into_stream().collect();
+    // }
 }

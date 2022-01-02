@@ -7,6 +7,42 @@ use crate::{
 };
 use flume::r#async::RecvStream;
 
+// // par_unfold_builder
+
+// pub use par_unfold_builder::*;
+// mod par_unfold_builder {
+//     use super::*;
+
+//     pub fn par_unfold_builder<State, Out, Fut, F>(f: F) -> ParUnfoldAsyncBuilder<State, Out, F>
+//     where
+//         F: FnMut(State) -> Fut,
+//         Fut: 'static + Send + Future<Output = Option<(State, Out)>>,
+//         State: 'static + Send,
+//         Out: 'static + Send,
+//     {
+//         ParUnfoldAsyncBuilder::new(f)
+//     }
+// }
+
+// // par_unfold_blocking_builder
+
+// pub use par_unfold_blocking_builder::*;
+// mod par_unfold_blocking_builder {
+//     use super::*;
+
+//     pub fn par_unfold_blocking_builder<State, Out, Func, F>(
+//         f: F,
+//     ) -> ParUnfoldBlockingBuilder<State, Out, F>
+//     where
+//         F: Send + FnMut(State) -> Func,
+//         Func: 'static + Send + FnOnce() -> Option<(State, Out)>,
+//         State: 'static + Send,
+//         Out: 'static + Send,
+//     {
+//         ParUnfoldBlockingBuilder::new(f)
+//     }
+// }
+
 // iter_blocking
 
 pub use iter_blocking::*;
