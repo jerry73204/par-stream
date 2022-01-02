@@ -1,5 +1,4 @@
 use crate::common::*;
-use std::any::Any;
 use super::{get_global_runtime, BoxAny};
 
 pub fn spawn<Fut>(fut: Fut) -> JoinHandle<Fut::Output>

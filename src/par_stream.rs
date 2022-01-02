@@ -40,7 +40,6 @@ where
     /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
-    /// use std::mem;
     ///
     /// // Creates two sharing handles to the stream
     /// let stream = stream::iter(0..100);
@@ -114,7 +113,6 @@ where
     /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
-    /// use std::mem;
     ///
     /// let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
     /// stream::iter(data).par_batching(None, |_worker_index, mut stream| async move {
