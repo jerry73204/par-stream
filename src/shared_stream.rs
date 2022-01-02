@@ -210,12 +210,13 @@ where
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = &mut *self;
 
-        let inner = this
-            .inner
-            .take()
-            .expect("Shared stream polled again after completion");
+        // Return end of stream if polled again after completion
+        let inner = match this.inner.take() {
+            Some(inner) => inner,
+            None => return Ready(None),
+        };
 
-        // Fast path for when the wrapped future has already completed
+        // Fast path for when the wrapped stream has already completed
         if inner.state.load(Acquire) == COMPLETE {
             return Ready(None);
         }
