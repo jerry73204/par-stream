@@ -12,7 +12,7 @@ use crate::{
 use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
 
-/// Stream for the [try_par_batching()](TryStreamExt::try_par_batching) method.
+/// Stream for the [try_par_batching()](TryParStreamExt::try_par_batching) method.
 pub type TryParBatching<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
 
 /// The trait extends [TryStream](futures::stream::TryStream) types with parallel processing combinators.
