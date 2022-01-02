@@ -31,14 +31,19 @@ where
         self,
         init: B,
         f: F,
-    ) -> TryStatefulThen<Self, B, Self::Ok, U, Self::Error, F, Fut>;
+    ) -> TryStatefulThen<Self, B, Self::Ok, U, Self::Error, F, Fut>
+    where
+        F: FnMut(B, Self::Ok) -> Fut,
+        Fut: Future<Output = Result<Option<(B, U)>, Self::Error>>;
 
     /// Similar to [map](futures::stream::StreamExt::map) but with a state and is fallible.
     fn try_stateful_map<B, U, F>(
         self,
         init: B,
         f: F,
-    ) -> TryStatefulMap<Self, B, Self::Ok, U, Self::Error, F>;
+    ) -> TryStatefulMap<Self, B, Self::Ok, U, Self::Error, F>
+    where
+        F: FnMut(B, Self::Ok) -> Result<Option<(B, U)>, Self::Error>;
 }
 
 impl<S, T, E> TryStreamExt for S
@@ -66,7 +71,11 @@ where
         self,
         init: B,
         f: F,
-    ) -> TryStatefulThen<Self, B, T, U, E, F, Fut> {
+    ) -> TryStatefulThen<Self, B, T, U, E, F, Fut>
+    where
+        F: FnMut(B, T) -> Fut,
+        Fut: Future<Output = Result<Option<(B, U)>, E>>,
+    {
         TryStatefulThen {
             stream: self,
             future: None,
@@ -76,7 +85,10 @@ where
         }
     }
 
-    fn try_stateful_map<B, U, F>(self, init: B, f: F) -> TryStatefulMap<Self, B, T, U, E, F> {
+    fn try_stateful_map<B, U, F>(self, init: B, f: F) -> TryStatefulMap<Self, B, T, U, E, F>
+    where
+        F: FnMut(B, T) -> Result<Option<(B, U)>, E>,
+    {
         TryStatefulMap {
             stream: self,
             state: Some(init),
