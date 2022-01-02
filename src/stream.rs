@@ -1,6 +1,8 @@
 use crate::{common::*, shared_stream::Shared, state_stream::StateStream};
 use futures::stream::Zip;
 
+pub type WithState<S, B> = Zip<S, StateStream<B>>;
+
 /// The trait extneds [Stream](futures::stream::Stream) types with extra combinators.
 pub trait StreamExt
 where
@@ -39,7 +41,7 @@ where
     /// be modified as user desires. The state must be given back by `state.send()`
     /// or be dropped so that the stream can proceed to the next iteration. If
     /// `state.close()` is called, the state is discarded and terminates the stream.
-    fn with_state<B>(self, init: B) -> Zip<Self, StateStream<B>>
+    fn with_state<B>(self, init: B) -> WithState<Self, B>
     where
         Self: Sized;
 
@@ -194,7 +196,7 @@ where
         Shared::new(self)
     }
 
-    fn with_state<B>(self, init: B) -> Zip<Self, StateStream<B>>
+    fn with_state<B>(self, init: B) -> WithState<Self, B>
     where
         Self: Sized,
     {
