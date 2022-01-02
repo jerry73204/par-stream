@@ -49,7 +49,7 @@ mod config {
     use super::*;
 
     /// The determination strategy for the number of workers and buffer size.
-    #[derive(Debug, Clone, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
     pub enum ParParamsConfig {
         Default,
         FixedWorkers {
@@ -205,7 +205,7 @@ mod params {
     use super::*;
 
     /// The parameters including `num_workers` and `buf_size`.
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct ParParams {
         pub num_workers: usize,
         pub buf_size: Option<usize>,
@@ -220,6 +220,12 @@ mod params {
     impl From<Option<ParParamsConfig>> for ParParams {
         fn from(config: Option<ParParamsConfig>) -> Self {
             config.map(|config| config.to_params()).unwrap_or_default()
+        }
+    }
+
+    impl From<ParParamsConfig> for ParParams {
+        fn from(config: ParParamsConfig) -> Self {
+            config.to_params()
         }
     }
 
