@@ -3,9 +3,14 @@ use crate::{
     config::{BufSize, ParParams},
     rt,
     stream::StreamExt as _,
+    try_stream::{TakeUntilError, TryStreamExt as _},
     utils,
 };
 use flume::r#async::RecvStream;
+use tokio::sync::broadcast;
+
+pub type TryParUnfold<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
+pub type TryParUnfoldBlocking<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
 
 // // par_unfold_builder
 
@@ -82,32 +87,38 @@ pub use par_unfold::*;
 mod par_unfold {
     use super::*;
 
-    /// Produce stream elements from parallel asynchronous tasks.
+    /// Produce stream elements from a parallel asynchronous task.
     ///
     /// This function spawns a set of parallel workers. Each worker produces and places
     /// items to an output buffer. The worker pool size and buffer size is determined by
     /// `params`.
     ///
-    /// The state is initialized to `init`. The `f(worker_index, Arc<State>) -> Option<(output, Arc<State>)>`
-    /// generates asynchronous tasks for workers, which takes a worker index number and
-    /// a shared state, and returns the output item and gives the shared state back.
+    /// Each worker receives a copy of initialized state `init`, then iteratively calls the function
+    /// `f(worker_index, State) -> Fut`. The `Fut` is a future that returns `Option<(output, State)>`.
+    /// The future updates the state and produces an output item.
     ///
-    /// If `f` returns `None`, it stops the worker for that worker index. The unfolding stream
-    /// terminates after every worker produces `None.`
+    /// If a worker receives a `None`, the worker with that worker index will halt, but it does not halt
+    /// the other workers. The output stream terminates after every worker halts.
     ///
     /// ```rust
     /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
-    /// use std::sync::atomic::{AtomicUsize, Ordering::*};
+    /// use std::sync::{
+    ///     atomic::{AtomicUsize, Ordering::*},
+    ///     Arc,
+    /// };
     ///
-    /// let mut vec: Vec<_> =
-    ///     par_stream::par_unfold(None, AtomicUsize::new(0), |_, counter| async move {
+    /// let mut vec: Vec<_> = par_stream::par_unfold(
+    ///     None,
+    ///     Arc::new(AtomicUsize::new(0)),
+    ///     |_, counter| async move {
     ///         let output = counter.fetch_add(1, SeqCst);
     ///         (output < 1000).then(|| (output, counter))
-    ///     })
-    ///     .collect()
-    ///     .await;
+    ///     },
+    /// )
+    /// .collect()
+    /// .await;
     ///
     /// vec.sort();
     /// itertools::assert_equal(vec, 0..1000);
@@ -117,24 +128,23 @@ mod par_unfold {
         params: P,
         init: State,
         f: F,
-    ) -> BoxStream<'static, Item>
+    ) -> RecvStream<'static, Item>
     where
         P: Into<ParParams>,
-        F: 'static + FnMut(usize, Arc<State>) -> Fut + Send + Clone,
-        Fut: 'static + Future<Output = Option<(Item, Arc<State>)>> + Send,
+        F: 'static + FnMut(usize, State) -> Fut + Send + Clone,
+        Fut: 'static + Future<Output = Option<(Item, State)>> + Send,
         Item: 'static + Send,
-        State: 'static + Sync + Send,
+        State: 'static + Send + Clone,
     {
         let ParParams {
             num_workers,
             buf_size,
         } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let state = Arc::new(init);
 
         (0..num_workers).for_each(|worker_index| {
             let output_tx = output_tx.clone();
-            let state = state.clone();
+            let state = init.clone();
             let f = f.clone();
 
             rt::spawn(async move {
@@ -149,30 +159,32 @@ mod par_unfold {
             });
         });
 
-        output_rx.into_stream().boxed()
+        output_rx.into_stream()
     }
 
-    /// Produce stream elements from parallel blocking tasks.
+    /// Produce stream elements from a parallel blocking task.
     ///
     /// This function spawns a set of parallel workers. Each worker produces and places
     /// items to an output buffer. The worker pool size and buffer size is determined by
     /// `params`.
     ///
-    /// The state is initialized to `init`. The `f(worker_index, Arc<State>) -> Option<(output, Arc<State>)>`
-    /// generates blocing tasks for workers, which takes a worker index number and
-    /// a shared state, and returns the output item and gives the shared state back.
+    /// Each worker receives a copy of initialized state `init`, then iteratively calls the function
+    /// `f(worker_index, State) -> Option<(output, State)>` to update the state and produce an output item.
     ///
-    /// If `f` returns `None`, it stops the worker for that worker index. The unfolding stream
-    /// terminates after every worker produces `None.`
+    /// If a worker receives a `None`, the worker with that worker index will halt, but it does not halt
+    /// the other workers. The output stream terminates after every worker halts.
     ///
     /// ```rust
     /// # par_stream::rt::block_on_executor(async move {
     /// use futures::prelude::*;
     /// use par_stream::prelude::*;
-    /// use std::sync::atomic::{AtomicUsize, Ordering::*};
+    /// use std::sync::{
+    ///     atomic::{AtomicUsize, Ordering::*},
+    ///     Arc,
+    /// };
     ///
     /// let mut vec: Vec<_> =
-    ///     par_stream::par_unfold_blocking(None, AtomicUsize::new(0), move |_, counter| {
+    ///     par_stream::par_unfold_blocking(None, Arc::new(AtomicUsize::new(0)), move |_, counter| {
     ///         let output = counter.fetch_add(1, SeqCst);
     ///         (output < 1000).then(|| (output, counter))
     ///     })
@@ -187,29 +199,28 @@ mod par_unfold {
         params: P,
         init: State,
         f: F,
-    ) -> BoxStream<'static, Item>
+    ) -> RecvStream<'static, Item>
     where
         P: Into<ParParams>,
-        F: 'static + FnMut(usize, Arc<State>) -> Option<(Item, Arc<State>)> + Send + Clone,
+        F: 'static + FnMut(usize, State) -> Option<(Item, State)> + Send + Clone,
         Item: 'static + Send,
-        State: 'static + Send + Sync,
+        State: 'static + Send + Clone,
     {
         let ParParams {
             num_workers,
             buf_size,
         } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let state = Arc::new(init);
 
         (0..num_workers).for_each(|worker_index| {
             let mut f = f.clone();
-            let mut state = state.clone();
+            let mut state = init.clone();
             let output_tx = output_tx.clone();
 
             rt::spawn_blocking(move || loop {
-                if let Some((item, state_)) = f(worker_index, state) {
+                if let Some((item, new_state)) = f(worker_index, state) {
                     if output_tx.send(item).is_ok() {
-                        state = state_;
+                        state = new_state;
                     } else {
                         break;
                     }
@@ -219,7 +230,7 @@ mod par_unfold {
             });
         });
 
-        output_rx.into_stream().boxed()
+        output_rx.into_stream()
     }
 }
 
@@ -517,115 +528,120 @@ mod try_sync {
 // try_par_unfold
 
 pub use try_par_unfold::*;
-
 mod try_par_unfold {
     use super::*;
 
-    /// A fallible analogue to [par_unfold()](super::par_unfold()).
+    /// Produce stream elements from a fallible parallel asynchronous task.
+    ///
+    /// This function spawns a set of parallel workers. Each worker produces and places
+    /// items to an output buffer. The worker pool size and buffer size is determined by
+    /// `params`.
+    ///
+    /// Each worker receives a copy of initialized state `init`, then iteratively calls the function
+    /// `f(worker_index, State) -> Fut`. The `Fut` is a future that returns `Result<Option<(output, State)>, Error>`.
+    /// The future updates the state and produces an output item.
+    ///
+    /// If a worker receives an error `Err(_)`, the error is produced in output stream and the stream halts for ever.
+    /// If a worker receives a `Ok(None)`, the worker with that worker index will halt, but it does not halt
+    /// the other workers. The output stream terminates after every worker halts.
     pub fn try_par_unfold<Item, Error, State, P, F, Fut>(
-        config: P,
-        state: State,
+        params: P,
+        init: State,
         f: F,
-    ) -> BoxStream<'static, Result<Item, Error>>
+    ) -> TryParUnfold<Item, Error>
     where
         P: Into<ParParams>,
-        F: 'static + FnMut(usize, Arc<State>) -> Fut + Send + Clone,
-        Fut: 'static + Future<Output = Result<Option<(Item, Arc<State>)>, Error>> + Send,
-        State: 'static + Sync + Send,
+        F: 'static + FnMut(usize, State) -> Fut + Send + Clone,
+        Fut: 'static + Future<Output = Result<Option<(Item, State)>, Error>> + Send,
+        State: 'static + Send + Clone,
         Item: 'static + Send,
         Error: 'static + Send,
     {
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let terminate = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(state);
+        let (terminate_tx, _) = broadcast::channel::<()>(1);
 
-        let worker_futs = (0..num_workers).map(move |worker_index| {
-            let mut f = f.clone();
-            let mut state = state.clone();
+        (0..num_workers).for_each(move |worker_index| {
+            let f = f.clone();
+            let state = init.clone();
             let output_tx = output_tx.clone();
-            let terminate = terminate.clone();
+            let mut terminate_rx = terminate_tx.subscribe();
+            let terminate_tx = terminate_tx.clone();
 
             rt::spawn(async move {
-                loop {
-                    if terminate.load(Acquire) {
-                        break;
-                    }
+                let _ = stream::repeat(())
+                    .take_until(async move {
+                        let _ = terminate_rx.recv().await;
+                    })
+                    .map(Ok)
+                    .try_stateful_then(
+                        (f, terminate_tx, state),
+                        |(mut f, terminate_tx, state), ()| async move {
+                            let result = f(worker_index, state).await;
 
-                    match f(worker_index, state).await {
-                        Ok(Some((item, new_state))) => {
-                            let result = output_tx.send_async(Ok(item)).await;
                             if result.is_err() {
-                                break;
+                                let _ = terminate_tx.send(());
                             }
-                            state = new_state;
-                        }
-                        Ok(None) => {
-                            break;
-                        }
-                        Err(err) => {
-                            let _ = output_tx.send_async(Err(err)).await;
-                            terminate.store(true, Release);
-                            break;
-                        }
-                    }
-                }
-            })
+
+                            result.map(|option| {
+                                option.map(|(item, state)| ((f, terminate_tx, state), item))
+                            })
+                        },
+                    )
+                    .map(Ok)
+                    .forward(output_tx.into_sink())
+                    .await;
+            });
         });
 
-        let join_future = future::join_all(worker_futs);
-
-        stream::select(
-            output_rx.into_stream().map(Some),
-            join_future.map(|_| None).into_stream(),
-        )
-        .filter_map(|item| async move { item })
-        .scan(false, |terminated, result| {
-            let output = if *terminated {
-                None
-            } else {
-                if result.is_err() {
-                    *terminated = true;
-                }
-                Some(result)
-            };
-
-            async move { output }
-        })
-        .fuse()
-        .boxed()
+        output_rx.into_stream().take_until_error()
     }
+}
 
-    /// A fallible analogue to [par_unfold_blocking()](super::par_unfold_blocking).
+// try_par_unfold_blocking
+
+pub use try_par_unfold_blocking::*;
+mod try_par_unfold_blocking {
+    use super::*;
+
+    /// Produce stream elements from a fallible parallel asynchronous task.
+    ///
+    /// This function spawns a set of parallel workers. Each worker produces and places
+    /// items to an output buffer. The worker pool size and buffer size is determined by
+    /// `params`.
+    ///
+    /// Each worker receives a copy of initialized state `init`, then iteratively calls the function
+    /// `f(worker_index, State) -> Result<Option<(output, State)>, Error>`, which updates the state
+    /// and produces an output item.
+    ///
+    /// If a worker receives an error `Err(_)`, the error is produced in output stream and the stream halts for ever.
+    /// If a worker receives a `Ok(None)`, the worker with that worker index will halt, but it does not halt
+    /// the other workers. The output stream terminates after every worker halts.
     pub fn try_par_unfold_blocking<Item, Error, State, P, F>(
-        config: P,
-        state: State,
+        params: P,
+        init: State,
         f: F,
-    ) -> BoxStream<'static, Result<Item, Error>>
+    ) -> TryParUnfoldBlocking<Item, Error>
     where
-        F: 'static
-            + FnMut(usize, Arc<State>) -> Result<Option<(Item, Arc<State>)>, Error>
-            + Send
-            + Clone,
+        F: 'static + FnMut(usize, State) -> Result<Option<(Item, State)>, Error> + Send + Clone,
         Item: 'static + Send,
         Error: 'static + Send,
-        State: 'static + Sync + Send,
+        State: 'static + Send + Clone,
         P: Into<ParParams>,
     {
         let ParParams {
             num_workers,
             buf_size,
-        } = config.into();
+        } = params.into();
         let (output_tx, output_rx) = utils::channel(buf_size);
         let terminate = Arc::new(AtomicBool::new(false));
-        let state = Arc::new(state);
 
         (0..num_workers).for_each(|worker_index| {
             let mut f = f.clone();
-            let mut state = state.clone();
+            let mut state = init.clone();
             let output_tx = output_tx.clone();
             let terminate = terminate.clone();
 
@@ -654,21 +670,7 @@ mod try_par_unfold {
             });
         });
 
-        output_rx
-            .into_stream()
-            .scan(false, |terminated, result| {
-                let output = if *terminated {
-                    None
-                } else {
-                    if result.is_err() {
-                        *terminated = true;
-                    }
-                    Some(result)
-                };
-
-                async move { output }
-            })
-            .boxed()
+        output_rx.into_stream().take_until_error()
     }
 }
 
@@ -726,15 +728,19 @@ mod tests {
     async fn par_unfold_test() {
         let max_quota = 100;
 
-        let count = super::par_unfold(4, AtomicUsize::new(0), move |_, quota| async move {
-            let enough = quota.fetch_add(1, AcqRel) < max_quota;
+        let count = super::par_unfold(
+            4,
+            Arc::new(AtomicUsize::new(0)),
+            move |_, quota| async move {
+                let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
-            enough.then(|| {
-                let mut rng = rand::thread_rng();
-                let val = rng.gen_range(0..10);
-                (val, quota)
-            })
-        })
+                enough.then(|| {
+                    let mut rng = rand::thread_rng();
+                    let val = rng.gen_range(0..10);
+                    (val, quota)
+                })
+            },
+        )
         .count()
         .await;
 
@@ -744,17 +750,18 @@ mod tests {
     async fn par_unfold_blocking_test() {
         let max_quota = 100;
 
-        let count = super::par_unfold_blocking(4, AtomicUsize::new(0), move |_, quota| {
-            let enough = quota.fetch_add(1, AcqRel) < max_quota;
+        let count =
+            super::par_unfold_blocking(4, Arc::new(AtomicUsize::new(0)), move |_, quota| {
+                let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
-            enough.then(|| {
-                let mut rng = rand::thread_rng();
-                let val = rng.gen_range(0..10);
-                (val, quota)
+                enough.then(|| {
+                    let mut rng = rand::thread_rng();
+                    let val = rng.gen_range(0..10);
+                    (val, quota)
+                })
             })
-        })
-        .count()
-        .await;
+            .count()
+            .await;
 
         assert_eq!(count, max_quota);
     }
@@ -801,8 +808,10 @@ mod tests {
     async fn try_par_unfold_test() {
         let max_quota = 100;
 
-        let mut stream =
-            super::try_par_unfold(None, AtomicUsize::new(0), move |index, quota| async move {
+        let mut stream = super::try_par_unfold(
+            None,
+            Arc::new(AtomicUsize::new(0)),
+            move |index, quota| async move {
                 let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
                 if enough {
@@ -810,7 +819,8 @@ mod tests {
                 } else {
                     Err("out of quota")
                 }
-            });
+            },
+        );
 
         let mut counts = HashMap::new();
 
@@ -839,8 +849,10 @@ mod tests {
     async fn try_par_unfold_blocking_test() {
         let max_quota = 100;
 
-        let mut stream =
-            super::try_par_unfold_blocking(None, AtomicUsize::new(0), move |index, quota| {
+        let mut stream = super::try_par_unfold_blocking(
+            None,
+            Arc::new(AtomicUsize::new(0)),
+            move |index, quota| {
                 let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
                 if enough {
@@ -848,7 +860,8 @@ mod tests {
                 } else {
                     Err("out of quota")
                 }
-            });
+            },
+        );
 
         let mut counts = HashMap::new();
 
