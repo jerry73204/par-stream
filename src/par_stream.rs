@@ -62,6 +62,32 @@ where
     where
         B: Into<BufSize>;
 
+    /// Maps this stream’s items to a different type on an blocking thread.
+    ///
+    /// The combinator iteratively maps the stream items and places the output
+    /// items to a channel with `buf_size`. The function `f` is executed on a
+    /// separate blocking thread to prevent from blocking the asynchronous runtime.
+    ///
+    /// ```rust
+    /// # par_stream::rt::block_on_executor(async move {
+    /// use futures::{prelude::*, stream};
+    /// use par_stream::prelude::*;
+    ///
+    /// let vec: Vec<_> = stream::iter(0..100)
+    ///     .map_blocking(None, |_| {
+    ///         // runs a CPU-bounded work here
+    ///         (0..1000).sum::<u64>()
+    ///     })
+    ///     .collect()
+    ///     .await;
+    /// # })
+    /// ```
+    fn map_blocking<B, T, F>(self, buf_size: B, f: F) -> RecvStream<'static, T>
+    where
+        B: Into<BufSize>,
+        T: Send,
+        F: 'static + Send + FnMut(Self::Item) -> T;
+
     /// Creates a builder that routes each input item according to `key_fn` to a destination receiver.
     ///
     /// Call [`builder.register("key")`](PullBuilder::register) to obtain the receiving stream for that key.
@@ -363,6 +389,31 @@ where
         });
 
         rx.into_stream()
+    }
+
+    fn map_blocking<B, T, F>(self, buf_size: B, mut f: F) -> RecvStream<'static, T>
+    where
+        B: Into<BufSize>,
+        T: Send,
+        F: 'static + Send + FnMut(Self::Item) -> T,
+    {
+        let buf_size = buf_size.into().get();
+        let mut stream = self.boxed();
+        let (output_tx, output_rx) = utils::channel(buf_size);
+
+        rt::spawn_blocking(move || loop {
+            match rt::block_on(stream.next()) {
+                Some(input) => {
+                    let output = f(input);
+                    if output_tx.send(output).is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        });
+
+        output_rx.into_stream()
     }
 
     fn par_builder(self) -> ParBuilder<Self> {

@@ -1,6 +1,6 @@
 use crate::{
     common::*,
-    config::{NumWorkers, ParParams},
+    config::{BufSize, NumWorkers, ParParams},
     par_stream::ParStreamExt as _,
     rt,
     shared_stream::Shared,
@@ -21,6 +21,17 @@ where
     Self::Ok: 'static + Send,
     Self::Error: 'static + Send,
 {
+    /// Fallible stream combinator for [map_blocking](crate::ParStreamExt::map_blocking).
+    fn try_map_blocking<B, T, F>(
+        self,
+        buf_size: B,
+        f: F,
+    ) -> RecvStream<'static, Result<T, Self::Error>>
+    where
+        B: Into<BufSize>,
+        T: Send,
+        F: 'static + Send + FnMut(Self::Ok) -> Result<T, Self::Error>;
+
     /// Fallible stream combinator for [par_batching](crate::ParStreamExt::par_batching).
     fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, Self::Error>
     where
@@ -106,6 +117,41 @@ where
     T: 'static + Send,
     E: 'static + Send,
 {
+    fn try_map_blocking<B, U, F>(self, buf_size: B, mut f: F) -> RecvStream<'static, Result<U, E>>
+    where
+        B: Into<BufSize>,
+        U: Send,
+        F: 'static + Send + FnMut(T) -> Result<U, E>,
+    {
+        let buf_size = buf_size.into().get();
+        let mut stream = self.boxed();
+        let (output_tx, output_rx) = utils::channel(buf_size);
+
+        rt::spawn_blocking(move || loop {
+            match rt::block_on(stream.next()) {
+                Some(Ok(input)) => {
+                    let result = f(input);
+                    let is_err = result.is_err();
+
+                    if output_tx.send(result).is_err() {
+                        break;
+                    }
+
+                    if is_err {
+                        break;
+                    }
+                }
+                Some(Err(err)) => {
+                    let _ = output_tx.send(Err(err));
+                    break;
+                }
+                None => break,
+            }
+        });
+
+        output_rx.into_stream()
+    }
+
     fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, E>
     where
         P: Into<ParParams>,
@@ -600,6 +646,27 @@ mod tests {
                 },
             );
             assert!(is_fused_at_error);
+        }
+    }
+
+    #[tokio::test]
+    async fn try_map_blocking_test() {
+        {
+            let vec: Vec<_> = stream::iter(vec![Ok(1u64), Ok(2), Err(-3i64), Ok(4)])
+                .try_map_blocking(None, |val| Ok(val.pow(10)))
+                .collect()
+                .await;
+
+            assert_eq!(vec, [Ok(1), Ok(1024), Err(-3)]);
+        }
+
+        {
+            let vec: Vec<_> = stream::iter(vec![Ok(1i64), Ok(2), Err(-3i64), Ok(4)])
+                .try_map_blocking(None, |val| if val >= 2 { Err(-val) } else { Ok(val) })
+                .collect()
+                .await;
+
+            assert_eq!(vec, [Ok(1), Err(-2)]);
         }
     }
 }
