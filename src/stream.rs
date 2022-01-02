@@ -1,6 +1,7 @@
 use crate::{common::*, shared_stream::Shared, state_stream::StateStream};
 use futures::stream::Zip;
 
+/// Stream for the [with_state()](StreamExt::with_state) method.
 pub type WithState<S, B> = Zip<S, StateStream<B>>;
 
 /// The trait extneds [Stream](futures::stream::Stream) types with extra combinators.

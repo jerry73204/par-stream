@@ -9,7 +9,10 @@ use crate::{
 use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
 
+/// Stream for the [try_par_unfold()] method.
 pub type TryParUnfold<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
+
+/// Stream for the [try_par_unfold_blocking()] method.
 pub type TryParUnfoldBlocking<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
 
 // // par_unfold_builder

@@ -12,7 +12,8 @@ use crate::{
 use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
 
-pub type TryParStream<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
+/// Stream for the [try_par_batching()](TryStreamExt::try_par_batching) method.
+pub type TryParBatching<T, E> = TakeUntilError<RecvStream<'static, Result<T, E>>, T, E>;
 
 /// The trait extends [TryStream](futures::stream::TryStream) types with parallel processing combinators.
 pub trait TryParStreamExt
@@ -33,7 +34,7 @@ where
         F: 'static + Send + FnMut(Self::Ok) -> Result<T, Self::Error>;
 
     /// Fallible stream combinator for [par_batching](crate::ParStreamExt::par_batching).
-    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, Self::Error>
+    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParBatching<U, Self::Error>
     where
         F: 'static + Clone + Send + FnMut(usize, Shared<Self>) -> Fut,
         Fut: 'static + Future<Output = Result<Option<(U, Shared<Self>)>, Self::Error>> + Send,
@@ -152,7 +153,7 @@ where
         output_rx.into_stream()
     }
 
-    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParStream<U, E>
+    fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParBatching<U, E>
     where
         P: Into<ParParams>,
         U: 'static + Send,
