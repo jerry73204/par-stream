@@ -2,7 +2,7 @@ use crate::common::*;
 use crossbeam::queue::SegQueue;
 use dashmap::DashMap;
 use futures::task::{waker_ref, ArcWake};
-use std::sync::{RwLock, Weak};
+use std::sync::Weak;
 
 // constants
 
@@ -37,10 +37,6 @@ where
 }
 
 struct Notifier {
-    cache: RwLock<Option<WakerCache>>,
-}
-
-struct WakerCache {
     pending_waker_keys: SegQueue<usize>,
     wakers: DashMap<usize, Waker>,
 }
@@ -99,10 +95,8 @@ impl<St: Stream> Shared<St> {
             stream: UnsafeCell::new(stream),
             state: AtomicUsize::new(IDLE),
             notifier: Arc::new(Notifier {
-                cache: RwLock::new(Some(WakerCache {
-                    wakers: DashMap::new(),
-                    pending_waker_keys: SegQueue::new(),
-                })),
+                wakers: DashMap::new(),
+                pending_waker_keys: SegQueue::new(),
             }),
         };
 
@@ -160,22 +154,16 @@ where
 {
     /// Registers the current task to receive a wakeup when we are awoken.
     fn record_waker(&self, waker_key: &mut usize, cx: &mut Context<'_>) {
-        let guard = self.notifier.cache.read().unwrap();
-
-        let cache = match guard.as_ref() {
-            Some(cache) => cache,
-            None => return,
-        };
-
+        let notifier = &self.notifier;
         let new_waker = cx.waker();
 
         if *waker_key == NULL_WAKER_KEY {
             *waker_key = next_waker_key();
-            cache.wakers.insert(*waker_key, new_waker.clone());
+            notifier.wakers.insert(*waker_key, new_waker.clone());
         } else {
             use dashmap::mapref::entry::Entry as E;
 
-            match cache.wakers.entry(*waker_key) {
+            match notifier.wakers.entry(*waker_key) {
                 E::Occupied(entry) => {
                     let mut old_waker = entry.into_ref();
 
@@ -245,11 +233,14 @@ where
             _ => unreachable!(),
         }
 
+        // create async context
         let waker = waker_ref(&inner.notifier);
         let mut cx = Context::from_waker(&waker);
 
+        // the guard marks poisoned state if panic
         let _reset = Reset(&inner.state);
 
+        // get stream reference
         let stream = unsafe {
             let stream = &mut *inner.stream.get();
             Pin::new_unchecked(stream)
@@ -285,8 +276,8 @@ where
             Ready(None) => {
                 inner.state.store(COMPLETE, SeqCst);
 
-                // Wake all tasks and drop the cache
-                inner.notifier.notify_all();
+                // Wake all tasks
+                inner.notifier.close(this.waker_key);
                 drop(_reset); // Make borrow checker happy
 
                 Ready(None)
@@ -314,11 +305,7 @@ where
     fn drop(&mut self) {
         if self.waker_key != NULL_WAKER_KEY {
             if let Some(ref inner) = self.inner {
-                if let Ok(cache) = inner.notifier.cache.read() {
-                    if let Some(cache) = cache.as_ref() {
-                        cache.wakers.remove(&self.waker_key);
-                    }
-                }
+                inner.notifier.wakers.remove(&self.waker_key);
             }
         }
     }
@@ -333,38 +320,26 @@ impl ArcWake for Notifier {
 impl Notifier {
     fn register_pending(&self, waker_key: usize) {
         debug_assert!(waker_key != NULL_WAKER_KEY);
-        let guard = self.cache.read().unwrap();
-
-        if let Some(cache) = &*guard {
-            cache.pending_waker_keys.push(waker_key);
-        }
+        self.pending_waker_keys.push(waker_key);
     }
 
     fn notify_one(&self) {
-        let guard = self.cache.read().unwrap();
-
-        if let Some(cache) = &*guard {
-            let WakerCache {
-                pending_waker_keys,
-                wakers,
-            } = cache;
-
-            while let Some(waker_key) = pending_waker_keys.pop() {
-                if let Some(waker) = wakers.get(&waker_key) {
-                    waker.wake_by_ref();
-                }
+        while let Some(waker_key) = self.pending_waker_keys.pop() {
+            if let Some(waker) = self.wakers.get(&waker_key) {
+                waker.wake_by_ref();
             }
         }
     }
 
-    fn notify_all(&self) {
-        let mut guard = self.cache.write().unwrap();
+    fn close(&self, waker_key: usize) {
+        debug_assert!(waker_key != NULL_WAKER_KEY);
 
-        if let Some(cache) = guard.take() {
-            cache.wakers.into_iter().for_each(|(_, waker)| {
-                waker.wake();
-            });
-        }
+        self.wakers.retain(|&key, waker| {
+            if key != waker_key {
+                waker.wake_by_ref();
+            }
+            false
+        });
     }
 }
 
