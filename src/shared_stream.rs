@@ -37,7 +37,11 @@ where
 }
 
 struct Notifier {
+    /// The number of times the stream is awaken.
+    wake_count: AtomicUsize,
+    /// The list of pending waker keys.
     pending_waker_keys: SegQueue<usize>,
+    /// The pairs of a waker key and a waker.
     wakers: DashMap<usize, Waker>,
 }
 
@@ -95,6 +99,7 @@ impl<St: Stream> Shared<St> {
             stream: UnsafeCell::new(stream),
             state: AtomicUsize::new(IDLE),
             notifier: Arc::new(Notifier {
+                wake_count: AtomicUsize::new(0),
                 wakers: DashMap::new(),
                 pending_waker_keys: SegQueue::new(),
             }),
@@ -201,7 +206,9 @@ where
         // Return end of stream if polled again after completion
         let inner = match this.inner.take() {
             Some(inner) => inner,
-            None => return Ready(None),
+            None => {
+                return Ready(None);
+            }
         };
 
         // Fast path for when the wrapped stream has already completed
@@ -209,8 +216,10 @@ where
             return Ready(None);
         }
 
+        // Make sure a waker key is registered for this waker.
         inner.record_waker(&mut this.waker_key, cx);
 
+        // Transfer state: IDLE -> POLLING
         match inner
             .state
             .compare_exchange(IDLE, POLLING, SeqCst, SeqCst)
@@ -233,12 +242,14 @@ where
             _ => unreachable!(),
         }
 
-        // create async context
-        let waker = waker_ref(&inner.notifier);
-        let mut cx = Context::from_waker(&waker);
+        /* start of critical section (to the end of function) */
 
-        // the guard marks poisoned state if panic
+        // the guard marks poisoned state when dropping if panic happened
         let _reset = Reset(&inner.state);
+
+        // create context for underlying stream
+        let waker = waker_ref(&inner.notifier);
+        let mut stream_cx = Context::from_waker(&waker);
 
         // get stream reference
         let stream = unsafe {
@@ -246,34 +257,41 @@ where
             Pin::new_unchecked(stream)
         };
 
-        match stream.poll_next(&mut cx) {
+        // remember the wake count before polling
+        let wake_count = inner.notifier.wake_count();
+
+        match stream.poll_next(&mut stream_cx) {
             Pending => {
-                let ok = inner
-                    .state
-                    .compare_exchange(POLLING, IDLE, SeqCst, SeqCst)
-                    .is_ok();
-                debug_assert!(ok);
+                // Transfer state: POLLING -> IDLE
+                inner.state.store(IDLE, SeqCst);
+
+                // Register the waker key to pending list.
+                let should_wake = inner
+                    .notifier
+                    .wake_or_register_pending(this.waker_key, wake_count);
+
+                // If the wake_count changed, indicating the stream wakes earlier, wake itself.
+                if should_wake {
+                    cx.waker().wake_by_ref();
+                }
 
                 drop(_reset);
-                inner.notifier.register_pending(this.waker_key);
                 this.inner = Some(inner);
                 Pending
             }
             Ready(Some(item)) => {
-                let ok = inner
-                    .state
-                    .compare_exchange(POLLING, IDLE, SeqCst, SeqCst)
-                    .is_ok();
-                debug_assert!(ok);
+                // Transfer state: POLLING -> IDLE
+                inner.state.store(IDLE, SeqCst);
 
-                // Wake another task
-                inner.notifier.notify_one();
+                // Wake pending tasks
+                inner.notifier.notify();
+
                 drop(_reset); // Make borrow checker happy
                 this.inner = Some(inner);
-
                 Ready(Some(item))
             }
             Ready(None) => {
+                // Transfer state: POLLING -> COMPLETE
                 inner.state.store(COMPLETE, SeqCst);
 
                 // Wake all tasks
@@ -313,17 +331,33 @@ where
 
 impl ArcWake for Notifier {
     fn wake_by_ref(this: &Arc<Self>) {
-        this.notify_one();
+        this.wake_count.fetch_add(1, SeqCst);
+        this.notify();
     }
 }
 
 impl Notifier {
+    fn wake_count(&self) -> usize {
+        self.wake_count.load(Acquire)
+    }
+
+    /// Register the waker_key to pending list.
     fn register_pending(&self, waker_key: usize) {
-        debug_assert!(waker_key != NULL_WAKER_KEY);
         self.pending_waker_keys.push(waker_key);
     }
 
-    fn notify_one(&self) {
+    /// Wake or register the waker_key to pending list according to expected wake count.
+    ///
+    /// The methods returns whether to wake or not.
+    fn wake_or_register_pending(&self, waker_key: usize, expected_wake_count: usize) -> bool {
+        debug_assert!(waker_key != NULL_WAKER_KEY);
+        self.pending_waker_keys.push(waker_key);
+        self.wake_count
+            .compare_exchange(expected_wake_count, expected_wake_count, SeqCst, SeqCst)
+            .is_err()
+    }
+
+    fn notify(&self) {
         while let Some(waker_key) = self.pending_waker_keys.pop() {
             if let Some(waker) = self.wakers.get(&waker_key) {
                 waker.wake_by_ref();
