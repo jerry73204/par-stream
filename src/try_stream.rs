@@ -424,174 +424,176 @@ mod catch_error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::async_test;
 
-    #[tokio::test]
-    async fn take_until_error_test() {
-        {
-            let vec: Vec<Result<(), ()>> = stream::empty().take_until_error().collect().await;
-            assert_eq!(vec, []);
+    async_test! {
+        async fn take_until_error_test() {
+            {
+                let vec: Vec<Result<(), ()>> = stream::empty().take_until_error().collect().await;
+                assert_eq!(vec, []);
+            }
+
+            {
+                let vec: Vec<Result<_, ()>> = stream::iter([Ok(0), Ok(1), Ok(2), Ok(3)])
+                    .take_until_error()
+                    .collect()
+                    .await;
+                assert_eq!(vec, [Ok(0), Ok(1), Ok(2), Ok(3)]);
+            }
+
+            {
+                let vec: Vec<Result<_, _>> = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)])
+                    .take_until_error()
+                    .collect()
+                    .await;
+                assert_eq!(vec, [Ok(0), Ok(1), Err(2),]);
+            }
         }
 
-        {
-            let vec: Vec<Result<_, ()>> = stream::iter([Ok(0), Ok(1), Ok(2), Ok(3)])
-                .take_until_error()
-                .collect()
-                .await;
-            assert_eq!(vec, [Ok(0), Ok(1), Ok(2), Ok(3)]);
-        }
 
-        {
-            let vec: Vec<Result<_, _>> = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)])
-                .take_until_error()
-                .collect()
-                .await;
-            assert_eq!(vec, [Ok(0), Ok(1), Err(2),]);
-        }
-    }
-
-    #[tokio::test]
-    async fn try_stateful_then_test() {
-        {
-            let values: Result<Vec<_>, ()> = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
-                .try_stateful_then(0, |acc, val| async move {
-                    let new_acc = acc + val;
-                    Ok(Some((new_acc, new_acc)))
-                })
-                .try_collect()
-                .await;
-
-            assert_eq!(values, Ok(vec![3, 4, 8, 9]));
-        }
-
-        {
-            let mut stream = stream::iter([Ok(3), Ok(1), Err(()), Ok(1)])
-                .try_stateful_then(0, |acc, val| async move {
-                    let new_acc = acc + val;
-                    Ok(Some((new_acc, new_acc)))
-                })
-                .boxed();
-
-            assert_eq!(stream.next().await, Some(Ok(3)));
-            assert_eq!(stream.next().await, Some(Ok(4)));
-            assert_eq!(stream.next().await, Some(Err(())));
-            assert_eq!(stream.next().await, None);
-        }
-
-        {
-            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
-                .try_stateful_then(0, |acc, val| async move {
-                    let new_acc = acc + val;
-                    if new_acc != 8 {
+        async fn try_stateful_then_test() {
+            {
+                let values: Result<Vec<_>, ()> = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1)])
+                    .try_stateful_then(0, |acc, val| async move {
+                        let new_acc = acc + val;
                         Ok(Some((new_acc, new_acc)))
-                    } else {
-                        Err(())
-                    }
-                })
-                .boxed();
+                    })
+                    .try_collect()
+                    .await;
 
-            assert_eq!(stream.next().await, Some(Ok(3)));
-            assert_eq!(stream.next().await, Some(Ok(4)));
-            assert_eq!(stream.next().await, Some(Err(())));
-            assert_eq!(stream.next().await, None);
-        }
+                assert_eq!(values, Ok(vec![3, 4, 8, 9]));
+            }
 
-        {
-            let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
-                .try_stateful_then(0, |acc, val| async move {
-                    let new_acc = acc + val;
-                    if new_acc != 8 {
+            {
+                let mut stream = stream::iter([Ok(3), Ok(1), Err(()), Ok(1)])
+                    .try_stateful_then(0, |acc, val| async move {
+                        let new_acc = acc + val;
                         Ok(Some((new_acc, new_acc)))
-                    } else {
-                        Ok(None)
-                    }
-                })
-                .boxed();
+                    })
+                    .boxed();
 
-            assert_eq!(stream.next().await, Some(Ok(3)));
-            assert_eq!(stream.next().await, Some(Ok(4)));
-            assert_eq!(stream.next().await, None);
-        }
-    }
+                assert_eq!(stream.next().await, Some(Ok(3)));
+                assert_eq!(stream.next().await, Some(Ok(4)));
+                assert_eq!(stream.next().await, Some(Err(())));
+                assert_eq!(stream.next().await, None);
+            }
 
-    #[tokio::test]
-    async fn catch_error_test() {
-        {
-            let (notify, stream) = stream::empty::<Result<(), ()>>().catch_error();
+            {
+                let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                    .try_stateful_then(0, |acc, val| async move {
+                        let new_acc = acc + val;
+                        if new_acc != 8 {
+                            Ok(Some((new_acc, new_acc)))
+                        } else {
+                            Err(())
+                        }
+                    })
+                    .boxed();
 
-            let vec: Vec<_> = stream.collect().await;
-            let result = notify.await;
+                assert_eq!(stream.next().await, Some(Ok(3)));
+                assert_eq!(stream.next().await, Some(Ok(4)));
+                assert_eq!(stream.next().await, Some(Err(())));
+                assert_eq!(stream.next().await, None);
+            }
 
-            assert_eq!(vec, []);
-            assert_eq!(result, Ok(()));
-        }
+            {
+                let mut stream = stream::iter([Ok(3), Ok(1), Ok(4), Ok(1), Err(())])
+                    .try_stateful_then(0, |acc, val| async move {
+                        let new_acc = acc + val;
+                        if new_acc != 8 {
+                            Ok(Some((new_acc, new_acc)))
+                        } else {
+                            Ok(None)
+                        }
+                    })
+                    .boxed();
 
-        {
-            let (notify, stream) =
-                stream::iter([Result::<_, ()>::Ok(0), Ok(1), Ok(2), Ok(3)]).catch_error();
-
-            let vec: Vec<_> = stream.collect().await;
-            let result = notify.await;
-
-            assert_eq!(vec, [0, 1, 2, 3]);
-            assert_eq!(result, Ok(()));
-        }
-
-        {
-            let (notify, stream) = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)]).catch_error();
-
-            let vec: Vec<_> = stream.collect().await;
-            let result = notify.await;
-
-            assert_eq!(vec, [0, 1]);
-            assert_eq!(result, Err(2));
-        }
-
-        {
-            let (notify, mut stream) = stream::empty::<Result<(), ()>>().catch_error();
-
-            let notify = match notify.try_catch() {
-                Continue(notify) => notify,
-                _ => unreachable!(),
-            };
-
-            assert_eq!(stream.next().await, None);
-            assert!(matches!(notify.try_catch(), Break(Ok(()))));
+                assert_eq!(stream.next().await, Some(Ok(3)));
+                assert_eq!(stream.next().await, Some(Ok(4)));
+                assert_eq!(stream.next().await, None);
+            }
         }
 
-        {
-            let (notify, mut stream) = stream::iter([Result::<_, ()>::Ok(0)]).catch_error();
 
-            let notify = match notify.try_catch() {
-                Continue(notify) => notify,
-                _ => unreachable!(),
-            };
+        async fn catch_error_test() {
+            {
+                let (notify, stream) = stream::empty::<Result<(), ()>>().catch_error();
 
-            assert_eq!(stream.next().await, Some(0));
-            let notify = match notify.try_catch() {
-                Continue(notify) => notify,
-                _ => unreachable!(),
-            };
+                let vec: Vec<_> = stream.collect().await;
+                let result = notify.await;
 
-            assert_eq!(stream.next().await, None);
-            assert!(matches!(notify.try_catch(), Break(Ok(()))));
-        }
+                assert_eq!(vec, []);
+                assert_eq!(result, Ok(()));
+            }
 
-        {
-            let (notify, mut stream) = stream::iter([Ok(0), Err(2)]).catch_error();
+            {
+                let (notify, stream) =
+                    stream::iter([Result::<_, ()>::Ok(0), Ok(1), Ok(2), Ok(3)]).catch_error();
 
-            let notify = match notify.try_catch() {
-                Continue(notify) => notify,
-                _ => unreachable!(),
-            };
+                let vec: Vec<_> = stream.collect().await;
+                let result = notify.await;
 
-            assert_eq!(stream.next().await, Some(0));
-            let notify = match notify.try_catch() {
-                Continue(notify) => notify,
-                _ => unreachable!(),
-            };
+                assert_eq!(vec, [0, 1, 2, 3]);
+                assert_eq!(result, Ok(()));
+            }
 
-            assert_eq!(stream.next().await, None);
-            assert!(matches!(notify.try_catch(), Break(Err(2))));
+            {
+                let (notify, stream) = stream::iter([Ok(0), Ok(1), Err(2), Ok(3)]).catch_error();
+
+                let vec: Vec<_> = stream.collect().await;
+                let result = notify.await;
+
+                assert_eq!(vec, [0, 1]);
+                assert_eq!(result, Err(2));
+            }
+
+            {
+                let (notify, mut stream) = stream::empty::<Result<(), ()>>().catch_error();
+
+                let notify = match notify.try_catch() {
+                    Continue(notify) => notify,
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(stream.next().await, None);
+                assert!(matches!(notify.try_catch(), Break(Ok(()))));
+            }
+
+            {
+                let (notify, mut stream) = stream::iter([Result::<_, ()>::Ok(0)]).catch_error();
+
+                let notify = match notify.try_catch() {
+                    Continue(notify) => notify,
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(stream.next().await, Some(0));
+                let notify = match notify.try_catch() {
+                    Continue(notify) => notify,
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(stream.next().await, None);
+                assert!(matches!(notify.try_catch(), Break(Ok(()))));
+            }
+
+            {
+                let (notify, mut stream) = stream::iter([Ok(0), Err(2)]).catch_error();
+
+                let notify = match notify.try_catch() {
+                    Continue(notify) => notify,
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(stream.next().await, Some(0));
+                let notify = match notify.try_catch() {
+                    Continue(notify) => notify,
+                    _ => unreachable!(),
+                };
+
+                assert_eq!(stream.next().await, None);
+                assert!(matches!(notify.try_catch(), Break(Err(2))));
+            }
         }
     }
 }

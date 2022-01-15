@@ -615,136 +615,137 @@ mod wait_until {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rt;
+    use crate::{rt, utils::async_test};
     use std::time::Instant;
 
-    #[tokio::test]
-    async fn stream_wait_until_future_test() {
-        let wait = Duration::from_millis(200);
+    async_test! {
+        async fn stream_wait_until_future_test() {
+            let wait = Duration::from_millis(200);
 
-        {
-            let instant = Instant::now();
-            let vec: Vec<_> = stream::iter([3, 1, 4])
-                .wait_until(async move {
-                    rt::sleep(wait).await;
-                    true
+            {
+                let instant = Instant::now();
+                let vec: Vec<_> = stream::iter([3, 1, 4])
+                    .wait_until(async move {
+                        rt::sleep(wait).await;
+                        true
+                    })
+                    .collect()
+                    .await;
+
+                assert!(instant.elapsed() >= wait);
+                assert_eq!(vec, [3, 1, 4]);
+            }
+
+            {
+                let instant = Instant::now();
+                let vec: Vec<_> = stream::iter([3, 1, 4])
+                    .wait_until(async move {
+                        rt::sleep(wait).await;
+                        false
+                    })
+                    .collect()
+                    .await;
+
+                assert!(instant.elapsed() >= wait);
+                assert_eq!(vec, []);
+            }
+        }
+
+
+        async fn reduce_test() {
+            {
+                let output = stream::iter(1..=10)
+                    .reduce(|lhs, rhs| async move { lhs + rhs })
+                    .await;
+                assert_eq!(output, Some(55));
+            }
+
+            {
+                let output = future::ready(1)
+                    .into_stream()
+                    .reduce(|lhs, rhs| async move { lhs + rhs })
+                    .await;
+                assert_eq!(output, Some(1));
+            }
+
+            {
+                let output = stream::empty::<usize>()
+                    .reduce(|lhs, rhs| async move { lhs + rhs })
+                    .await;
+                assert_eq!(output, None);
+            }
+        }
+
+
+        async fn stateful_then_test() {
+            let vec: Vec<_> = stream::repeat(())
+                .stateful_then(0, |count, ()| async move {
+                    (count < 10).then(|| (count + 1, count))
                 })
                 .collect()
                 .await;
 
-            assert!(instant.elapsed() >= wait);
-            assert_eq!(vec, [3, 1, 4]);
+            assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         }
 
-        {
-            let instant = Instant::now();
-            let vec: Vec<_> = stream::iter([3, 1, 4])
-                .wait_until(async move {
-                    rt::sleep(wait).await;
-                    false
-                })
+
+        async fn stateful_map_test() {
+            let vec: Vec<_> = stream::repeat(())
+                .stateful_map(0, |count, ()| (count < 10).then(|| (count + 1, count)))
                 .collect()
                 .await;
 
-            assert!(instant.elapsed() >= wait);
-            assert_eq!(vec, []);
-        }
-    }
-
-    #[tokio::test]
-    async fn reduce_test() {
-        {
-            let output = stream::iter(1..=10)
-                .reduce(|lhs, rhs| async move { lhs + rhs })
-                .await;
-            assert_eq!(output, Some(55));
+            assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
         }
 
-        {
-            let output = future::ready(1)
-                .into_stream()
-                .reduce(|lhs, rhs| async move { lhs + rhs })
-                .await;
-            assert_eq!(output, Some(1));
-        }
 
-        {
-            let output = stream::empty::<usize>()
-                .reduce(|lhs, rhs| async move { lhs + rhs })
-                .await;
-            assert_eq!(output, None);
-        }
-    }
-
-    #[tokio::test]
-    async fn stateful_then_test() {
-        let vec: Vec<_> = stream::repeat(())
-            .stateful_then(0, |count, ()| async move {
-                (count < 10).then(|| (count + 1, count))
-            })
-            .collect()
-            .await;
-
-        assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[tokio::test]
-    async fn stateful_map_test() {
-        let vec: Vec<_> = stream::repeat(())
-            .stateful_map(0, |count, ()| (count < 10).then(|| (count + 1, count)))
-            .collect()
-            .await;
-
-        assert_eq!(&*vec, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    }
-
-    #[tokio::test]
-    async fn stateful_batching_test() {
-        let vec: Vec<_> = stream::iter([1i32, 1, 1, -1, -1, 1])
-            .stateful_batching(None, |mut sum: Option<i32>, mut stream| async move {
-                while let Some(val) = stream.next().await {
-                    match &mut sum {
-                        Some(sum) => {
-                            if sum.signum() == val.signum() {
-                                *sum += val;
-                            } else {
-                                return Some((*sum, Some(val), stream));
+        async fn stateful_batching_test() {
+            let vec: Vec<_> = stream::iter([1i32, 1, 1, -1, -1, 1])
+                .stateful_batching(None, |mut sum: Option<i32>, mut stream| async move {
+                    while let Some(val) = stream.next().await {
+                        match &mut sum {
+                            Some(sum) => {
+                                if sum.signum() == val.signum() {
+                                    *sum += val;
+                                } else {
+                                    return Some((*sum, Some(val), stream));
+                                }
                             }
+                            sum => *sum = Some(val),
                         }
-                        sum => *sum = Some(val),
                     }
-                }
 
-                match sum {
-                    Some(sum) => Some((sum, None, stream)),
-                    None => None,
-                }
-            })
-            .collect()
-            .await;
-
-        assert_eq!(vec, [3, -2, 1]);
-    }
-
-    #[tokio::test]
-    async fn batching_test() {
-        let sums: Vec<_> = stream::iter(0..10)
-            .batching(|mut stream| async move {
-                let mut sum = 0;
-
-                while let Some(val) = stream.next().await {
-                    sum += val;
-
-                    if sum >= 10 {
-                        return Some((sum, stream));
+                    match sum {
+                        Some(sum) => Some((sum, None, stream)),
+                        None => None,
                     }
-                }
+                })
+                .collect()
+                .await;
 
-                None
-            })
-            .collect()
-            .await;
+            assert_eq!(vec, [3, -2, 1]);
+        }
 
-        assert_eq!(sums, vec![10, 11, 15]);
+
+        async fn batching_test() {
+            let sums: Vec<_> = stream::iter(0..10)
+                .batching(|mut stream| async move {
+                    let mut sum = 0;
+
+                    while let Some(val) = stream.next().await {
+                        sum += val;
+
+                        if sum >= 10 {
+                            return Some((sum, stream));
+                        }
+                    }
+
+                    None
+                })
+                .collect()
+                .await;
+
+            assert_eq!(sums, vec![10, 11, 15]);
+        }
     }
 }

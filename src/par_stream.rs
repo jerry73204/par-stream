@@ -729,224 +729,226 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::async_test;
     use rand::prelude::*;
     use std::time::Duration;
 
-    #[tokio::test]
-    async fn par_batching_test() {
-        let mut rng = rand::thread_rng();
-        let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
+    async_test! {
+        async fn par_batching_test() {
+            let mut rng = rand::thread_rng();
+            let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
-        let sums: Vec<_> = stream::iter(data)
-            .par_batching(None, |_, mut stream| async move {
-                let mut sum = stream.next().await?;
+            let sums: Vec<_> = stream::iter(data)
+                .par_batching(None, |_, mut stream| async move {
+                    let mut sum = stream.next().await?;
 
-                while let Some(val) = stream.next().await {
-                    sum += val;
+                    while let Some(val) = stream.next().await {
+                        sum += val;
 
-                    if sum >= 1000 {
-                        return Some((sum, stream));
+                        if sum >= 1000 {
+                            return Some((sum, stream));
+                        }
                     }
-                }
 
-                None
-            })
-            .collect()
-            .await;
+                    None
+                })
+                .collect()
+                .await;
 
-        assert!(sums.iter().all(|&sum| sum >= 1000));
-    }
+            assert!(sums.iter().all(|&sum| sum >= 1000));
+        }
 
-    #[tokio::test]
-    async fn par_then_output_is_ordered_test() {
-        let max = 1000u64;
-        stream::iter(0..max)
-            .par_then(None, |value| async move {
-                rt::sleep(Duration::from_millis(value % 20)).await;
-                value
-            })
-            .fold(0u64, |expect, found| async move {
+
+        async fn par_then_output_is_ordered_test() {
+            let max = 1000u64;
+            stream::iter(0..max)
+                .par_then(None, |value| async move {
+                    rt::sleep(Duration::from_millis(value % 20)).await;
+                    value
+                })
+                .fold(0u64, |expect, found| async move {
+                    assert_eq!(expect, found);
+                    expect + 1
+                })
+                .await;
+        }
+
+
+        async fn par_then_unordered_test() {
+            let max = 1000u64;
+            let mut values: Vec<_> = stream::iter((0..max).into_iter())
+                .par_then_unordered(None, |value| async move {
+                    rt::sleep(Duration::from_millis(value % 20)).await;
+                    value
+                })
+                .collect()
+                .await;
+            values.sort();
+            values.into_iter().fold(0, |expect, found| {
                 assert_eq!(expect, found);
                 expect + 1
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn par_then_unordered_test() {
-        let max = 1000u64;
-        let mut values: Vec<_> = stream::iter((0..max).into_iter())
-            .par_then_unordered(None, |value| async move {
-                rt::sleep(Duration::from_millis(value % 20)).await;
-                value
-            })
-            .collect()
-            .await;
-        values.sort();
-        values.into_iter().fold(0, |expect, found| {
-            assert_eq!(expect, found);
-            expect + 1
-        });
-    }
-
-    #[tokio::test]
-    async fn par_reduce_test() {
-        {
-            let sum: Option<u64> = stream::iter(iter::empty())
-                .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
-                .await;
-            assert!(sum.is_none());
+            });
         }
 
-        {
-            let max = 100_000u64;
-            let sum = stream::iter((1..=max).into_iter())
-                .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
-                .await;
-            assert_eq!(sum, Some((1 + max) * max / 2));
+
+        async fn par_reduce_test() {
+            {
+                let sum: Option<u64> = stream::iter(iter::empty())
+                    .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
+                    .await;
+                assert!(sum.is_none());
+            }
+
+            {
+                let max = 100_000u64;
+                let sum = stream::iter((1..=max).into_iter())
+                    .par_reduce(None, |lhs, rhs| async move { lhs + rhs })
+                    .await;
+                assert_eq!(sum, Some((1 + max) * max / 2));
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn reorder_index_haling_test() {
-        let indexes = vec![5, 2, 1, 0, 6, 4, 3];
-        let output: Vec<_> = stream::iter(indexes)
-            .then(|index| async move {
-                rt::sleep(Duration::from_millis(20)).await;
-                (index, index)
-            })
-            .reorder_enumerated()
-            .collect()
-            .await;
-        assert_eq!(&output, &[0, 1, 2, 3, 4, 5, 6]);
-    }
 
-    #[tokio::test]
-    async fn enumerate_reorder_test() {
-        let max = 1000u64;
-        let iterator = (0..max).rev().step_by(2);
+        async fn reorder_index_haling_test() {
+            let indexes = vec![5, 2, 1, 0, 6, 4, 3];
+            let output: Vec<_> = stream::iter(indexes)
+                .then(|index| async move {
+                    rt::sleep(Duration::from_millis(20)).await;
+                    (index, index)
+                })
+                .reorder_enumerated()
+                .collect()
+                .await;
+            assert_eq!(&output, &[0, 1, 2, 3, 4, 5, 6]);
+        }
 
-        let lhs = stream::iter(iterator.clone())
-            .enumerate()
-            .par_then_unordered(None, |(index, value)| async move {
-                rt::sleep(std::time::Duration::from_millis(value % 20)).await;
-                (index, value)
-            })
-            .reorder_enumerated();
-        let rhs = stream::iter(iterator.clone());
 
-        let is_equal =
-            async_std::stream::StreamExt::all(&mut lhs.zip(rhs), |(lhs_value, rhs_value)| {
-                lhs_value == rhs_value
-            })
-            .await;
-        assert!(is_equal);
-    }
+        async fn enumerate_reorder_test() {
+            let max = 1000u64;
+            let iterator = (0..max).rev().step_by(2);
 
-    #[tokio::test]
-    async fn for_each_test() {
-        use std::sync::atomic::{self, AtomicUsize};
+            let lhs = stream::iter(iterator.clone())
+                .enumerate()
+                .par_then_unordered(None, |(index, value)| async move {
+                    rt::sleep(std::time::Duration::from_millis(value % 20)).await;
+                    (index, value)
+                })
+                .reorder_enumerated();
+            let rhs = stream::iter(iterator.clone());
 
-        {
-            let sum = Arc::new(AtomicUsize::new(0));
-            stream::iter(1..=1000)
-                .par_for_each(None, {
-                    let sum = sum.clone();
-                    move |value| {
-                        let sum = sum.clone();
-                        async move {
-                            sum.fetch_add(value, atomic::Ordering::SeqCst);
-                        }
-                    }
+            let is_equal =
+                async_std::stream::StreamExt::all(&mut lhs.zip(rhs), |(lhs_value, rhs_value)| {
+                    lhs_value == rhs_value
                 })
                 .await;
-            assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+            assert!(is_equal);
         }
 
-        {
-            let sum = Arc::new(AtomicUsize::new(0));
-            stream::iter(1..=1000)
-                .par_for_each_blocking(None, {
-                    let sum = sum.clone();
-                    move |value| {
+
+        async fn for_each_test() {
+            use std::sync::atomic::{self, AtomicUsize};
+
+            {
+                let sum = Arc::new(AtomicUsize::new(0));
+                stream::iter(1..=1000)
+                    .par_for_each(None, {
                         let sum = sum.clone();
-                        move || {
-                            sum.fetch_add(value, atomic::Ordering::SeqCst);
+                        move |value| {
+                            let sum = sum.clone();
+                            async move {
+                                sum.fetch_add(value, atomic::Ordering::SeqCst);
+                            }
                         }
-                    }
-                })
-                .await;
-            assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+                    })
+                    .await;
+                assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+            }
+
+            {
+                let sum = Arc::new(AtomicUsize::new(0));
+                stream::iter(1..=1000)
+                    .par_for_each_blocking(None, {
+                        let sum = sum.clone();
+                        move |value| {
+                            let sum = sum.clone();
+                            move || {
+                                sum.fetch_add(value, atomic::Ordering::SeqCst);
+                            }
+                        }
+                    })
+                    .await;
+                assert_eq!(sum.load(atomic::Ordering::SeqCst), (1 + 1000) * 1000 / 2);
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn tee_halt_test() {
-        let mut rx1 = stream::iter(0..).tee(1);
-        let mut rx2 = rx1.clone();
 
-        assert!(rx1.next().await.is_some());
-        assert!(rx2.next().await.is_some());
+        async fn tee_halt_test() {
+            let mut rx1 = stream::iter(0..).tee(1);
+            let mut rx2 = rx1.clone();
 
-        // drop rx1
-        drop(rx1);
+            assert!(rx1.next().await.is_some());
+            assert!(rx2.next().await.is_some());
 
-        // the following should not block
-        assert!(rx2.next().await.is_some());
-        assert!(rx2.next().await.is_some());
-        assert!(rx2.next().await.is_some());
-        assert!(rx2.next().await.is_some());
-        assert!(rx2.next().await.is_some());
-    }
+            // drop rx1
+            drop(rx1);
 
-    #[tokio::test]
-    async fn tee_test() {
-        let orig: Vec<_> = (0..100).collect();
+            // the following should not block
+            assert!(rx2.next().await.is_some());
+            assert!(rx2.next().await.is_some());
+            assert!(rx2.next().await.is_some());
+            assert!(rx2.next().await.is_some());
+            assert!(rx2.next().await.is_some());
+        }
 
-        let rx1 = stream::iter(orig.clone()).tee(1);
-        let rx2 = rx1.clone();
-        let rx3 = rx1.clone();
 
-        let fut1 = rx1
-            .then(|val| async move {
-                let millis = rand::thread_rng().gen_range(0..5);
-                rt::sleep(Duration::from_millis(millis)).await;
-                val
-            })
-            .collect();
-        let fut2 = rx2
-            .then(|val| async move {
-                let millis = rand::thread_rng().gen_range(0..5);
-                rt::sleep(Duration::from_millis(millis)).await;
-                val * 2
-            })
-            .collect();
-        let fut3 = rx3
-            .then(|val| async move {
-                let millis = rand::thread_rng().gen_range(0..5);
-                rt::sleep(Duration::from_millis(millis)).await;
-                val * 3
-            })
-            .collect();
+        async fn tee_test() {
+            let orig: Vec<_> = (0..100).collect();
 
-        let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
+            let rx1 = stream::iter(orig.clone()).tee(1);
+            let rx2 = rx1.clone();
+            let rx3 = rx1.clone();
 
-        // the collected method is possibly losing some of first few elements
-        let start1 = orig.len() - vec1.len();
-        let start2 = orig.len() - vec2.len();
-        let start3 = orig.len() - vec3.len();
+            let fut1 = rx1
+                .then(|val| async move {
+                    let millis = rand::thread_rng().gen_range(0..5);
+                    rt::sleep(Duration::from_millis(millis)).await;
+                    val
+                })
+                .collect();
+            let fut2 = rx2
+                .then(|val| async move {
+                    let millis = rand::thread_rng().gen_range(0..5);
+                    rt::sleep(Duration::from_millis(millis)).await;
+                    val * 2
+                })
+                .collect();
+            let fut3 = rx3
+                .then(|val| async move {
+                    let millis = rand::thread_rng().gen_range(0..5);
+                    rt::sleep(Duration::from_millis(millis)).await;
+                    val * 3
+                })
+                .collect();
 
-        assert!(orig[start1..]
-            .iter()
-            .zip(&vec1)
-            .all(|(&orig, &val)| orig == val));
-        assert!(orig[start2..]
-            .iter()
-            .zip(&vec2)
-            .all(|(&orig, &val)| orig * 2 == val));
-        assert!(orig[start3..]
-            .iter()
-            .zip(&vec3)
-            .all(|(&orig, &val)| orig * 3 == val));
+            let (vec1, vec2, vec3): (Vec<_>, Vec<_>, Vec<_>) = join!(fut1, fut2, fut3);
+
+            // the collected method is possibly losing some of first few elements
+            let start1 = orig.len() - vec1.len();
+            let start2 = orig.len() - vec2.len();
+            let start3 = orig.len() - vec3.len();
+
+            assert!(orig[start1..]
+                .iter()
+                .zip(&vec1)
+                .all(|(&orig, &val)| orig == val));
+            assert!(orig[start2..]
+                .iter()
+                .zip(&vec2)
+                .all(|(&orig, &val)| orig * 2 == val));
+            assert!(orig[start3..]
+                .iter()
+                .zip(&vec3)
+                .all(|(&orig, &val)| orig * 3 == val));
+        }
     }
 }

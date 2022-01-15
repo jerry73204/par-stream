@@ -156,52 +156,52 @@ impl<T> Stream for BroadcastStream<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::par_stream::ParStreamExt as _;
+    use crate::{par_stream::ParStreamExt as _, utils::async_test};
     use itertools::izip;
 
-    #[tokio::test]
-    async fn broadcast_test() {
-        let mut builder = stream::iter(0..).broadcast(2, true);
-        let rx1 = builder.register();
-        let rx2 = builder.register();
-        builder.build();
-
-        let (ret1, ret2): (Vec<_>, Vec<_>) =
-            join!(rx1.take(100).collect(), rx2.take(100).collect());
-
-        izip!(ret1, 0..100).for_each(|(lhs, rhs)| {
-            assert_eq!(lhs, rhs);
-        });
-        izip!(ret2, 0..100).for_each(|(lhs, rhs)| {
-            assert_eq!(lhs, rhs);
-        });
-    }
-
-    #[tokio::test]
-    async fn broadcast_and_drop_receiver_test() {
-        {
-            let mut builder = stream::iter(0..).broadcast(2, false);
+    async_test! {
+        async fn broadcast_test() {
+            let mut builder = stream::iter(0..).broadcast(2, true);
             let rx1 = builder.register();
             let rx2 = builder.register();
             builder.build();
 
-            drop(rx2);
+            let (ret1, ret2): (Vec<_>, Vec<_>) =
+                join!(rx1.take(100).collect(), rx2.take(100).collect());
 
-            let vec: Vec<_> = rx1.take(100).collect().await;
-            izip!(vec, 0..100).for_each(|(lhs, rhs)| {
+            izip!(ret1, 0..100).for_each(|(lhs, rhs)| {
+                assert_eq!(lhs, rhs);
+            });
+            izip!(ret2, 0..100).for_each(|(lhs, rhs)| {
                 assert_eq!(lhs, rhs);
             });
         }
 
-        {
-            let mut builder = stream::iter(0..).broadcast(2, true);
-            let mut rx1 = builder.register();
-            let rx2 = builder.register();
-            builder.build();
+        async fn broadcast_and_drop_receiver_test() {
+            {
+                let mut builder = stream::iter(0..).broadcast(2, false);
+                let rx1 = builder.register();
+                let rx2 = builder.register();
+                builder.build();
 
-            drop(rx2);
-            assert_eq!(rx1.next().await, Some(0));
-            assert!(rx1.next().await.is_none());
+                drop(rx2);
+
+                let vec: Vec<_> = rx1.take(100).collect().await;
+                izip!(vec, 0..100).for_each(|(lhs, rhs)| {
+                    assert_eq!(lhs, rhs);
+                });
+            }
+
+            {
+                let mut builder = stream::iter(0..).broadcast(2, true);
+                let mut rx1 = builder.register();
+                let rx2 = builder.register();
+                builder.build();
+
+                drop(rx2);
+                assert_eq!(rx1.next().await, Some(0));
+                assert!(rx1.next().await.is_none());
+            }
         }
     }
 }

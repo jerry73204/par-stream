@@ -93,34 +93,35 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::par_stream::ParStreamExt as _;
+    use crate::{par_stream::ParStreamExt as _, utils::async_test};
 
-    #[tokio::test]
-    async fn pull_routing_test() {
-        let mut builder = stream::iter([("A", 1), ("B", 2), ("C", 3), ("D", 4)])
-            .pull_routing(None, |&(key, _)| key);
+    async_test! {
+        async fn pull_routing_test() {
+            let mut builder = stream::iter([("A", 1), ("B", 2), ("C", 3), ("D", 4)])
+                .pull_routing(None, |&(key, _)| key);
 
-        let stream_a = builder.register("A").unwrap();
-        let stream_b = builder.register("B").unwrap();
-        let stream_c = builder.register("C").unwrap();
-        let stream_leak = builder.build();
+            let stream_a = builder.register("A").unwrap();
+            let stream_b = builder.register("B").unwrap();
+            let stream_c = builder.register("C").unwrap();
+            let stream_leak = builder.build();
 
-        let join: Vec<Vec<_>> = future::join_all([
-            stream_a.collect(),
-            stream_b.collect(),
-            stream_c.collect(),
-            stream_leak.collect(),
-        ])
-        .await;
+            let join: Vec<Vec<_>> = future::join_all([
+                stream_a.collect(),
+                stream_b.collect(),
+                stream_c.collect(),
+                stream_leak.collect(),
+            ])
+                .await;
 
-        assert_eq!(
-            join,
-            vec![
-                vec![("A", 1)],
-                vec![("B", 2)],
-                vec![("C", 3)],
-                vec![("D", 4)]
-            ]
-        );
+            assert_eq!(
+                join,
+                vec![
+                    vec![("A", 1)],
+                    vec![("B", 2)],
+                    vec![("C", 3)],
+                    vec![("D", 4)]
+                ]
+            );
+        }
     }
 }

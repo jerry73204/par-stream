@@ -43,6 +43,25 @@ macro_rules! has_async_std {
 }
 pub(crate) use has_async_std;
 
+macro_rules! async_test {
+    ($($item:item)*) => {
+        crate::utils::has_tokio! {
+            $(
+                #[tokio::test]
+                $item
+            )*
+        }
+
+        crate::utils::has_async_std! {
+            $(
+                #[async_std::test]
+                $item
+            )*
+        }
+    };
+}
+pub(crate) use async_test;
+
 pub fn channel<T>(capacity: impl Into<Option<usize>>) -> (flume::Sender<T>, flume::Receiver<T>) {
     match capacity.into() {
         Some(capacity) => flume::bounded(capacity),

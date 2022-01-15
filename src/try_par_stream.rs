@@ -408,266 +408,268 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::async_test;
     use rand::prelude::*;
 
-    #[tokio::test]
-    async fn try_par_batching_test() {
-        {
-            let mut stream = stream::iter(iter::repeat(1).take(10))
-                .map(Ok)
-                .try_par_batching(None, |_, _| async move {
-                    Result::<Option<((), _)>, _>::Err("init error")
-                });
+    async_test! {
+        async fn try_par_batching_test() {
+            {
+                let mut stream = stream::iter(iter::repeat(1).take(10))
+                    .map(Ok)
+                    .try_par_batching(None, |_, _| async move {
+                        Result::<Option<((), _)>, _>::Err("init error")
+                    });
 
-            assert_eq!(stream.next().await, Some(Err("init error")));
-            assert!(stream.next().await.is_none());
-        }
-
-        {
-            let mut stream = stream::repeat(1)
-                .take(10)
-                .map(Result::<_, ()>::Ok)
-                .try_par_batching(None, |_, mut stream| async move {
-                    let mut sum = 0;
-
-                    while let Some(val) = stream.next().await {
-                        sum += val?;
-                        if sum >= 3 {
-                            return Ok(Some((sum, stream)));
-                        }
-                    }
-
-                    if sum > 0 {
-                        return Ok(Some((sum, stream)));
-                    }
-
-                    Ok(None)
-                });
-
-            let mut total = 0;
-            while total < 10 {
-                let sum = stream.next().await.unwrap().unwrap();
-                assert!(sum <= 3);
-                total += sum;
+                assert_eq!(stream.next().await, Some(Err("init error")));
+                assert!(stream.next().await.is_none());
             }
-            assert!(stream.next().await.is_none());
-        }
 
-        {
-            let mut stream = stream::repeat(1).take(10).map(Ok).try_par_batching(
-                None,
-                |_, mut stream| async move {
-                    let mut sum = 0;
+            {
+                let mut stream = stream::repeat(1)
+                    .take(10)
+                    .map(Result::<_, ()>::Ok)
+                    .try_par_batching(None, |_, mut stream| async move {
+                        let mut sum = 0;
 
-                    while let Some(val) = stream.next().await {
-                        sum += val?;
-                        if sum >= 3 {
+                        while let Some(val) = stream.next().await {
+                            sum += val?;
+                            if sum >= 3 {
+                                return Ok(Some((sum, stream)));
+                            }
+                        }
+
+                        if sum > 0 {
                             return Ok(Some((sum, stream)));
                         }
-                    }
 
-                    if sum == 0 {
                         Ok(None)
-                    } else {
-                        Err(sum)
-                    }
-                },
-            );
+                    });
 
-            let mut total = 0;
-            while total < 10 {
-                let result = stream.next().await.unwrap();
-                match result {
-                    Ok(sum) => {
-                        assert!(sum == 3);
-                        total += sum;
-                    }
-                    Err(sum) => {
-                        assert!(sum < 3);
-                        break;
+                let mut total = 0;
+                while total < 10 {
+                    let sum = stream.next().await.unwrap().unwrap();
+                    assert!(sum <= 3);
+                    total += sum;
+                }
+                assert!(stream.next().await.is_none());
+            }
+
+            {
+                let mut stream = stream::repeat(1).take(10).map(Ok).try_par_batching(
+                    None,
+                    |_, mut stream| async move {
+                        let mut sum = 0;
+
+                        while let Some(val) = stream.next().await {
+                            sum += val?;
+                            if sum >= 3 {
+                                return Ok(Some((sum, stream)));
+                            }
+                        }
+
+                        if sum == 0 {
+                            Ok(None)
+                        } else {
+                            Err(sum)
+                        }
+                    },
+                );
+
+                let mut total = 0;
+                while total < 10 {
+                    let result = stream.next().await.unwrap();
+                    match result {
+                        Ok(sum) => {
+                            assert!(sum == 3);
+                            total += sum;
+                        }
+                        Err(sum) => {
+                            assert!(sum < 3);
+                            break;
+                        }
                     }
                 }
+                assert!(stream.next().await.is_none());
             }
-            assert!(stream.next().await.is_none());
-        }
-    }
-
-    #[tokio::test]
-    async fn try_par_for_each_test() {
-        {
-            let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)].into_iter())
-                .try_par_for_each(None, |_| async move { Result::<_, ()>::Ok(()) })
-                .await;
-
-            assert_eq!(result, Ok(()));
         }
 
-        {
-            let result = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
-                .try_par_for_each(None, |_| async move { Ok(()) })
-                .await;
 
-            assert_eq!(result, Err(-3));
-        }
-    }
+        async fn try_par_for_each_test() {
+            {
+                let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)].into_iter())
+                    .try_par_for_each(None, |_| async move { Result::<_, ()>::Ok(()) })
+                    .await;
 
-    #[tokio::test]
-    async fn try_par_for_each_blocking_test() {
-        {
-            let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)])
-                .try_par_for_each_blocking(None, |_| || Result::<_, ()>::Ok(()))
-                .await;
+                assert_eq!(result, Ok(()));
+            }
 
-            assert_eq!(result, Ok(()));
-        }
+            {
+                let result = stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+                    .try_par_for_each(None, |_| async move { Ok(()) })
+                    .await;
 
-        {
-            let result = stream::iter(0..)
-                .then(|val| async move {
-                    if val == 3 {
-                        Err(val)
-                    } else {
-                        Ok(val)
-                    }
-                })
-                .try_par_for_each_blocking(8, |_| || Ok(()))
-                .await;
-
-            assert_eq!(result, Err(3));
+                assert_eq!(result, Err(-3));
+            }
         }
 
-        {
-            let result = stream::iter(0..)
-                .map(Ok)
-                .try_par_for_each_blocking(None, |val| {
-                    move || {
+
+        async fn try_par_for_each_blocking_test() {
+            {
+                let result = stream::iter(vec![Ok(1usize), Ok(2), Ok(6), Ok(4)])
+                    .try_par_for_each_blocking(None, |_| || Result::<_, ()>::Ok(()))
+                    .await;
+
+                assert_eq!(result, Ok(()));
+            }
+
+            {
+                let result = stream::iter(0..)
+                    .then(|val| async move {
                         if val == 3 {
-                            std::thread::sleep(Duration::from_millis(100));
                             Err(val)
                         } else {
-                            Ok(())
+                            Ok(val)
                         }
-                    }
-                })
-                .await;
+                    })
+                    .try_par_for_each_blocking(8, |_| || Ok(()))
+                    .await;
 
-            assert_eq!(result, Err(3));
+                assert_eq!(result, Err(3));
+            }
+
+            {
+                let result = stream::iter(0..)
+                    .map(Ok)
+                    .try_par_for_each_blocking(None, |val| {
+                        move || {
+                            if val == 3 {
+                                std::thread::sleep(Duration::from_millis(100));
+                                Err(val)
+                            } else {
+                                Ok(())
+                            }
+                        }
+                    })
+                    .await;
+
+                assert_eq!(result, Err(3));
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn try_par_then_test() {
-        {
-            let vec: Vec<Result<_, _>> =
-                stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
+
+        async fn try_par_then_test() {
+            {
+                let vec: Vec<Result<_, _>> =
+                    stream::iter(vec![Ok(1usize), Ok(2), Err(-3isize), Ok(4)].into_iter())
                     .try_par_then(None, |value| future::ok(value))
                     .collect()
                     .await;
 
-            assert!(matches!(
-                *vec,
-                [Err(-3)] | [Ok(1), Err(-3)] | [Ok(2), Err(-3)] | [Ok(1), Ok(2), Err(-3)],
-            ));
-        }
+                assert!(matches!(
+                    *vec,
+                    [Err(-3)] | [Ok(1), Err(-3)] | [Ok(2), Err(-3)] | [Ok(1), Ok(2), Err(-3)],
+                ));
+            }
 
-        {
-            let vec: Result<Vec<()>, ()> = stream::iter(vec![])
-                .try_par_then(None, |()| async move { Ok(()) })
-                .try_collect()
-                .await;
+            {
+                let vec: Result<Vec<()>, ()> = stream::iter(vec![])
+                    .try_par_then(None, |()| async move { Ok(()) })
+                    .try_collect()
+                    .await;
 
-            assert!(matches!(vec, Ok(vec) if vec.is_empty()));
-        }
+                assert!(matches!(vec, Ok(vec) if vec.is_empty()));
+            }
 
-        {
-            let vec: Vec<Result<_, _>> = stream::iter(1..)
-                .map(Ok)
-                .try_par_then(3, |index| async move {
-                    match index {
-                        3 | 6 => Err(index),
-                        index => Ok(index),
-                    }
-                })
-                .collect()
-                .await;
-
-            assert!(matches!(
-                *vec,
-                [Err(3)] | [Ok(1), Err(3)] | [Ok(2), Err(3)] | [Ok(1), Ok(2), Err(3)],
-            ));
-        }
-    }
-
-    #[tokio::test]
-    async fn try_reorder_enumerated_test() {
-        let len: usize = 1000;
-        let mut rng = rand::thread_rng();
-
-        for _ in 0..10 {
-            let err_index_1 = rng.gen_range(0..len);
-            let err_index_2 = rng.gen_range(0..len);
-            let min_err_index = err_index_1.min(err_index_2);
-
-            let results: Vec<_> = stream::iter(0..len)
-                .map(move |value| {
-                    if value == err_index_1 || value == err_index_2 {
-                        Err(-(value as isize))
-                    } else {
-                        Ok(value)
-                    }
-                })
-                .try_enumerate()
-                .try_par_then_unordered(None, |(index, value)| async move {
-                    rt::sleep(Duration::from_millis(value as u64 % 10)).await;
-                    Ok((index, value))
-                })
-                .try_reorder_enumerated()
-                .collect()
-                .await;
-            assert!(results.len() <= min_err_index + 1);
-
-            let (is_fused_at_error, _, _) = results.iter().cloned().fold(
-                (true, false, 0),
-                |(is_correct, found_err, expect), result| {
-                    if !is_correct {
-                        return (false, found_err, expect);
-                    }
-
-                    match result {
-                        Ok(value) => {
-                            let is_correct = value < min_err_index && value == expect && !found_err;
-                            (is_correct, found_err, expect + 1)
+            {
+                let vec: Vec<Result<_, _>> = stream::iter(1..)
+                    .map(Ok)
+                    .try_par_then(3, |index| async move {
+                        match index {
+                            3 | 6 => Err(index),
+                            index => Ok(index),
                         }
-                        Err(value) => {
-                            let is_correct = (-value) as usize == min_err_index && !found_err;
-                            let found_err = true;
-                            (is_correct, found_err, expect + 1)
+                    })
+                    .collect()
+                    .await;
+
+                assert!(matches!(
+                    *vec,
+                    [Err(3)] | [Ok(1), Err(3)] | [Ok(2), Err(3)] | [Ok(1), Ok(2), Err(3)],
+                ));
+            }
+        }
+
+
+        async fn try_reorder_enumerated_test() {
+            let len: usize = 1000;
+            let mut rng = rand::thread_rng();
+
+            for _ in 0..10 {
+                let err_index_1 = rng.gen_range(0..len);
+                let err_index_2 = rng.gen_range(0..len);
+                let min_err_index = err_index_1.min(err_index_2);
+
+                let results: Vec<_> = stream::iter(0..len)
+                    .map(move |value| {
+                        if value == err_index_1 || value == err_index_2 {
+                            Err(-(value as isize))
+                        } else {
+                            Ok(value)
                         }
-                    }
-                },
-            );
-            assert!(is_fused_at_error);
+                    })
+                    .try_enumerate()
+                    .try_par_then_unordered(None, |(index, value)| async move {
+                        rt::sleep(Duration::from_millis(value as u64 % 10)).await;
+                        Ok((index, value))
+                    })
+                    .try_reorder_enumerated()
+                    .collect()
+                    .await;
+                assert!(results.len() <= min_err_index + 1);
+
+                let (is_fused_at_error, _, _) = results.iter().cloned().fold(
+                    (true, false, 0),
+                    |(is_correct, found_err, expect), result| {
+                        if !is_correct {
+                            return (false, found_err, expect);
+                        }
+
+                        match result {
+                            Ok(value) => {
+                                let is_correct = value < min_err_index && value == expect && !found_err;
+                                (is_correct, found_err, expect + 1)
+                            }
+                            Err(value) => {
+                                let is_correct = (-value) as usize == min_err_index && !found_err;
+                                let found_err = true;
+                                (is_correct, found_err, expect + 1)
+                            }
+                        }
+                    },
+                );
+                assert!(is_fused_at_error);
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn try_map_blocking_test() {
-        {
-            let vec: Vec<_> = stream::iter(vec![Ok(1u64), Ok(2), Err(-3i64), Ok(4)])
-                .try_map_blocking(None, |val| Ok(val.pow(10)))
-                .collect()
-                .await;
 
-            assert_eq!(vec, [Ok(1), Ok(1024), Err(-3)]);
-        }
+        async fn try_map_blocking_test() {
+            {
+                let vec: Vec<_> = stream::iter(vec![Ok(1u64), Ok(2), Err(-3i64), Ok(4)])
+                    .try_map_blocking(None, |val| Ok(val.pow(10)))
+                    .collect()
+                    .await;
 
-        {
-            let vec: Vec<_> = stream::iter(vec![Ok(1i64), Ok(2), Err(-3i64), Ok(4)])
-                .try_map_blocking(None, |val| if val >= 2 { Err(-val) } else { Ok(val) })
-                .collect()
-                .await;
+                assert_eq!(vec, [Ok(1), Ok(1024), Err(-3)]);
+            }
 
-            assert_eq!(vec, [Ok(1), Err(-2)]);
+            {
+                let vec: Vec<_> = stream::iter(vec![Ok(1i64), Ok(2), Err(-3i64), Ok(4)])
+                    .try_map_blocking(None, |val| if val >= 2 { Err(-val) } else { Ok(val) })
+                    .collect()
+                    .await;
+
+                assert_eq!(vec, [Ok(1), Err(-2)]);
+            }
         }
     }
 }

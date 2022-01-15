@@ -680,231 +680,236 @@ mod try_par_unfold_blocking {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::async_test;
     use rand::prelude::*;
 
-    #[tokio::test]
-    async fn sync_test() {
-        {
-            let stream1 = stream::iter([1, 3, 5, 7]);
-            let stream2 = stream::iter([2, 4, 6, 8]);
+    async_test! {
 
-            let collected: Vec<_> = super::sync_by_key(None, |&val| val, [stream1, stream2])
-                .collect()
-                .await;
 
-            assert_eq!(
-                collected,
-                [
-                    Ok((0, 1)),
-                    Ok((1, 2)),
-                    Ok((0, 3)),
-                    Ok((1, 4)),
-                    Ok((0, 5)),
-                    Ok((1, 6)),
-                    Ok((0, 7)),
-                    Ok((1, 8)),
-                ]
-            );
-        }
+        async fn sync_test() {
+            {
+                let stream1 = stream::iter([1, 3, 5, 7]);
+                let stream2 = stream::iter([2, 4, 6, 8]);
 
-        {
-            let stream1 = stream::iter([1, 2, 3]);
-            let stream2 = stream::iter([2, 1, 3]);
-
-            let (synced, leaked): (Vec<_>, Vec<_>) =
-                super::sync_by_key(None, |&val| val, [stream1, stream2])
-                    .map(|result| match result {
-                        Ok(item) => (Some(item), None),
-                        Err(item) => (None, Some(item)),
-                    })
-                    .unzip()
+                let collected: Vec<_> = super::sync_by_key(None, |&val| val, [stream1, stream2])
+                    .collect()
                     .await;
-            let synced: Vec<_> = synced.into_iter().flatten().collect();
-            let leaked: Vec<_> = leaked.into_iter().flatten().collect();
 
-            assert_eq!(synced, [(0, 1), (0, 2), (1, 2), (0, 3), (1, 3)]);
-            assert_eq!(leaked, [(1, 1)]);
+                assert_eq!(
+                    collected,
+                    [
+                        Ok((0, 1)),
+                        Ok((1, 2)),
+                        Ok((0, 3)),
+                        Ok((1, 4)),
+                        Ok((0, 5)),
+                        Ok((1, 6)),
+                        Ok((0, 7)),
+                        Ok((1, 8)),
+                    ]
+                );
+            }
+
+            {
+                let stream1 = stream::iter([1, 2, 3]);
+                let stream2 = stream::iter([2, 1, 3]);
+
+                let (synced, leaked): (Vec<_>, Vec<_>) =
+                    super::sync_by_key(None, |&val| val, [stream1, stream2])
+                        .map(|result| match result {
+                            Ok(item) => (Some(item), None),
+                            Err(item) => (None, Some(item)),
+                        })
+                        .unzip()
+                        .await;
+                let synced: Vec<_> = synced.into_iter().flatten().collect();
+                let leaked: Vec<_> = leaked.into_iter().flatten().collect();
+
+                assert_eq!(synced, [(0, 1), (0, 2), (1, 2), (0, 3), (1, 3)]);
+                assert_eq!(leaked, [(1, 1)]);
+            }
         }
-    }
 
-    #[tokio::test]
-    async fn par_unfold_test() {
-        let max_quota = 100;
 
-        let count = super::par_unfold(
-            4,
-            Arc::new(AtomicUsize::new(0)),
-            move |_, quota| async move {
-                let enough = quota.fetch_add(1, AcqRel) < max_quota;
+        async fn par_unfold_test() {
+            let max_quota = 100;
 
-                enough.then(|| {
-                    let mut rng = rand::thread_rng();
-                    let val = rng.gen_range(0..10);
-                    (val, quota)
-                })
-            },
-        )
-        .count()
-        .await;
+            let count = super::par_unfold(
+                4,
+                Arc::new(AtomicUsize::new(0)),
+                move |_, quota| async move {
+                    let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
-        assert_eq!(count, max_quota);
-    }
-    #[tokio::test]
-    async fn par_unfold_blocking_test() {
-        let max_quota = 100;
-
-        let count =
-            super::par_unfold_blocking(4, Arc::new(AtomicUsize::new(0)), move |_, quota| {
-                let enough = quota.fetch_add(1, AcqRel) < max_quota;
-
-                enough.then(|| {
-                    let mut rng = rand::thread_rng();
-                    let val = rng.gen_range(0..10);
-                    (val, quota)
-                })
-            })
+                    enough.then(|| {
+                        let mut rng = rand::thread_rng();
+                        let val = rng.gen_range(0..10);
+                        (val, quota)
+                    })
+                },
+            )
             .count()
             .await;
 
-        assert_eq!(count, max_quota);
-    }
+            assert_eq!(count, max_quota);
+        }
 
-    #[tokio::test]
-    async fn try_sync_test() {
-        {
-            let stream1 = stream::iter(vec![Ok(3), Ok(1), Ok(5), Ok(7)]);
-            let stream2 = stream::iter(vec![Ok(2), Ok(4), Ok(6), Err("error")]);
 
-            let mut stream = super::try_sync_by_key(None, |&val| val, [stream1, stream2]);
+        async fn par_unfold_blocking_test() {
+            let max_quota = 100;
 
-            let mut prev = None;
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(Ok((index, value))) => {
-                        if value & 1 == 1 {
+            let count =
+                super::par_unfold_blocking(4, Arc::new(AtomicUsize::new(0)), move |_, quota| {
+                    let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+                    enough.then(|| {
+                        let mut rng = rand::thread_rng();
+                        let val = rng.gen_range(0..10);
+                        (val, quota)
+                    })
+                })
+                .count()
+                .await;
+
+            assert_eq!(count, max_quota);
+        }
+
+
+        async fn try_sync_test() {
+            {
+                let stream1 = stream::iter(vec![Ok(3), Ok(1), Ok(5), Ok(7)]);
+                let stream2 = stream::iter(vec![Ok(2), Ok(4), Ok(6), Err("error")]);
+
+                let mut stream = super::try_sync_by_key(None, |&val| val, [stream1, stream2]);
+
+                let mut prev = None;
+                while let Some(result) = stream.next().await {
+                    match result {
+                        Ok(Ok((index, value))) => {
+                            if value & 1 == 1 {
+                                assert_eq!(index, 0);
+                            } else {
+                                assert_eq!(index, 1);
+                            }
+
+                            if let Some(prev) = prev {
+                                assert!(prev < value);
+                            }
+                            prev = Some(value);
+                        }
+                        Ok(Err((index, value))) => {
                             assert_eq!(index, 0);
-                        } else {
-                            assert_eq!(index, 1);
+                            assert_eq!(value, 1);
                         }
+                        Err(err) => {
+                            assert_eq!(err, "error");
+                            break;
+                        }
+                    }
+                }
 
-                        if let Some(prev) = prev {
-                            assert!(prev < value);
-                        }
-                        prev = Some(value);
+                assert_eq!(stream.next().await, None);
+            }
+        }
+
+
+        async fn try_par_unfold_test() {
+            let max_quota = 100;
+
+            let mut stream = super::try_par_unfold(
+                None,
+                Arc::new(AtomicUsize::new(0)),
+                move |index, quota| async move {
+                    let enough = quota.fetch_add(1, AcqRel) < max_quota;
+
+                    if enough {
+                        Ok(Some((index, quota)))
+                    } else {
+                        Err("out of quota")
                     }
-                    Ok(Err((index, value))) => {
-                        assert_eq!(index, 0);
-                        assert_eq!(value, 1);
+                },
+            );
+
+            let mut counts = HashMap::new();
+
+            loop {
+                let result = stream.next().await;
+
+                match result {
+                    Some(Ok(index)) => {
+                        *counts.entry(index).or_insert_with(|| 0) += 1;
                     }
-                    Err(err) => {
-                        assert_eq!(err, "error");
+                    Some(Err("out of quota")) => {
                         break;
                     }
+                    Some(Err(_)) | None => {
+                        unreachable!();
+                    }
                 }
             }
 
-            assert_eq!(stream.next().await, None);
+            assert!(stream.next().await.is_none());
+            assert!(counts.values().all(|&count| count <= max_quota));
+            assert!(counts.values().cloned().sum::<usize>() <= max_quota);
         }
-    }
 
-    #[tokio::test]
-    async fn try_par_unfold_test() {
-        let max_quota = 100;
 
-        let mut stream = super::try_par_unfold(
-            None,
-            Arc::new(AtomicUsize::new(0)),
-            move |index, quota| async move {
-                let enough = quota.fetch_add(1, AcqRel) < max_quota;
+        async fn try_par_unfold_blocking_test() {
+            let max_quota = 100;
 
-                if enough {
-                    Ok(Some((index, quota)))
-                } else {
-                    Err("out of quota")
-                }
-            },
-        );
+            let mut stream = super::try_par_unfold_blocking(
+                None,
+                Arc::new(AtomicUsize::new(0)),
+                move |index, quota| {
+                    let enough = quota.fetch_add(1, AcqRel) < max_quota;
 
-        let mut counts = HashMap::new();
+                    if enough {
+                        Ok(Some((index, quota)))
+                    } else {
+                        Err("out of quota")
+                    }
+                },
+            );
 
-        loop {
-            let result = stream.next().await;
+            let mut counts = HashMap::new();
 
-            match result {
-                Some(Ok(index)) => {
-                    *counts.entry(index).or_insert_with(|| 0) += 1;
-                }
-                Some(Err("out of quota")) => {
-                    break;
-                }
-                Some(Err(_)) | None => {
-                    unreachable!();
+            loop {
+                let result = stream.next().await;
+
+                match result {
+                    Some(Ok(index)) => {
+                        *counts.entry(index).or_insert_with(|| 0) += 1;
+                    }
+                    Some(Err("out of quota")) => {
+                        break;
+                    }
+                    Some(Err(_)) | None => {
+                        unreachable!();
+                    }
                 }
             }
+
+            assert!(stream.next().await.is_none());
+            assert!(counts.values().all(|&count| count <= max_quota));
+            assert!(counts.values().cloned().sum::<usize>() <= max_quota);
         }
 
-        assert!(stream.next().await.is_none());
-        assert!(counts.values().all(|&count| count <= max_quota));
-        assert!(counts.values().cloned().sum::<usize>() <= max_quota);
-    }
 
-    #[tokio::test]
-    async fn try_par_unfold_blocking_test() {
-        let max_quota = 100;
+        async fn iter_blocking_test() {
+            let iter = (0..2).map(|val| {
+                std::thread::sleep(Duration::from_millis(100));
+                val
+            });
 
-        let mut stream = super::try_par_unfold_blocking(
-            None,
-            Arc::new(AtomicUsize::new(0)),
-            move |index, quota| {
-                let enough = quota.fetch_add(1, AcqRel) < max_quota;
+            let vec: Vec<_> = stream::select(
+                super::iter_blocking(None, iter),
+                future::ready(2).into_stream(),
+            )
+            .collect()
+            .await;
 
-                if enough {
-                    Ok(Some((index, quota)))
-                } else {
-                    Err("out of quota")
-                }
-            },
-        );
-
-        let mut counts = HashMap::new();
-
-        loop {
-            let result = stream.next().await;
-
-            match result {
-                Some(Ok(index)) => {
-                    *counts.entry(index).or_insert_with(|| 0) += 1;
-                }
-                Some(Err("out of quota")) => {
-                    break;
-                }
-                Some(Err(_)) | None => {
-                    unreachable!();
-                }
-            }
+            // assuming iter_blocking() will not block the executor,
+            // 2 must go before 0, 1
+            assert_eq!(vec, [2, 0, 1]);
         }
-
-        assert!(stream.next().await.is_none());
-        assert!(counts.values().all(|&count| count <= max_quota));
-        assert!(counts.values().cloned().sum::<usize>() <= max_quota);
-    }
-
-    #[tokio::test]
-    async fn iter_blocking_test() {
-        let iter = (0..2).map(|val| {
-            std::thread::sleep(Duration::from_millis(100));
-            val
-        });
-
-        let vec: Vec<_> = stream::select(
-            super::iter_blocking(None, iter),
-            future::ready(2).into_stream(),
-        )
-        .collect()
-        .await;
-
-        // assuming iter_blocking() will not block the executor,
-        // 2 must go before 0, 1
-        assert_eq!(vec, [2, 0, 1]);
     }
 }

@@ -163,59 +163,59 @@ impl<T> DerefMut for Handle<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stream::StreamExt as _;
+    use crate::{stream::StreamExt as _, utils::async_test};
 
-    #[tokio::test]
-    async fn state_stream_test() {
-        let quota = 100;
+    async_test! {
+        async fn state_stream_test() {
+            let quota = 100;
 
-        let count: usize = stream::repeat(())
-            .with_state(0)
-            .filter_map(|((), mut cost)| async move {
-                if *cost < quota {
-                    *cost += 1;
-                    cost.send().unwrap();
-                    Some(())
-                } else {
-                    cost.close();
-                    None
-                }
-            })
-            .count()
-            .await;
+            let count: usize = stream::repeat(())
+                .with_state(0)
+                .filter_map(|((), mut cost)| async move {
+                    if *cost < quota {
+                        *cost += 1;
+                        cost.send().unwrap();
+                        Some(())
+                    } else {
+                        cost.close();
+                        None
+                    }
+                })
+                .count()
+                .await;
 
-        assert_eq!(count, quota);
-    }
-
-    #[tokio::test]
-    async fn state_stream_simple_test() {
-        {
-            let mut state_stream = StateStream::new(0);
-
-            let handle = state_stream.next().await.unwrap();
-            handle.send().unwrap();
-
-            let handle = state_stream.next().await.unwrap();
-            drop(handle);
-
-            let handle = state_stream.next().await.unwrap();
-            handle.take();
-
-            assert!(state_stream.next().await.is_none());
+            assert_eq!(count, quota);
         }
 
-        {
-            let mut state_stream = StateStream::new(0);
-            let handle = state_stream.next().await.unwrap();
-            drop(state_stream);
-            assert!(handle.send().is_err());
-        }
+        async fn state_stream_simple_test() {
+            {
+                let mut state_stream = StateStream::new(0);
 
-        {
-            let mut state_stream = StateStream::new(0);
-            let handle = state_stream.next().await.unwrap();
-            handle.close();
-            assert!(state_stream.next().await.is_none());
+                let handle = state_stream.next().await.unwrap();
+                handle.send().unwrap();
+
+                let handle = state_stream.next().await.unwrap();
+                drop(handle);
+
+                let handle = state_stream.next().await.unwrap();
+                handle.take();
+
+                assert!(state_stream.next().await.is_none());
+            }
+
+            {
+                let mut state_stream = StateStream::new(0);
+                let handle = state_stream.next().await.unwrap();
+                drop(state_stream);
+                assert!(handle.send().is_err());
+            }
+
+            {
+                let mut state_stream = StateStream::new(0);
+                let handle = state_stream.next().await.unwrap();
+                handle.close();
+                assert!(state_stream.next().await.is_none());
+            }
         }
     }
 }
