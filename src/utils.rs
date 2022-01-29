@@ -43,6 +43,7 @@ macro_rules! has_async_std {
 }
 pub(crate) use has_async_std;
 
+#[allow(unused_macros)]
 macro_rules! async_test {
     ($($item:item)*) => {
         crate::utils::has_tokio! {
@@ -60,6 +61,7 @@ macro_rules! async_test {
         }
     };
 }
+#[allow(unused_imports)]
 pub(crate) use async_test;
 
 pub fn channel<T>(capacity: impl Into<Option<usize>>) -> (flume::Sender<T>, flume::Receiver<T>) {

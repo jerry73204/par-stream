@@ -23,9 +23,9 @@ fn main() {
         let opts = Opts::from_args();
 
         let elapsed_notifier = shared_stream_by_notifier_test(&opts).await;
-        let elapsed_channel = shared_stream_by_channel_test(&opts).await;
-
         println!("elapsed for notifier\t{:?}ms", elapsed_notifier.as_millis());
+
+        let elapsed_channel = shared_stream_by_channel_test(&opts).await;
         println!("elapsed for channel\t{:?}ms", elapsed_channel.as_millis());
     });
 }
