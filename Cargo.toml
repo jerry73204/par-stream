@@ -22,10 +22,7 @@ async-std = { version = "1.10.0", features = ["unstable"], optional = true }
 tokio = { version = "1.16.1", features = ["sync", "macros"] }
 pin-project = "1.0.10"
 derivative = "2.2.0"
-flurry = "0.3.1"
 by_address = "1.0.4"
-smol = { version = "1.2.5", optional = true }
-tokio-stream = "0.1.8"
 flume = "0.10.10"
 once_cell = "1.9.0"
 dashmap = "5.0.0"
@@ -38,7 +35,6 @@ rand = "0.8.4"
 async-std = { version = "1.10.0", features = ["unstable", "attributes"] }
 itertools = "0.10.3"
 concurrent-slice = "0.1.0"
-tokio-stream = { version = "0.1.8", features = ["sync"] }
 structopt = "0.3.26"
 
 [features]

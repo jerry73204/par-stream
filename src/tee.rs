@@ -1,4 +1,5 @@
 use crate::{common::*, config::BufSize, rt, utils};
+use dashmap::DashSet;
 use tokio::sync::Mutex;
 
 /// Stream for the [tee()](crate::par_stream::ParStreamExt::tee) method.
@@ -14,7 +15,7 @@ where
     pub(super) buf_size: Option<usize>,
     #[derivative(Debug = "ignore")]
     pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
-    pub(super) sender_set: Weak<flurry::HashSet<ByAddress<Arc<flume::Sender<T>>>>>,
+    pub(super) sender_set: Weak<DashSet<ByAddress<Arc<flume::Sender<T>>>>>,
     #[derivative(Debug = "ignore")]
     pub(super) stream: flume::r#async::RecvStream<'static, T>,
 }
@@ -30,8 +31,8 @@ where
     {
         let buf_size = buf_size.into().get();
         let (tx, rx) = utils::channel(buf_size);
-        let sender_set = Arc::new(flurry::HashSet::new());
-        sender_set.pin().insert(ByAddress(Arc::new(tx)));
+        let sender_set = Arc::new(DashSet::new());
+        sender_set.insert(ByAddress(Arc::new(tx)));
 
         let future = {
             let sender_set = sender_set.clone();
@@ -40,7 +41,6 @@ where
             let future = rt::spawn(async move {
                 while let Some(item) = stream.next().await {
                     let futures: Vec<_> = sender_set
-                        .pin()
                         .iter()
                         .map(|tx| {
                             let tx = tx.clone();
@@ -58,7 +58,7 @@ where
                         .filter(|(result, tx)| {
                             let ok = result.is_ok();
                             if !ok {
-                                sender_set.pin().remove(tx);
+                                sender_set.remove(tx);
                             }
                             ok
                         })
@@ -92,8 +92,7 @@ where
         let sender_set = self.sender_set.clone();
 
         if let Some(sender_set) = sender_set.upgrade() {
-            let guard = sender_set.guard();
-            sender_set.insert(ByAddress(Arc::new(tx)), &guard);
+            sender_set.insert(ByAddress(Arc::new(tx)));
         }
 
         Self {
