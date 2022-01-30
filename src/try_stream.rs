@@ -137,16 +137,14 @@ mod take_until_error {
             Ready({
                 if *this.is_terminated {
                     None
-                } else {
-                    if let Some(result) = ready!(this.stream.poll_next(cx)) {
-                        if result.is_err() {
-                            *this.is_terminated = true;
-                        }
-                        Some(result)
-                    } else {
+                } else if let Some(result) = ready!(this.stream.poll_next(cx)) {
+                    if result.is_err() {
                         *this.is_terminated = true;
-                        None
                     }
+                    Some(result)
+                } else {
+                    *this.is_terminated = true;
+                    None
                 }
             })
         }
@@ -245,7 +243,7 @@ mod try_stateful_map {
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             let mut this = self.project();
 
-            Poll::Ready(loop {
+            Poll::Ready({
                 if let Some(state) = this.state.take() {
                     match this.stream.as_mut().poll_next(cx) {
                         Ready(Some(Ok(in_item))) => {
@@ -254,23 +252,21 @@ mod try_stateful_map {
                             match result {
                                 Ok(Some((state, out_item))) => {
                                     *this.state = Some(state);
-                                    break Some(Ok(out_item));
+                                    Some(Ok(out_item))
                                 }
-                                Ok(None) => {
-                                    break None;
-                                }
-                                Err(err) => break Some(Err(err)),
+                                Ok(None) => None,
+                                Err(err) => Some(Err(err)),
                             }
                         }
-                        Ready(Some(Err(err))) => break Some(Err(err)),
-                        Ready(None) => break None,
+                        Ready(Some(Err(err))) => Some(Err(err)),
+                        Ready(None) => None,
                         Pending => {
                             *this.state = Some(state);
                             return Pending;
                         }
                     }
                 } else {
-                    break None;
+                    None
                 }
             })
         }

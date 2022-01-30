@@ -406,25 +406,25 @@ mod stateful_map {
         fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
             let mut this = self.project();
 
-            Poll::Ready(loop {
+            Poll::Ready({
                 if let Some(state) = this.state.take() {
                     match this.stream.as_mut().poll_next(cx) {
                         Ready(Some(in_item)) => {
                             if let Some((state, out_item)) = (this.f)(state, in_item) {
                                 *this.state = Some(state);
-                                break Some(out_item);
+                                Some(out_item)
                             } else {
-                                break None;
+                                None
                             }
                         }
-                        Ready(None) => break None,
+                        Ready(None) => None,
                         Pending => {
                             *this.state = Some(state);
                             return Pending;
                         }
                     }
                 } else {
-                    break None;
+                    None
                 }
             })
         }

@@ -56,8 +56,7 @@ where
             Box::new(move || {
                 let mid = func1();
                 let func2 = g.generate(mid);
-                let out = func2();
-                out
+                func2()
             })
         })
     }

@@ -44,8 +44,8 @@ pub(crate) fn scale_positive(value: usize, scale: f64) -> usize {
     cmp::max((value as f64 * scale).round() as usize, 1)
 }
 
-pub use config::*;
-mod config {
+pub use config_::*;
+mod config_ {
     use super::*;
 
     /// The determination strategy for the number of workers and buffer size.
@@ -135,9 +135,7 @@ mod config {
 
     impl From<Option<usize>> for NumWorkers {
         fn from(num_workers: Option<usize>) -> Self {
-            num_workers
-                .map(|value| Self::Fixed(value))
-                .unwrap_or(Self::Default)
+            num_workers.map(Self::Fixed).unwrap_or(Self::Default)
         }
     }
 
@@ -181,9 +179,7 @@ mod config {
 
     impl From<Option<usize>> for BufSize {
         fn from(value: Option<usize>) -> Self {
-            value
-                .map(|value| Self::Fixed(value))
-                .unwrap_or(Self::Default)
+            value.map(Self::Fixed).unwrap_or(Self::Default)
         }
     }
 

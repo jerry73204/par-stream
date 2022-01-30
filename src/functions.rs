@@ -220,15 +220,13 @@ mod par_unfold {
             let mut state = init.clone();
             let output_tx = output_tx.clone();
 
-            rt::spawn_blocking(move || loop {
-                if let Some((item, new_state)) = f(worker_index, state) {
+            rt::spawn_blocking(move || {
+                while let Some((item, new_state)) = f(worker_index, state) {
                     if output_tx.send(item).is_ok() {
                         state = new_state;
                     } else {
                         break;
                     }
-                } else {
-                    break;
                 }
             });
         });
@@ -275,7 +273,7 @@ mod sync {
         F: 'static + Fn(&S::Item) -> K + Send,
         K: 'static + Clone + Ord + Send,
     {
-        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
 
         let streams: Vec<_> = streams
             .into_iter()
@@ -414,7 +412,7 @@ mod try_sync {
         F: 'static + Fn(&T) -> K + Send,
         K: 'static + Clone + Ord + Send,
     {
-        let buf_size = buf_size.into().unwrap_or_else(|| num_cpus::get());
+        let buf_size = buf_size.into().unwrap_or_else(num_cpus::get);
 
         let streams: Vec<_> = streams
             .into_iter()

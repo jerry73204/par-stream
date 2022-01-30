@@ -399,15 +399,12 @@ where
         let mut stream = self.boxed();
         let (output_tx, output_rx) = utils::channel(buf_size);
 
-        rt::spawn_blocking(move || loop {
-            match rt::block_on(stream.next()) {
-                Some(input) => {
-                    let output = f(input);
-                    if output_tx.send(output).is_err() {
-                        break;
-                    }
+        rt::spawn_blocking(move || {
+            while let Some(input) = rt::block_on(stream.next()) {
+                let output = f(input);
+                if output_tx.send(output).is_err() {
+                    break;
                 }
-                None => break,
             }
         });
 
@@ -603,12 +600,10 @@ where
             let reduce_fn = reduce_fn.clone();
             async move {
                 let reducer_futures = (0..num_workers).map(move |_| {
-                    let mut reduce_fn = reduce_fn.clone();
+                    let reduce_fn = reduce_fn.clone();
                     let stream = stream.clone();
 
-                    rt::spawn(
-                        async move { stream.reduce(|fold, item| reduce_fn(fold, item)).await },
-                    )
+                    rt::spawn(async move { stream.reduce(reduce_fn).await })
                 });
 
                 future::join_all(reducer_futures).await
@@ -624,11 +619,9 @@ where
 
             let mut count = 0;
 
-            for value in values {
-                if let Some(value) = value {
-                    feedback_tx.send_async(value).await.map_err(|_| ()).unwrap();
-                    count += 1;
-                }
+            for value in values.into_iter().flatten() {
+                feedback_tx.send_async(value).await.map_err(|_| ()).unwrap();
+                count += 1;
             }
 
             let pairing_future = rt::spawn(async move {

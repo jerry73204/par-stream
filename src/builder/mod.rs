@@ -455,7 +455,7 @@ where
     St: 'static + Send + Stream,
     St::Item: 'static + Send,
     Fac: 'static + Send + FnFactory<St::Item, ()>,
-    Fac::Fn: 'static + Send + FnOnce() -> (),
+    Fac::Fn: 'static + Send + FnOnce(),
 {
     /// Runs parallel tasks on each stream item.
     pub async fn for_each<N>(self, num_workers: N)
@@ -640,7 +640,7 @@ where
     FutFac::Fut: 'static + Send + Future,
     <FutFac::Fut as Future>::Output: 'static + Send,
     FnFac: 'static + Send + Clone + FnFactory<<FutFac::Fut as Future>::Output, ()>,
-    FnFac::Fn: 'static + Send + FnOnce() -> (),
+    FnFac::Fn: 'static + Send + FnOnce(),
 {
     /// Runs parallel tasks on each stream item.
     pub async fn for_each<N>(self, num_workers: N)

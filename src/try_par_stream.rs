@@ -377,19 +377,14 @@ where
             let terminate_tx = terminate_tx.clone();
 
             rt::spawn_blocking(move || {
-                loop {
-                    match rt::block_on(stream.next()) {
-                        Some(func) => {
-                            let result = (move || {
-                                (func?)()?;
-                                Ok(())
-                            })();
-                            if let Err(err) = result {
-                                let _result = terminate_tx.send(()); // shutdown workers
-                                return Err(err); // return error
-                            }
-                        }
-                        None => break,
+                while let Some(func) = rt::block_on(stream.next()) {
+                    let result = (move || {
+                        (func?)()?;
+                        Ok(())
+                    })();
+                    if let Err(err) = result {
+                        let _result = terminate_tx.send(()); // shutdown workers
+                        return Err(err); // return error
                     }
                 }
 

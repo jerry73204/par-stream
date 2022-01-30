@@ -2,8 +2,8 @@ use crate::common::*;
 
 pub type BoxFutureFactory<'a, In, Out> = Box<dyn 'a + FnMut(In) -> BoxFuture<'static, Out> + Send>;
 
-pub use future_factory::*;
-mod future_factory {
+pub use future_factory_::*;
+mod future_factory_ {
     use super::*;
 
     pub trait FutureFactory<In>
