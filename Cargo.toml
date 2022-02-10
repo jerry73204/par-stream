@@ -19,7 +19,7 @@ no-default-features = true
 futures = "0.3.21"
 num_cpus = "1.13.1"
 async-std = { version = "1.10.0", features = ["unstable"], optional = true }
-tokio = { version = "1.16.1", features = ["sync", "macros"] }
+tokio = { version = "1.16.1", features = ["sync", "macros", "time"] }
 pin-project = "1.0.10"
 derivative = "2.2.0"
 by_address = "1.0.4"
