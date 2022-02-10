@@ -8,11 +8,10 @@ pub use future_factory::*;
 
 use crate::{
     common::*,
-    config::{NumWorkers, ParParams},
+    config::ParParams,
     index_stream::{IndexStreamExt as _, ReorderEnumerated},
-    rt,
-    stream::StreamExt as _,
-    utils,
+    par_stream::ParStreamExt as _,
+    rt, utils,
 };
 use flume::r#async::RecvStream;
 use tokio::sync::broadcast;
@@ -187,7 +186,7 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac.generate(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).spawned(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -223,7 +222,7 @@ where
         let stream = stream
             .map(move |item| fac.generate(item))
             .enumerate()
-            .shared();
+            .spawned(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -251,15 +250,18 @@ where
     Fac::Fut: 'static + Send + Future<Output = ()>,
 {
     /// Runs parallel tasks on each stream item.
-    pub async fn for_each<N>(self, num_workers: N)
+    pub async fn for_each<P>(self, params: P)
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let Self {
             mut fac, stream, ..
         } = self;
-        let stream = stream.map(move |item| fac.generate(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).spawned(buf_size);
 
         let worker_futures = (0..num_workers).map(move |_| {
             let stream = stream.clone();
@@ -282,11 +284,14 @@ where
     Error: 'static + Send,
 {
     /// Runs parallel tasks on each stream item.
-    pub async fn try_for_each<N>(self, num_workers: N) -> Result<(), Error>
+    pub async fn try_for_each<P>(self, params: P) -> Result<(), Error>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let Self {
             mut fac, stream, ..
         } = self;
@@ -296,7 +301,7 @@ where
                 let _ = terminate_rx.recv().await;
             })
             .map(move |item| fac.generate(item))
-            .shared();
+            .spawned(buf_size);
 
         let worker_futures = (0..num_workers).map(move |_| {
             let stream = stream.clone();
@@ -390,7 +395,7 @@ where
             buf_size,
         } = params.into();
 
-        let stream = stream.map(move |item| fac.generate(item)).shared();
+        let stream = stream.map(move |item| fac.generate(item)).spawned(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -428,7 +433,7 @@ where
         let stream = stream
             .map(move |item| fac.generate(item))
             .enumerate()
-            .shared();
+            .spawned(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -458,15 +463,18 @@ where
     Fac::Fn: 'static + Send + FnOnce(),
 {
     /// Runs parallel tasks on each stream item.
-    pub async fn for_each<N>(self, num_workers: N)
+    pub async fn for_each<P>(self, params: P)
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
         let Self {
             mut fac, stream, ..
         } = self;
-        let num_workers = num_workers.into().get();
-        let stream = stream.map(move |item| fac.generate(item)).shared();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
+        let stream = stream.map(move |item| fac.generate(item)).spawned(buf_size);
 
         let worker_futures = (0..num_workers).map(move |_| {
             let mut stream = stream.clone();
@@ -643,11 +651,11 @@ where
     FnFac::Fn: 'static + Send + FnOnce(),
 {
     /// Runs parallel tasks on each stream item.
-    pub async fn for_each<N>(self, num_workers: N)
+    pub async fn for_each<P>(self, params: P)
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
-        self.into_async_builder().for_each(num_workers).await;
+        self.into_async_builder().for_each(params).await;
     }
 }
 
@@ -673,7 +681,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{par_stream::ParStreamExt as _, utils::async_test};
+    use crate::utils::async_test;
 
     async_test! {
         async fn par_builder_blocking_test() {

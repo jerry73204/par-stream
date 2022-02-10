@@ -2,11 +2,10 @@ use crate::{
     broadcast::BroadcastBuilder,
     builder::ParBuilder,
     common::*,
-    config::{BufSize, NumWorkers, ParParams},
+    config::{BufSize, ParParams},
     index_stream::{IndexStreamExt as _, ReorderEnumerated},
     pull::PullBuilder,
     rt,
-    shared_stream::Shared,
     stream::StreamExt as _,
     tee::Tee,
     utils,
@@ -115,10 +114,10 @@ where
     /// use par_stream::prelude::*;
     ///
     /// let data = vec![1, 2, -3, 4, 5, -6, 7, 8];
-    /// stream::iter(data).par_batching(None, |_worker_index, mut stream| async move {
-    ///     while let Some(value) = stream.next().await {
+    /// stream::iter(data).par_batching(None, |_worker_index, rx| async move {
+    ///     while let Ok(value) = rx.recv_async().await {
     ///         if value > 0 {
-    ///             return Some((value, stream));
+    ///             return Some((value, rx));
     ///         }
     ///     }
     ///     None
@@ -127,8 +126,9 @@ where
     /// ```
     fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
-        F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
-        Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
+        Self: Sized,
+        F: 'static + Send + Clone + FnMut(usize, flume::Receiver<Self::Item>) -> Fut,
+        Fut: 'static + Future<Output = Option<(T, flume::Receiver<Self::Item>)>> + Send,
         T: 'static + Send,
         P: Into<ParParams>;
 
@@ -346,29 +346,29 @@ where
     /// assert_eq!(sum, Some((1 + 1000) * 1000 / 2));
     /// # })
     /// ```
-    fn par_reduce<N, F, Fut>(
+    fn par_reduce<P, F, Fut>(
         self,
-        num_workers: N,
+        params: P,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send;
 
     /// Runs an asynchronous task on parallel workers.
-    fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        N: Into<NumWorkers>;
+        P: Into<ParParams>;
 
     /// Runs a blocking task on parallel workers.
-    fn par_for_each_blocking<N, F, Func>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        N: Into<NumWorkers>;
+        P: Into<ParParams>;
 }
 
 impl<S> ParStreamExt for S
@@ -417,8 +417,8 @@ where
 
     fn par_batching<T, P, F, Fut>(self, params: P, f: F) -> RecvStream<'static, T>
     where
-        F: 'static + Send + Clone + FnMut(usize, Shared<Self>) -> Fut,
-        Fut: 'static + Future<Output = Option<(T, Shared<Self>)>> + Send,
+        F: 'static + Send + Clone + FnMut(usize, flume::Receiver<Self::Item>) -> Fut,
+        Fut: 'static + Future<Output = Option<(T, flume::Receiver<Self::Item>)>> + Send,
         T: 'static + Send,
         P: Into<ParParams>,
     {
@@ -427,20 +427,24 @@ where
             buf_size,
         } = params.into();
 
+        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
-        let stream = self.shared();
+
+        rt::spawn(async move {
+            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
+        });
 
         (0..num_workers).for_each(move |worker_index| {
             let output_tx = output_tx.clone();
             let f = f.clone();
-            let stream = stream.clone();
+            let input_rx = input_rx.clone();
 
             rt::spawn(async move {
                 let _ = stream::repeat(())
-                    .stateful_then((stream, f), |(stream, mut f), ()| async move {
-                        f(worker_index, stream)
+                    .stateful_then((input_rx, f), |(input_rx, mut f), ()| async move {
+                        f(worker_index, input_rx)
                             .await
-                            .map(move |(item, stream)| ((stream, f), item))
+                            .map(move |(item, input_rx)| ((input_rx, f), item))
                     })
                     .map(Ok)
                     .forward(output_tx.into_sink())
@@ -513,7 +517,7 @@ where
                 let fut = f(item);
                 Some((f, fut))
             })
-            .shared();
+            .spawned(buf_size);
 
         (0..num_workers).for_each(move |_| {
             let stream = stream.clone();
@@ -561,7 +565,7 @@ where
                 let func = f(item);
                 Some((f, func))
             })
-            .shared();
+            .spawned(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
 
         (0..num_workers).for_each(move |_| {
@@ -582,18 +586,21 @@ where
         output_rx.into_stream()
     }
 
-    fn par_reduce<N, F, Fut>(
+    fn par_reduce<P, F, Fut>(
         self,
-        num_workers: N,
+        params: P,
         reduce_fn: F,
     ) -> BoxFuture<'static, Option<Self::Item>>
     where
-        N: Into<NumWorkers>,
         F: 'static + FnMut(Self::Item, Self::Item) -> Fut + Send + Clone,
         Fut: 'static + Future<Output = Self::Item> + Send,
+        P: Into<ParParams>,
     {
-        let num_workers = num_workers.into().get();
-        let stream = self.shared();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
+        let stream = self.spawned(buf_size);
 
         // phase 1
         let phase_1_future = {
@@ -667,19 +674,22 @@ where
         phase_2_future.boxed()
     }
 
-    fn par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Fut + Send,
         Fut: 'static + Future<Output = ()> + Send,
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let stream = self
             .stateful_map(f, |mut f, item| {
                 let fut = f(item);
                 Some((f, fut))
             })
-            .shared();
+            .spawned(buf_size);
 
         let worker_futures =
             (0..num_workers).map(move |_| rt::spawn(stream.clone().for_each(|fut| fut)));
@@ -687,19 +697,22 @@ where
         future::join_all(worker_futures).map(|_| ()).boxed()
     }
 
-    fn par_for_each_blocking<N, F, Func>(self, num_workers: N, f: F) -> BoxFuture<'static, ()>
+    fn par_for_each_blocking<P, F, Func>(self, params: P, f: F) -> BoxFuture<'static, ()>
     where
         F: 'static + FnMut(Self::Item) -> Func + Send,
         Func: 'static + FnOnce() + Send,
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let stream = self
             .stateful_map(f, |mut f, item| {
                 let func = f(item);
                 Some((f, func))
             })
-            .shared();
+            .spawned(buf_size);
 
         let worker_futs: Vec<_> = (0..num_workers)
             .map(move |_| {
@@ -732,14 +745,14 @@ mod tests {
             let data: Vec<u32> = (0..10000).map(|_| rng.gen_range(0..10)).collect();
 
             let sums: Vec<_> = stream::iter(data)
-                .par_batching(None, |_, mut stream| async move {
-                    let mut sum = stream.next().await?;
+                .par_batching(None, |_, rx| async move {
+                    let mut sum = rx.recv_async().await.ok()?;
 
-                    while let Some(val) = stream.next().await {
+                    while let Ok(val) = rx.recv_async().await {
                         sum += val;
 
                         if sum >= 1000 {
-                            return Some((sum, stream));
+                            return Some((sum, rx));
                         }
                     }
 

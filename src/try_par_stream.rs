@@ -1,9 +1,8 @@
 use crate::{
     common::*,
-    config::{BufSize, NumWorkers, ParParams},
+    config::{BufSize, ParParams},
     par_stream::ParStreamExt as _,
     rt,
-    shared_stream::Shared,
     stream::StreamExt as _,
     try_index_stream::TryIndexStreamExt as _,
     try_stream::{TakeUntilError, TryStreamExt as _},
@@ -36,10 +35,21 @@ where
     /// Fallible stream combinator for [par_batching](crate::ParStreamExt::par_batching).
     fn try_par_batching<U, P, F, Fut>(self, params: P, f: F) -> TryParBatching<U, Self::Error>
     where
-        F: 'static + Clone + Send + FnMut(usize, Shared<Self>) -> Fut,
-        Fut: 'static + Future<Output = Result<Option<(U, Shared<Self>)>, Self::Error>> + Send,
-        U: 'static + Send,
-        P: Into<ParParams>;
+        Self: Sized,
+        P: Into<ParParams>,
+        F: 'static
+            + Clone
+            + Send
+            + FnMut(usize, flume::Receiver<Result<Self::Ok, Self::Error>>) -> Fut,
+        Fut: 'static
+            + Future<
+                Output = Result<
+                    Option<(U, flume::Receiver<Result<Self::Ok, Self::Error>>)>,
+                    Self::Error,
+                >,
+            >
+            + Send,
+        U: 'static + Send;
 
     /// Fallible stream combinator for [par_then](crate::ParStreamExt::par_then).
     fn try_par_then<U, P, F, Fut>(
@@ -90,24 +100,24 @@ where
         Func: 'static + FnOnce() -> Result<U, Self::Error> + Send;
 
     /// Fallible stream combinator for [par_for_each](crate::par_stream::ParStreamExt::par_for_each).
-    fn try_par_for_each<N, F, Fut>(
+    fn try_par_for_each<P, F, Fut>(
         self,
-        num_workers: N,
+        params: P,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Ok) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), Self::Error>> + Send;
 
     /// Fallible stream combinator for [par_for_each_blocking](crate::par_stream::ParStreamExt::par_for_each_blocking).
-    fn try_par_for_each_blocking<N, F, Func>(
+    fn try_par_for_each_blocking<P, F, Func>(
         self,
-        num_workers: N,
+        params: P,
         f: F,
     ) -> BoxFuture<'static, Result<(), Self::Error>>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
         F: 'static + FnMut(Self::Ok) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), Self::Error> + Send;
 }
@@ -157,20 +167,34 @@ where
     where
         P: Into<ParParams>,
         U: 'static + Send,
-        F: 'static + Clone + Send + FnMut(usize, Shared<Self>) -> Fut,
-        Fut: 'static + Future<Output = Result<Option<(U, Shared<Self>)>, E>> + Send,
+        F: 'static
+            + Clone
+            + Send
+            + FnMut(usize, flume::Receiver<Result<Self::Ok, Self::Error>>) -> Fut,
+        Fut: 'static
+            + Future<
+                Output = Result<
+                    Option<(U, flume::Receiver<Result<Self::Ok, Self::Error>>)>,
+                    Self::Error,
+                >,
+            >
+            + Send,
     {
         let ParParams {
             num_workers,
             buf_size,
         } = params.into();
 
+        let (input_tx, input_rx) = utils::channel(buf_size);
         let (output_tx, output_rx) = utils::channel(buf_size);
         let (terminate_tx, _) = broadcast::channel(1);
-        let input_stream = self.shared();
+
+        rt::spawn(async move {
+            let _ = self.map(Ok).forward(input_tx.into_sink()).await;
+        });
 
         (0..num_workers).for_each(move |worker_index| {
-            let input_stream = input_stream.clone();
+            let input_rx = input_rx.clone();
             let output_tx = output_tx.clone();
             let mut terminate_rx = terminate_tx.subscribe();
             let terminate_tx = terminate_tx.clone();
@@ -182,18 +206,18 @@ where
                         let _ = terminate_rx.recv().await;
                     })
                     .stateful_then(
-                        Some((f, terminate_tx, input_stream)),
+                        Some((f, terminate_tx, input_rx)),
                         move |state, ()| async move {
-                            let (mut f, terminate_tx, input_stream) = state.unwrap();
-                            let result = f(worker_index, input_stream).await;
+                            let (mut f, terminate_tx, input_rx) = state.unwrap();
+                            let result = f(worker_index, input_rx).await;
 
                             if result.is_err() {
                                 let _ = terminate_tx.send(());
                             }
 
                             match result {
-                                Ok(Some((item, input_stream))) => {
-                                    Some((Some((f, terminate_tx, input_stream)), Ok(item)))
+                                Ok(Some((item, input_rx))) => {
+                                    Some((Some((f, terminate_tx, input_rx)), Ok(item)))
                                 }
                                 Ok(None) => None,
                                 Err(err) => Some((None, Err(err))),
@@ -302,13 +326,16 @@ where
         .boxed()
     }
 
-    fn try_par_for_each<N, F, Fut>(self, num_workers: N, f: F) -> BoxFuture<'static, Result<(), E>>
+    fn try_par_for_each<P, F, Fut>(self, params: P, f: F) -> BoxFuture<'static, Result<(), E>>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
         F: 'static + FnMut(T) -> Fut + Send,
         Fut: 'static + Future<Output = Result<(), E>> + Send,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
         let input_stream = self
             .take_until_error()
@@ -319,7 +346,7 @@ where
                 let fut = item.map(|item| f(item));
                 Some((f, fut))
             })
-            .shared();
+            .spawned(buf_size);
 
         let worker_futures = (0..num_workers).map(move |_| {
             let terminate_tx = terminate_tx.clone();
@@ -349,17 +376,20 @@ where
             .boxed()
     }
 
-    fn try_par_for_each_blocking<N, F, Func>(
+    fn try_par_for_each_blocking<P, F, Func>(
         self,
-        num_workers: N,
+        params: P,
         f: F,
     ) -> BoxFuture<'static, Result<(), E>>
     where
-        N: Into<NumWorkers>,
+        P: Into<ParParams>,
         F: 'static + FnMut(T) -> Func + Send,
         Func: 'static + FnOnce() -> Result<(), E> + Send,
     {
-        let num_workers = num_workers.into().get();
+        let ParParams {
+            num_workers,
+            buf_size,
+        } = params.into();
         let (terminate_tx, mut terminate_rx) = broadcast::channel(1);
         let stream = self
             .take_until_error()
@@ -370,7 +400,7 @@ where
                 let fut = item.map(|item| f(item));
                 Some((f, fut))
             })
-            .shared();
+            .spawned(buf_size);
 
         let worker_futures = (0..num_workers).map(|_| {
             let mut stream = stream.clone();
@@ -423,18 +453,18 @@ mod tests {
                 let mut stream = stream::repeat(1)
                     .take(10)
                     .map(Result::<_, ()>::Ok)
-                    .try_par_batching(None, |_, mut stream| async move {
+                    .try_par_batching(None, |_, rx| async move {
                         let mut sum = 0;
 
-                        while let Some(val) = stream.next().await {
+                        while let Ok(val) = rx.recv_async().await {
                             sum += val?;
                             if sum >= 3 {
-                                return Ok(Some((sum, stream)));
+                                return Ok(Some((sum, rx)));
                             }
                         }
 
                         if sum > 0 {
-                            return Ok(Some((sum, stream)));
+                            return Ok(Some((sum, rx)));
                         }
 
                         Ok(None)
@@ -452,13 +482,13 @@ mod tests {
             {
                 let mut stream = stream::repeat(1).take(10).map(Ok).try_par_batching(
                     None,
-                    |_, mut stream| async move {
+                    |_, rx| async move {
                         let mut sum = 0;
 
-                        while let Some(val) = stream.next().await {
+                        while let Ok(val) = rx.recv_async().await {
                             sum += val?;
                             if sum >= 3 {
-                                return Ok(Some((sum, stream)));
+                                return Ok(Some((sum, rx)));
                             }
                         }
 
