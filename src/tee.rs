@@ -116,16 +116,6 @@ impl<T> Stream for Tee<T> {
             }
         }
 
-        match Pin::new(&mut self.stream).poll_next(cx) {
-            Ready(Some(output)) => {
-                cx.waker().clone().wake();
-                Ready(Some(output))
-            }
-            Ready(None) => Ready(None),
-            Pending => {
-                cx.waker().clone().wake();
-                Pending
-            }
-        }
+        Pin::new(&mut self.stream).poll_next(cx)
     }
 }
