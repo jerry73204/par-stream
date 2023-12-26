@@ -1,3 +1,4 @@
+use clap::Parser;
 use futures::{
     future,
     stream::{self, StreamExt as _},
@@ -5,22 +6,21 @@ use futures::{
 use par_stream::{rt, Shared};
 use rand::{prelude::*, rngs::OsRng};
 use std::time::Duration;
-use structopt::StructOpt;
 
-#[derive(StructOpt)]
-struct Opts {
+#[derive(Parser)]
+struct Cli {
     pub num_jobs: usize,
     pub num_workers: usize,
     pub in_buf_size: usize,
     pub out_buf_size: usize,
     pub pow: u32,
-    #[structopt(long)]
+    #[arg(long)]
     pub spawn: bool,
 }
 
 fn main() {
     par_stream::rt::block_on_executor(async move {
-        let opts = Opts::from_args();
+        let opts = Cli::parse();
 
         let elapsed_notifier = shared_stream_by_notifier_test(&opts).await;
         println!("elapsed for notifier\t{:?}ms", elapsed_notifier.as_millis());
@@ -30,7 +30,7 @@ fn main() {
     });
 }
 
-async fn shared_stream_by_notifier_test(opts: &Opts) -> Duration {
+async fn shared_stream_by_notifier_test(opts: &Cli) -> Duration {
     let pow = opts.pow;
     let spawn = opts.spawn;
 
@@ -66,7 +66,7 @@ async fn shared_stream_by_notifier_test(opts: &Opts) -> Duration {
     instant.elapsed()
 }
 
-async fn shared_stream_by_channel_test(opts: &Opts) -> Duration {
+async fn shared_stream_by_channel_test(opts: &Cli) -> Duration {
     let pow = opts.pow;
     let spawn = opts.spawn;
 

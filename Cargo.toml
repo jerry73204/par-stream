@@ -35,7 +35,7 @@ rand = "0.8.4"
 async-std = { version = "1.10.0", features = ["unstable", "attributes"] }
 itertools = "0.12"
 concurrent-slice = "0.1.0"
-structopt = "0.3.26"
+clap = { version = "4", features = ["derive"] }
 
 [features]
 runtime-async-std = ["async-std"]
