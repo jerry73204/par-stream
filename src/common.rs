@@ -1,5 +1,5 @@
 pub use by_address::ByAddress;
-pub use derivative::Derivative;
+pub use educe::Educe;
 pub use futures::{
     future::{self, BoxFuture, Either, FutureExt as _},
     join, ready,

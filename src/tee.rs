@@ -6,17 +6,17 @@ use tokio::sync::Mutex;
 ///
 /// Cloning this stream allocates a new channel for the new receiver, so that
 /// future copies of stream items are forwarded to the channel.
-#[derive(Derivative)]
-#[derivative(Debug)]
+#[derive(Educe)]
+#[educe(Debug)]
 pub struct Tee<T>
 where
     T: 'static,
 {
     pub(super) buf_size: Option<usize>,
-    #[derivative(Debug = "ignore")]
+    #[educe(Debug(ignore))]
     pub(super) future: Arc<Mutex<Option<rt::JoinHandle<()>>>>,
     pub(super) sender_set: Weak<DashSet<ByAddress<Arc<flume::Sender<T>>>>>,
-    #[derivative(Debug = "ignore")]
+    #[educe(Debug(ignore))]
     pub(super) stream: flume::r#async::RecvStream<'static, T>,
 }
 

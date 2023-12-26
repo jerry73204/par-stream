@@ -78,8 +78,8 @@ mod try_reorder_enumerated {
     use super::*;
 
     /// Stream for the [try_reorder_enumerated()](TryIndexStreamExt::try_reorder_enumerated) method.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
+    #[derive(Educe)]
+    #[educe(Debug(bound(T: Debug, E: Debug)))]
     #[pin_project]
     pub struct TryReorderEnumerated<S, T, E>
     where
@@ -91,7 +91,7 @@ mod try_reorder_enumerated {
         pub(super) buffer: HashMap<usize, T>,
         pub(super) _phantom: PhantomData<E>,
         #[pin]
-        #[derivative(Debug = "ignore")]
+        #[educe(Debug(ignore))]
         pub(super) stream: S,
     }
 

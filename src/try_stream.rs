@@ -278,8 +278,8 @@ mod try_enumerate {
     use super::*;
 
     /// Stream for the [try_enumerate()](crate::try_stream::TryStreamExt::try_enumerate) method.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
+    #[derive(Educe)]
+    #[educe(Debug)]
     #[pin_project]
     pub struct TryEnumerate<S, T, E>
     where
@@ -289,7 +289,7 @@ mod try_enumerate {
         pub(super) fused: bool,
         pub(super) _phantom: PhantomData<(T, E)>,
         #[pin]
-        #[derivative(Debug = "ignore")]
+        #[educe(Debug(ignore))]
         pub(super) stream: S,
     }
 
