@@ -243,12 +243,12 @@ mod sync {
     use super::*;
     use std::{cmp::Reverse, collections::BinaryHeap};
 
-    #[derive(Derivative)]
-    #[derivative(PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Educe)]
+    #[educe(PartialEq, Eq, PartialOrd, Ord)]
     struct KV<K, V> {
         pub key: K,
         pub index: usize,
-        #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
+        #[educe(PartialEq(ignore), PartialOrd(ignore))]
         pub value: V,
     }
 
@@ -378,12 +378,12 @@ mod try_sync {
     use super::*;
     use std::{cmp::Reverse, collections::BinaryHeap};
 
-    #[derive(Derivative)]
-    #[derivative(PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Educe)]
+    #[educe(PartialEq, Eq, PartialOrd, Ord)]
     struct KV<K, V> {
         pub key: K,
         pub index: usize,
-        #[derivative(PartialEq = "ignore", PartialOrd = "ignore", Ord = "ignore")]
+        #[educe(PartialEq(ignore), PartialOrd(ignore))]
         pub value: V,
     }
 

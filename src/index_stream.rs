@@ -70,8 +70,8 @@ mod reorder_enumerated {
     use super::*;
 
     /// Stream for the [reorder_enumerated](IndexStreamExt::reorder_enumerated) method.
-    #[derive(Derivative)]
-    #[derivative(Debug)]
+    #[derive(Educe)]
+    #[educe(Debug(bound(T: Debug)))]
     #[pin_project]
     pub struct ReorderEnumerated<S, T>
     where
@@ -79,6 +79,7 @@ mod reorder_enumerated {
     {
         pub(super) commit: usize,
         pub(super) buffer: HashMap<usize, T>,
+        #[educe(Debug(ignore))]
         #[pin]
         pub(super) stream: S,
     }
